@@ -44,10 +44,14 @@ def run_backtest(
     top_n: int,
     min_dollar_volume: float,
     fx_rates: dict[str, float],
+    universe: list[str] | None = None,
 ) -> dict[str, float]:
     settings = load_settings()
+    # 默认用 settings.universe，但调用方可以显式传入不同的标的池（比如探索性
+    # 回测里根本不在正式 universe 里的标的）——否则 self.universe 和 bars 的
+    # 交集会是空集，策略永远选不出任何标的却不报错，非常隐蔽。
     strat = MomentumRotation(
-        universe=settings.universe,
+        universe=universe if universe is not None else settings.universe,
         lookback_days=lookback_days,
         top_n=top_n,
         min_dollar_volume=min_dollar_volume,
@@ -71,6 +75,12 @@ def run_backtest(
             weights.loc[me:, list(picks)] = 1.0 / len(picks)
             changes += len(picks - prev)
             prev = picks
+
+    if not prev:
+        raise ValueError(
+            "策略在整个回测区间从未选出任何标的——通常是 universe 跟 bars 里"
+            "实际包含的标的没有交集，检查 run_backtest 的 universe 参数是否传对"
+        )
 
     pf = vbt.Portfolio.from_orders(
         close=close,

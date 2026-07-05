@@ -38,7 +38,8 @@ def main() -> None:
 
     mp = settings.strategies["momentum_rotation"]
     m = momentum_run_backtest(
-        bars, int(mp["lookback_days"]), int(mp["top_n"]), float(mp["min_dollar_volume"]), {}
+        bars, int(mp["lookback_days"]), int(mp["top_n"]), float(mp["min_dollar_volume"]), {},
+        universe=HOLDINGS,
     )
 
     rp = settings.strategies["rsi_reversion"]
