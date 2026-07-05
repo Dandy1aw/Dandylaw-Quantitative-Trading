@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-research = ["vectorbt>=0.26,<0.27"]
+# vectorbt 0.26 内部使用了新版 plotly 已移除的 'heatmapgl' 模板属性，锁定兼容旧版
+research = ["vectorbt>=0.26,<0.27", "plotly<5.15"]
 
 [dependency-groups]
 dev = [
