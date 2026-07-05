@@ -30,3 +30,18 @@ def test_fetch_daily_bars_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(out.index.get_level_values("ticker")) == {"SPY", "QQQ"}
     assert str(out.index.get_level_values("ts").tz) == "UTC"
     assert len(out) == 6
+
+
+def test_fetch_intraday_bars_handles_empty_single_ticker_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """单标的请求时，若 yfinance 对该时段没有任何数据（完全空表，无列），不能崩溃。"""
+    import quant_signal.datafeed.yf_source as m
+
+    def fake_empty_download(*args: object, **kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame()
+
+    monkeypatch.setattr(m.yf, "download", fake_empty_download)
+    out = YFinanceSource().fetch_intraday_bars(["000660.KS"], lookback_days=1)
+    assert out.empty
+    assert list(out.columns) == ["open", "high", "low", "close", "volume"]

@@ -16,7 +16,10 @@ def _normalize(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
             if t not in raw.columns.get_level_values(0):
                 continue
             sub = pd.DataFrame(raw[t]).copy()
-        sub = sub.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
+        sub = sub.rename(columns=str.lower)
+        if not {"open", "high", "low", "close", "volume"} <= set(sub.columns):
+            continue  # yfinance 对该标的/时段没有返回任何数据
+        sub = sub[["open", "high", "low", "close", "volume"]]
         sub = sub.dropna(how="all")
         idx = pd.to_datetime(sub.index)
         idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
