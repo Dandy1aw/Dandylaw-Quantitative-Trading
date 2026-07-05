@@ -31,6 +31,30 @@ momentum_group_top_n:            # 动量轮动按币种分组独立排名的名
   HKD: 1                          # 港股组名额
   KRW: 1                          # 韩股组名额
 
+momentum_default_group_top_n:    # 美股默认组内部再按资产类型独立排名的名额
+  ETF: 2
+  STOCK: 3
+
+asset_type:                      # ticker -> ETF|STOCK，仅用于美股默认组内部再分名额
+  SPY: ETF
+  QQQ: ETF
+  IWM: ETF
+  TLT: ETF
+  GLD: ETF
+  DRAM: ETF
+  RAM: ETF
+  SMH: ETF
+  QQQM: ETF
+  SNXX: ETF                        # Tradr 2X Long SNDK Daily ETF，虽跟踪个股但本身是ETF产品
+  MU: STOCK
+  MRVL: STOCK
+  SNDK: STOCK
+  NVDA: STOCK
+  AMD: STOCK
+  LLY: STOCK
+  INTC: STOCK
+  TSM: STOCK
+
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA
   - TSLA

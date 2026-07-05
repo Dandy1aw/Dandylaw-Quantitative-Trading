@@ -114,6 +114,36 @@ def test_empty_group_top_n_preserves_original_global_ranking(daily_bars: pd.Data
     assert all("美股组" in s.reason for s in signals)
 
 
+def test_default_group_splits_etf_vs_stock(daily_bars: pd.DataFrame) -> None:
+    """默认组内 ETF 和个股各自独立排名取各自名额，不互相挤占。"""
+    strat = MomentumRotation(
+        universe=UNIVERSE,
+        top_n=2,   # 未配置 default_group_top_n 时的兜底值，本例不应被使用
+        min_dollar_volume=50_000_000,
+        asset_type={"AAA": "ETF", "BBB": "ETF", "CCC": "STOCK", "DDD": "STOCK"},
+        default_group_top_n={"ETF": 1, "STOCK": 1},
+    )
+    signals = strat.generate(daily_bars)
+    tickers = {s.ticker for s in signals}
+    # AAA(动量最高的ETF) 和 CCC(个股里流动性合格、动量最高的) 各占一个名额
+    # DDD 动量最高但被流动性过滤，BBB 是ETF组里动量较低的，应该都不入选
+    assert tickers == {"AAA", "CCC"}
+    aaa_signal = next(s for s in signals if s.ticker == "AAA")
+    ccc_signal = next(s for s in signals if s.ticker == "CCC")
+    assert "ETF组" in aaa_signal.reason
+    assert "个股组" in ccc_signal.reason
+
+
+def test_no_default_group_top_n_preserves_original_behavior(daily_bars: pd.DataFrame) -> None:
+    """不传 default_group_top_n 时，即使传了 asset_type 也不影响原有全局排名。"""
+    strat = MomentumRotation(
+        universe=UNIVERSE, top_n=2, min_dollar_volume=50_000_000,
+        asset_type={"AAA": "ETF", "BBB": "STOCK", "CCC": "STOCK", "DDD": "STOCK"},
+    )
+    signals = strat.generate(daily_bars)
+    assert {s.ticker for s in signals} == {"AAA", "BBB"}
+
+
 def test_dollar_volume_filter_converts_foreign_currency() -> None:
     """非美元计价标的的成交额过滤必须换算成美元，否则原始数字会误判流动性达标。"""
     ts = pd.date_range("2025-08-01", periods=65, freq="B", tz="UTC")

@@ -44,6 +44,10 @@ def env(tmp_path: Path, daily_bars: pd.DataFrame):  # type: ignore[no-untyped-de
             "universe": ["AAA", "BBB", "CCC", "DDD"],
             "watchlist": ["AAA"],
             "strategies": strategies,
+            # 测试用的合成标的不在真实的 asset_type/分组配置里，重置为空
+            # 避免意外继承生产配置里的美股ETF/个股细分名额
+            "asset_type": {},
+            "momentum_default_group_top_n": {},
         }
     )
     store = BarStore(tmp_path / "b.duckdb")

@@ -78,6 +78,8 @@ def main() -> None:
             ticker_currency=settings.international_tickers,
             fx_rates=fx_rates,
             group_top_n=settings.momentum_group_top_n,
+            asset_type=settings.asset_type,
+            default_group_top_n=settings.momentum_default_group_top_n,
         ),
         Breakout20d(
             settings.watchlist, int(bp["high_lookback_days"]), float(bp["volume_multiplier"])

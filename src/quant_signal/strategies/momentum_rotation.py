@@ -23,6 +23,8 @@ class MomentumRotation(Strategy):
         ticker_currency: dict[str, str] | None = None,
         fx_rates: dict[str, float] | None = None,
         group_top_n: dict[str, int] | None = None,
+        asset_type: dict[str, str] | None = None,
+        default_group_top_n: dict[str, int] | None = None,
     ) -> None:
         self.universe = universe
         self.lookback_days = lookback_days
@@ -34,6 +36,11 @@ class MomentumRotation(Strategy):
         # 按币种分组的独立名额（如 {"HKD": 1, "KRW": 1}）；未配置的币种
         # （含所有 USD 标的）归入默认组，用 top_n。空字典 = 全局统一排名。
         self.group_top_n = group_top_n or {}
+        # 默认组(USD)内部再按资产类型细分：ticker -> "ETF"|"STOCK"，
+        # default_group_top_n 如 {"ETF": 2, "STOCK": 3}。不传就不细分，
+        # 默认组仍是整体用 top_n（向后兼容原有行为）。
+        self.asset_type = asset_type or {}
+        self.default_group_top_n = default_group_top_n or {}
 
     def generate(self, bars: pd.DataFrame) -> list[Signal]:
         close = bars["close"].unstack("ticker").sort_index()
@@ -61,19 +68,34 @@ class MomentumRotation(Strategy):
 
         eligible = {t: m for t, m in momentum.items() if dollar_vol_usd.get(t, 0.0) >= self.min_dollar_volume}
 
-        # 按币种分组，组内独立排名取各自名额——组之间互不挤占彼此的名额
+        # 按币种分组，组内独立排名取各自名额——组之间互不挤占彼此的名额。
+        # 默认组(USD)若配置了 default_group_top_n，内部再按资产类型细分。
         groups: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        labels: dict[str, str] = {}
         for t, m in eligible.items():
             ccy = self.ticker_currency.get(t)
-            key = ccy if ccy in self.group_top_n else "_default"
+            if ccy in self.group_top_n:
+                key = ccy
+                labels[key] = _GROUP_LABELS.get(ccy, ccy)
+            elif self.default_group_top_n:
+                atype = self.asset_type.get(t, "STOCK")
+                key = f"_default:{atype}"
+                labels[key] = "美股ETF组" if atype == "ETF" else "美股个股组"
+            else:
+                key = "_default"
+                labels[key] = _DEFAULT_GROUP_LABEL
             groups[key].append((t, m))
 
         selected: list[tuple[str, float, str]] = []
         for key, items in groups.items():
-            n = self.group_top_n[key] if key != "_default" else self.top_n
-            label = _GROUP_LABELS.get(key, _DEFAULT_GROUP_LABEL)
+            if key in self.group_top_n:
+                n = self.group_top_n[key]
+            elif key.startswith("_default:"):
+                n = self.default_group_top_n.get(key.split(":", 1)[1], 0)
+            else:
+                n = self.top_n
             top_in_group = sorted(items, key=lambda kv: kv[1], reverse=True)[:n]
-            selected += [(t, m, label) for t, m in top_in_group]
+            selected += [(t, m, labels[key]) for t, m in top_in_group]
 
         selected.sort(key=lambda x: x[1], reverse=True)  # 仅用于展示排名，不影响入选
 

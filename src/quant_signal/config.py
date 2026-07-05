@@ -32,6 +32,8 @@ class Settings(BaseModel):
     watchlist: list[str]
     strategies: dict[str, dict[str, float | int]]
     momentum_group_top_n: dict[str, int] = {}   # 币种 -> 独立名额，如 {"HKD": 1, "KRW": 1}
+    momentum_default_group_top_n: dict[str, int] = {}   # 默认组内 ETF/STOCK 各自名额
+    asset_type: dict[str, str] = {}   # ticker -> "ETF"|"STOCK"，仅用于默认组内部再分
     international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
