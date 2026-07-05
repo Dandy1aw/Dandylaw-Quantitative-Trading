@@ -57,6 +57,13 @@ class BarStore:
         return flat.set_index(["ticker", "ts"])
 
     def write_daily_bars(self, df: pd.DataFrame, source: str) -> int:
+        if not df.empty:
+            # 不同数据源日线的时刻分量不一致（Alpaca 带具体时刻，yfinance 为午夜），
+            # 归一化为午夜，确保同一交易日跨数据源能正确对齐/去重。
+            tickers = df.index.get_level_values("ticker")
+            ts = pd.DatetimeIndex(df.index.get_level_values("ts")).normalize()
+            df = df.copy()
+            df.index = pd.MultiIndex.from_arrays([tickers, ts], names=["ticker", "ts"])
         return self._write("bars_1d", df, source)
 
     def read_daily_bars(

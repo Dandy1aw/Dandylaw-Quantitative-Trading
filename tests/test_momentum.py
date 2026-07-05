@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from quant_signal.strategies.base import Direction
@@ -40,3 +41,38 @@ def test_no_lookahead_truncation(daily_bars: pd.DataFrame) -> None:
     reused = make()
     reused.generate(daily_bars)          # 先喂全量（含"未来"10 天）
     assert reused.generate(upto_90) == make().generate(upto_90)
+
+
+def test_dollar_volume_filter_converts_foreign_currency() -> None:
+    """非美元计价标的的成交额过滤必须换算成美元，否则原始数字会误判流动性达标。"""
+    ts = pd.date_range("2025-08-01", periods=65, freq="B", tz="UTC")
+    n = len(ts)
+    aaa_close = 100.0 * np.cumprod(np.full(n, 1.008))
+    aaa = pd.DataFrame(
+        {"open": aaa_close, "high": aaa_close, "low": aaa_close, "close": aaa_close, "volume": 5_000_000},
+        index=pd.MultiIndex.from_product([["AAA"], ts], names=["ticker", "ts"]),
+    )
+    krt_close = 500_000.0 * np.cumprod(np.full(n, 1.01))  # KRW 计价，动量比 AAA 更强
+    krt = pd.DataFrame(
+        {"open": krt_close, "high": krt_close, "low": krt_close, "close": krt_close, "volume": 200},
+        index=pd.MultiIndex.from_product([["KRT"], ts], names=["ticker", "ts"]),
+    )
+    bars = pd.concat([aaa, krt]).sort_index()
+
+    strat_no_fx = MomentumRotation(
+        universe=["AAA", "KRT"], lookback_days=60, top_n=2, min_dollar_volume=50_000_000
+    )
+    assert "KRT" in {s.ticker for s in strat_no_fx.generate(bars)}  # 不换算时被原始KRW数字误判达标
+
+    strat_with_fx = MomentumRotation(
+        universe=["AAA", "KRT"],
+        lookback_days=60,
+        top_n=2,
+        min_dollar_volume=50_000_000,
+        ticker_currency={"KRT": "KRW"},
+        fx_rates={"KRW": 1300.0},
+    )
+    signals = strat_with_fx.generate(bars)
+    tickers = {s.ticker for s in signals}
+    assert "KRT" not in tickers   # 换算成美元后流动性不足，正确剔除
+    assert "AAA" in tickers

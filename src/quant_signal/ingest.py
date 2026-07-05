@@ -5,9 +5,10 @@ from datetime import date, datetime, timedelta, timezone
 
 import structlog
 
-from quant_signal.config import load_settings
+from quant_signal.config import Settings, load_settings
 from quant_signal.datafeed.base import DataSource, get_source
 from quant_signal.datafeed.store import BarStore
+from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.logging_setup import setup_logging
 
 log = structlog.get_logger()
@@ -23,6 +24,20 @@ def ingest_daily(
         df, source=type(source).__name__.replace("Source", "").lower()
     )
     log.info("ingest_daily.done", tickers=len(tickers), rows=n)
+    return n
+
+
+def ingest_daily_split(
+    store: BarStore, settings: Settings, tickers: list[str], days: int = 730
+) -> int:
+    """按 settings.international_tickers 把标的分流：国际标的固定走 yfinance，其余走配置的数据源。"""
+    intl = [t for t in tickers if t in settings.international_tickers]
+    primary = [t for t in tickers if t not in settings.international_tickers]
+    n = 0
+    if primary:
+        n += ingest_daily(store, get_source(settings), primary, days=days)
+    if intl:
+        n += ingest_daily(store, YFinanceSource(), intl, days=days)
     return n
 
 
@@ -59,7 +74,7 @@ def main() -> None:
             )
         return
 
-    ingest_daily(store, get_source(settings), tickers, days=args.days)
+    ingest_daily_split(store, settings, tickers, days=args.days)
     for t in tickers:
         log.info("bar_count", ticker=t, bars=store.daily_bar_count(t))
 

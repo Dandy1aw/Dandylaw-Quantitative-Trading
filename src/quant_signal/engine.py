@@ -7,7 +7,9 @@ import structlog
 
 from quant_signal.config import Settings
 from quant_signal.datafeed.base import DataSource
+from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
+from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.cards import alert_card, report_card, signal_card
@@ -69,7 +71,9 @@ class Engine:
             lookback_days=int(mp["lookback_days"]),
             top_n=int(mp["top_n"]),
             min_dollar_volume=float(mp["min_dollar_volume"]),
+            ticker_currency=settings.international_tickers,
         )
+        self._intl_source = YFinanceSource()
         self.breakout = Breakout20d(
             universe=settings.watchlist,
             high_lookback_days=int(bp["high_lookback_days"]),
@@ -91,15 +95,33 @@ class Engine:
 
     def _refresh_daily(self, now: datetime) -> pd.DataFrame:
         tickers = sorted(set(self.settings.universe) | set(self.settings.watchlist))
+        intl = [t for t in tickers if t in self.settings.international_tickers]
+        primary = [t for t in tickers if t not in self.settings.international_tickers]
         start = (now - timedelta(days=10)).date()
-        fresh = self.source.fetch_daily_bars(tickers, start, now.date() + timedelta(days=1))
-        self.store.write_daily_bars(fresh, source=self.settings.data_source)
+        end = now.date() + timedelta(days=1)
+        if primary:
+            fresh = self.source.fetch_daily_bars(primary, start, end)
+            self.store.write_daily_bars(fresh, source=self.settings.data_source)
+        if intl:
+            fresh_intl = self._intl_source.fetch_daily_bars(intl, start, end)
+            self.store.write_daily_bars(fresh_intl, source="yfinance")
         return self.store.read_daily_bars(tickers, start=now - timedelta(days=400))
+
+    def _refresh_fx_rates(self) -> None:
+        """只为实际出现在 universe 里的国际标的查汇率，避免无谓的网络请求。"""
+        currencies = {
+            self.settings.international_tickers[t]
+            for t in self.settings.universe
+            if t in self.settings.international_tickers
+        }
+        if currencies:
+            self.momentum.fx_rates = fetch_usd_rates(currencies)
 
     # ---- 调度入口 ----
 
     def run_premarket(self, now: datetime) -> None:
         bars = self._refresh_daily(now)
+        self._refresh_fx_rates()
         targets = self.momentum.generate(bars)
         target_tickers = [s.ticker for s in targets]
         current = self.ledger.get_holdings(self.momentum.strategy_id)

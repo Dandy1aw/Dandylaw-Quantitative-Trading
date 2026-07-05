@@ -84,6 +84,44 @@ def test_premarket_dedup_second_run_no_push(env, daily_bars) -> None:  # type: i
     assert n_pushed == n_first                           # 4h 窗口内不重复推
 
 
+def test_premarket_routes_international_ticker_and_refreshes_fx(
+    tmp_path: Path, daily_bars: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """universe 里的国际标的必须走独立的 yfinance 源，且构造后每次 premarket 都刷新汇率。"""
+    aaa_only = daily_bars.loc[daily_bars.index.get_level_values("ticker") == "AAA"]
+    krt_bars = aaa_only.rename_axis(index={"ticker": "ticker"}).copy()
+    krt_bars.index = pd.MultiIndex.from_tuples(
+        [("KRT", ts) for ts in krt_bars.index.get_level_values("ts")], names=["ticker", "ts"]
+    )
+
+    settings = load_settings().model_copy(
+        update={
+            "universe": ["AAA", "KRT"],
+            "watchlist": [],
+            "international_tickers": {"KRT": "KRW"},
+        }
+    )
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+
+    fx_calls: list[set[str]] = []
+    monkeypatch.setattr(
+        "quant_signal.engine.fetch_usd_rates",
+        lambda currencies: (fx_calls.append(set(currencies)), {"KRW": 1300.0})[1],
+    )
+    monkeypatch.setattr("quant_signal.engine.YFinanceSource", lambda: FakeSource(krt_bars))
+
+    engine = Engine(settings, store, FakeSource(aaa_only), ledger, notifier)
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+    engine.run_premarket(last_bar_ts + timedelta(hours=1))
+
+    assert fx_calls == [{"KRW"}]
+    assert engine.momentum.fx_rates == {"KRW": 1300.0}
+    stored = store.read_daily_bars(["KRT"])
+    assert not stored.empty   # 国际标的数据确实经由独立的 yfinance 源写入
+
+
 def test_intraday_snapshot_appends_partial_day(daily_bars: pd.DataFrame) -> None:
     ts5 = pd.date_range("2026-07-06 13:30", periods=6, freq="5min", tz="UTC")
     idx = pd.MultiIndex.from_product([["AAA"], ts5], names=["ticker", "ts"])

@@ -42,3 +42,33 @@ def test_read_time_range(store: BarStore) -> None:
     start = datetime(2026, 1, 7, tzinfo=timezone.utc)
     out = store.read_daily_bars(["SPY"], start=start)
     assert len(out) == 3
+
+
+def test_write_daily_bars_normalizes_timestamp_to_midnight(store: BarStore) -> None:
+    """Alpaca 日线带具体时刻（如 04:00 UTC），必须归一化为午夜，才能和 yfinance（00:00 UTC）对齐。"""
+    ts = pd.Timestamp("2026-07-02 04:00:00", tz="UTC")
+    idx = pd.MultiIndex.from_tuples([("SPY", ts)], names=["ticker", "ts"])
+    df = pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 100.0, "volume": 100}, index=idx
+    )
+    store.write_daily_bars(df, source="alpaca")
+    out = store.read_daily_bars(["SPY"])
+    assert len(out) == 1
+    assert out.index.get_level_values("ts")[0] == pd.Timestamp("2026-07-02", tz="UTC")
+
+
+def test_write_daily_bars_dedupes_same_day_across_sources(store: BarStore) -> None:
+    """同一交易日，不管来自 alpaca（带时刻）还是 yfinance（午夜），duckdb 里只应有一行。"""
+    ts_alpaca = pd.Timestamp("2026-07-02 04:00:00", tz="UTC")
+    ts_yf = pd.Timestamp("2026-07-02 00:00:00", tz="UTC")
+    idx1 = pd.MultiIndex.from_tuples([("SPY", ts_alpaca)], names=["ticker", "ts"])
+    idx2 = pd.MultiIndex.from_tuples([("SPY", ts_yf)], names=["ticker", "ts"])
+    df1 = pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 100.0, "volume": 100}, index=idx1
+    )
+    df2 = pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 101.0, "volume": 100}, index=idx2
+    )
+    store.write_daily_bars(df1, source="alpaca")
+    store.write_daily_bars(df2, source="yfinance")
+    assert store.daily_bar_count("SPY") == 1

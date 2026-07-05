@@ -20,6 +20,13 @@ universe:                      # momentum_rotation 标的池：原 ETF 候选池
   - LLY
   - INTC
   - TSM
+  - 7709.HK
+  - 000660.KS
+
+international_tickers:          # 港股/韩股等固定走 yfinance（Alpaca 不支持），ticker -> 币种
+  "7709.HK": HKD
+  "000660.KS": KRW
+
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA
   - TSLA

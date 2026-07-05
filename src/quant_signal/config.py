@@ -22,6 +22,7 @@ class Settings(BaseModel):
     universe: list[str]
     watchlist: list[str]
     strategies: dict[str, dict[str, float | int]]
+    international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
     notify: NotifySettings = NotifySettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
