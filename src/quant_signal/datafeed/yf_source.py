@@ -44,7 +44,7 @@ class YFinanceSource:
             auto_adjust=True,
             group_by="ticker",
             progress=False,
-            threads=True,
+            threads=False,  # Windows 下多线程会触发 yfinance 缓存库锁
         )
         return _normalize(raw, tickers)
 
@@ -58,6 +58,6 @@ class YFinanceSource:
             auto_adjust=True,
             group_by="ticker",
             progress=False,
-            threads=True,
+            threads=False,  # Windows 下多线程会触发 yfinance 缓存库锁
         )
         return _normalize(raw, tickers)
