@@ -100,7 +100,7 @@ def main() -> None:
         "| lookback | top_n | 年化% | Sharpe | 最大回撤% | 年换手次数 |",
         "|---|---|---|---|---|---|",
     ]
-    for lookback in (30, 60, 90):
+    for lookback in (30, 60, 90, 120, 252):
         for top_n in (2, 3):
             m = run_backtest(bars, lookback, top_n, float(base["min_dollar_volume"]), fx_rates)
             marker = (
