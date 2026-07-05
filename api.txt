@@ -1,0 +1,4 @@
+alpaca: 
+Endpoint:https://paper-api.alpaca.markets/v2
+key:PK6PY53NARUROHD2DQRFJ32N2J
+secret:4vefRanXyQ3vyqUFWrYeRZH6edj3TUjdwq9GP6CByyU8

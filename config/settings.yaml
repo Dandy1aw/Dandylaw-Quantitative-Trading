@@ -1,0 +1,28 @@
+data_source: yfinance          # yfinance | alpaca（填好 .env 后改这里切换）
+db_dir: data                   # duckdb/sqlite 存放目录，相对仓库根
+
+universe:                      # momentum_rotation 标的池
+  - SPY
+  - QQQ
+  - IWM
+  - TLT
+  - GLD
+watchlist:                     # breakout_20d 盘中观察列表
+  - NVDA
+  - TSLA
+  - AAPL
+  - MSFT
+  - AMD
+
+strategies:
+  momentum_rotation:
+    lookback_days: 60
+    top_n: 3
+    min_dollar_volume: 50000000    # 20日均成交额过滤（美元）
+  breakout_20d:
+    high_lookback_days: 20
+    volume_multiplier: 1.5
+
+notify:
+  dedup_hours: 4
+  hourly_limit: 10
