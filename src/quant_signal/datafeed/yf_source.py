@@ -15,7 +15,7 @@ def _normalize(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
         else:
             if t not in raw.columns.get_level_values(0):
                 continue
-            sub = raw[t].copy()
+            sub = pd.DataFrame(raw[t]).copy()
         sub = sub.rename(columns=str.lower)[["open", "high", "low", "close", "volume"]]
         sub = sub.dropna(how="all")
         idx = pd.to_datetime(sub.index)
