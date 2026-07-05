@@ -44,7 +44,7 @@
                     └───────────────┘
 ```
 
-单进程 monorepo，APScheduler 驱动 8 个定时任务（详见下文）。数据源
+单进程 monorepo，APScheduler 驱动 9 个定时任务（详见下文）。数据源
 （yfinance / Alpaca）与通知器（Console / 飞书）都是可切换的抽象：
 
 - 每个标的按 `international_tickers` 配置固定走 yfinance 或跟随
@@ -136,6 +136,34 @@ Console），但美股数据质量和飞书推送体验会打折扣。
   `volume_multiplier`（默认 1.5）倍，产出 BUY 信号
 - yfinance 模式下卡片会标注"⚠️ 数据延迟约15分钟，仅供观察"
 
+### rsi_reversion（RSI 均值回归，日级）
+
+- 跟 `universe` 同一批标的、跟着 premarket 一起跑
+- RSI(`period`，默认14) < `oversold`（默认30）→ 超卖，产出 BUY；RSI > `overbought`
+  （默认70）→ 超买，产出 SELL
+- 跟动量轮动是互补视角：动量轮动追强势排名靠前的，RSI 抓的是短期超跌反弹/
+  超涨回调，两者经常对同一标的给出不同方向的信号，这是设计上预期的分歧，
+  不是 bug
+
+### macd_cross（MACD 金叉/死叉，日级）
+
+- EMA(`fast`/`slow`，默认12/26) 的差值（MACD线）上穿/下穿其 `signal`
+  （默认9）周期 EMA（信号线）分别产出 BUY（金叉）/SELL（死叉）
+- 看的是绝对趋势拐点，不是相对排名，可能跟动量轮动同时对同一标的产出信号
+
+### bollinger_breakout（布林带突破，日级）
+
+- `period`（默认20）日均值 ± `num_std`（默认2）倍标准差，收盘价突破上轨
+  产出 BUY，跌破下轨产出 SELL
+- 跟 `breakout_20d` 概念相似但不同：布林带惯例是滚动窗口**含当日**，
+  `breakout_20d` 明确排除当日，两者各自遵循自己指标的惯例
+
+以上三个策略跟动量轮动共用同一个 `run_premarket` 流程和早报卡片（多了一列
+"策略"标明来源），回测已用 `research/backtest_new_strategies.py` 验证：
+BUY 端历史表现尚可（20日胜率52-60%，正收益），**SELL 端（超买/死叉/跌破）
+预测下跌的胜率明显偏低（32%-42%）**——测试窗口以牛市为主，趋势压过均值
+回归，SELL 信号可靠性存疑，如实记录不代表回测覆盖的将来一定成立。
+
 ### price_deviation（持仓偏离监控，盘中5分钟级）
 
 - 监控范围：当前虚拟持仓（= 动量轮动最近一次算出的 top-N 目标）
@@ -144,6 +172,24 @@ Console），但美股数据质量和飞书推送体验会打折扣。
 - 用独立的 `strategy_id=price_deviation` 去重，跟动量轮动/突破策略互不干扰
 - 若某标的当天还没有任何动量信号（比如刚加入 universe），本次检查会跳过它，
   不报错
+
+### UZI-Skill 深度分析信息增强（可选，默认关闭）
+
+- 不是量化策略，是外部工具（`stock-deep-analyzer` 插件，65位"投资大佬"
+  规则化评分 + 财务建模 + 杀猪盘检测）的补充参考层，`enrichment.enabled`
+  默认 `false`
+- 监控范围：当前持仓 ∪ 今日全部策略的 BUY 信号，按 `max_tickers`（默认8）
+  截断
+- headless 子进程调用（设 `UZI_CLI_ONLY=1` 环境变量），不需要 Claude 会话，
+  单只标的实测约 20-60 秒；读取其 `synthesis.json` 提取综合评分/结论/
+  风险点
+- 若某标的是我们的持仓/BUY 目标，但深度分析给出"看空/谨慎"或评分 <50，
+  卡片上会标 ⚠️ 分歧提示——这是有意设计的交叉验证，不是矛盾
+- 子进程失败/超时/解析异常一律静默跳过该标的，不影响主流程；需要用户
+  本机单独装好 UZI-Skill 及其依赖（akshare/baostock/playwright 等），跟
+  quant-signal 自己的 uv 环境完全隔离
+- 韩股等 UZI-Skill 覆盖较弱的市场，实测会触发 `timeout_seconds`（默认120秒）
+  超时，属于预期的优雅降级，不是 bug
 
 ## 调度：一天跑哪些任务
 
@@ -154,6 +200,7 @@ Console），但美股数据质量和飞书推送体验会打折扣。
 | `rotation_asia_close` | 15:30 北京时间 (07:30 UTC) | 工作日 | 同上，港股/韩股收盘前后 |
 | `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已过开盘时间 | 跑 20日突破策略，监控 `watchlist` |
 | `watch_deviation` | 00:00–21:55 UTC 每5分钟 | 工作日 | 持仓偏离监控（覆盖亚洲+美股交易时段，含冬令时缓冲） |
+| `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
 | `postmarket` | 16:30 ET | NYSE 交易日历 | 推送当日信号日报（数量、理论收益） |
 | `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉（美股走配置的数据源，国际标的固定走 yfinance） |
 | `heartbeat` | 每 15 分钟 | 无 | 进程自检，连续 2 次失败推告警卡片 |
@@ -191,10 +238,29 @@ strategies:
     volume_multiplier: 1.5
   price_deviation:
     threshold: 0.02                # ±2%
+  rsi_reversion:
+    period: 14
+    oversold: 30
+    overbought: 70
+  macd_cross:
+    fast: 12
+    slow: 26
+    signal: 9
+  bollinger_breakout:
+    period: 20
+    num_std: 2.0
 
 notify:
   dedup_hours: 4
   hourly_limit: 10
+
+enrichment:                      # UZI-Skill 深度分析，可选，默认关闭
+  enabled: false
+  uzi_run_py: ""                  # 你的 UZI-Skill run.py 绝对路径
+  python_exe: "python"
+  depth: lite
+  timeout_seconds: 120
+  max_tickers: 8
 ```
 
 ## 命令行工具
@@ -242,9 +308,10 @@ ticker（全名太长会挤压其他列）。
 ## 回测与研究
 
 ```bash
-uv run python research/backtest_momentum.py    # vectorbt 参数扫描（lookback×top_n）
-uv run python research/backtest_breakout.py    # 突破策略回测（日线近似，5min历史数据不可得）
-uv run python research/walkforward.py          # 逐日喂数据 vs 全量回放，验证无未来函数
+uv run python research/backtest_momentum.py       # vectorbt 参数扫描（lookback×top_n）
+uv run python research/backtest_breakout.py       # 突破策略回测（日线近似，5min历史数据不可得）
+uv run python research/backtest_new_strategies.py # RSI/MACD/布林带 事件驱动回测
+uv run python research/walkforward.py             # 逐日喂数据 vs 全量回放，验证无未来函数（覆盖全部5个策略）
 ```
 
 回测脚本 import 的是 `src/quant_signal/strategies/` 下同一份策略代码，不重复实现。
@@ -302,6 +369,7 @@ quant-signal/
 │   ├── seed_holdings.py           # 初始化虚拟持仓 CLI
 │   ├── report.py                  # 日报统计
 │   ├── watch_monitor.py           # 持仓偏离检测（纯函数）
+│   ├── enrichment.py              # UZI-Skill headless 调用（尽力而为）
 │   ├── logging_setup.py           # structlog 初始化
 │   ├── datafeed/
 │   │   ├── base.py                # DataSource 协议 + 工厂函数
@@ -312,7 +380,10 @@ quant-signal/
 │   ├── strategies/
 │   │   ├── base.py                # Signal/Direction/Strategy 基类
 │   │   ├── momentum_rotation.py   # 动量轮动策略
-│   │   └── breakout_20d.py        # 20日突破策略
+│   │   ├── breakout_20d.py        # 20日突破策略
+│   │   ├── rsi_reversion.py       # RSI 均值回归
+│   │   ├── macd_cross.py          # MACD 金叉/死叉
+│   │   └── bollinger_breakout.py  # 布林带突破
 │   └── notifier/
 │       ├── base.py                 # Card + Notifier 协议 + Console 实现
 │       ├── cards.py                # 三种卡片模板
