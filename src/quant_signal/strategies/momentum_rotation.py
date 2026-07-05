@@ -30,29 +30,40 @@ class MomentumRotation(Strategy):
         close = bars["close"].unstack("ticker").sort_index()
         volume = bars["volume"].unstack("ticker").sort_index()
         close = close[[t for t in self.universe if t in close.columns]]
-        if len(close) < self.lookback_days + 1:
+        if close.empty:
             return []
 
-        momentum = close.iloc[-1] / close.iloc[-1 - self.lookback_days] - 1.0
-        dollar_vol_native = (close * volume).tail(20).mean()
-        fx_divisor = pd.Series(
-            {t: self.fx_rates.get(self.ticker_currency.get(t, "USD"), 1.0) for t in close.columns}
-        )
-        dollar_vol_usd = dollar_vol_native / fx_divisor
-        eligible = momentum[dollar_vol_usd >= self.min_dollar_volume].dropna()
-        top = eligible.sort_values(ascending=False).head(self.top_n)
+        # 按各标的自身的有效数据取"最新一行"，不用全市场统一的行位置——
+        # 否则不同交易日历的标的（如美股假期但港股/韩股照常交易）会让
+        # 缺当日数据的标的被错误判定为 NaN，动量排名整体失真。
+        momentum: dict[str, float] = {}
+        last_price: dict[str, float] = {}
+        dollar_vol_usd: dict[str, float] = {}
+        for t in close.columns:
+            series = close[t].dropna()
+            if len(series) < self.lookback_days + 1:
+                continue
+            momentum[t] = float(series.iloc[-1] / series.iloc[-1 - self.lookback_days] - 1.0)
+            last_price[t] = float(series.iloc[-1])
+            vol = volume[t].reindex(series.index)
+            native_dv = float((series * vol).tail(20).mean())
+            fx = self.fx_rates.get(self.ticker_currency.get(t, "USD"), 1.0)
+            dollar_vol_usd[t] = native_dv / fx
+
+        eligible = {t: m for t, m in momentum.items() if dollar_vol_usd.get(t, 0.0) >= self.min_dollar_volume}
+        top = sorted(eligible.items(), key=lambda kv: kv[1], reverse=True)[: self.top_n]
 
         last_ts = close.index[-1].to_pydatetime()
         weight = round(1.0 / self.top_n, 4) if self.top_n else None
         return [
             Signal(
-                ticker=str(t),
+                ticker=t,
                 direction=Direction.BUY,
-                price=float(close[t].iloc[-1]),
+                price=last_price[t],
                 reason=f"{self.lookback_days}日动量 {mom:+.1%}，排名第{i}",
                 strategy_id=self.strategy_id,
                 ts=last_ts,
                 suggested_weight=weight,
             )
-            for i, (t, mom) in enumerate(top.items(), start=1)
+            for i, (t, mom) in enumerate(top, start=1)
         ]

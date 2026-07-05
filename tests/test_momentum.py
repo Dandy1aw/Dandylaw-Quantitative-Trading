@@ -43,6 +43,22 @@ def test_no_lookahead_truncation(daily_bars: pd.DataFrame) -> None:
     assert reused.generate(upto_90) == make().generate(upto_90)
 
 
+def test_survives_mismatched_trading_calendar(daily_bars: pd.DataFrame) -> None:
+    """美股假期休市但国际标的照常交易时，不能让全体美股标的的动量被判定为 NaN。"""
+    ts = daily_bars.index.get_level_values("ts").unique().sort_values()
+    extra_day = ts[-1] + pd.Timedelta(days=1)  # 模拟"美股休市但港股/韩股照常交易"的那一天
+    extra_row = pd.DataFrame(
+        {"open": 10.0, "high": 10.0, "low": 10.0, "close": 10.0, "volume": 1_000_000},
+        index=pd.MultiIndex.from_tuples([("KRT", extra_day)], names=["ticker", "ts"]),
+    )
+    bars_with_gap = pd.concat([daily_bars, extra_row]).sort_index()
+
+    strat = MomentumRotation(universe=["AAA", "BBB", "CCC", "DDD", "KRT"], top_n=2)
+    signals = strat.generate(bars_with_gap)
+    tickers = {s.ticker for s in signals}
+    assert tickers == {"AAA", "BBB"}   # AAA/BBB 不该因 KRT 多出的一天而消失
+
+
 def test_dollar_volume_filter_converts_foreign_currency() -> None:
     """非美元计价标的的成交额过滤必须换算成美元，否则原始数字会误判流动性达标。"""
     ts = pd.date_range("2025-08-01", periods=65, freq="B", tz="UTC")
