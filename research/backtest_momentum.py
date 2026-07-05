@@ -32,7 +32,10 @@ def load_bars(start: date) -> pd.DataFrame:
             tickers, start, datetime.now(timezone.utc).date()
         )
         store.write_daily_bars(df, source="yfinance")
-    return store.read_daily_bars(tickers)
+    # 缓存里可能有比 start 更早的历史（比如之前跑过全量回测），必须显式按
+    # start 过滤，否则 --start 只在首次拉数据时有效，缓存命中后就是空操作。
+    start_dt = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    return store.read_daily_bars(tickers, start=start_dt)
 
 
 def run_backtest(
@@ -123,7 +126,7 @@ def main() -> None:
         )
 
     REPORTS.mkdir(exist_ok=True)
-    out = REPORTS / f"momentum_{datetime.now(timezone.utc):%Y%m%d}.md"
+    out = REPORTS / f"momentum_from{args.start:%Y%m%d}_run{datetime.now(timezone.utc):%Y%m%d}.md"
     out.write_text(
         "# 动量轮动回测报告\n\n"
         f"- 数据: {args.start} 至今，universe={settings.universe}\n"
