@@ -28,7 +28,7 @@ from quant_signal.strategies.breakout_20d import Breakout20d
 from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.rsi_reversion import RsiReversion
-from quant_signal.strategies.indicators import chandelier_stop
+from quant_signal.strategies.indicators import chandelier_stop, expected_move_target
 from quant_signal.strategies.trend_gate import TrendGateConfig, apply_trend_gate
 from quant_signal.watch_monitor import check_deviations
 
@@ -167,11 +167,11 @@ class Engine:
         if currencies:
             self.momentum.fx_rates = fetch_usd_rates(currencies)
 
-    def _attach_sell_ref(self, targets: list[Signal], bars: pd.DataFrame) -> list[Signal]:
-        """给趋势型 BUY 标的附 ATR 吊灯移动止损作参考卖出价(数据不足则不附)。"""
+    def _attach_exit_prices(self, signals: list[Signal], bars: pd.DataFrame) -> list[Signal]:
+        """给 BUY 标的附止盈目标(波动率期望位)+止损价(ATR吊灯)；SELL 不附(卖出建议不给价)。"""
         tg = self.settings.trend_gate
         out: list[Signal] = []
-        for s in targets:
+        for s in signals:
             if s.direction != Direction.BUY:
                 out.append(s)
                 continue
@@ -180,15 +180,18 @@ class Engine:
             except KeyError:
                 out.append(s)
                 continue
-            stop = chandelier_stop(
+            sl = chandelier_stop(
                 sub["high"], sub["low"], sub["close"],
                 lookback=tg.chandelier_lookback, atr_period=tg.chandelier_atr,
                 mult=tg.chandelier_mult,
             )
-            if stop is None:
-                out.append(s)
-            else:
-                out.append(replace(s, extra={**(s.extra or {}), "sell_ref": round(stop, 2)}))
+            tp = expected_move_target(sub["close"], tg.tp_vol_lookback, tg.tp_horizon)
+            extra = dict(s.extra or {})
+            if sl is not None:
+                extra["stop_loss"] = round(sl, 2)
+            if tp is not None:
+                extra["take_profit"] = round(tp, 2)
+            out.append(replace(s, extra=extra) if extra != (s.extra or {}) else s)
         return out
 
     def _fetch_live_price(self, ticker: str) -> float | None:
@@ -218,8 +221,6 @@ class Engine:
                 use_mom=self.trend_gate_use_mom,
             )
             targets = gated
-        # 卡片展示的"参考卖出价"用 ATR 吊灯移动止损(贴近价格)，而非内部200线闸门价
-        targets = self._attach_sell_ref(targets, bars)
         target_tickers = [s.ticker for s in targets]
         current = self.ledger.get_holdings(self.momentum.strategy_id)
         # 与 targets 用同一根 bar 的时间戳，保证同一次调仓的信号落在同一天
@@ -240,7 +241,7 @@ class Engine:
         extra_signals = (
             self.rsi.generate(bars) + self.macd.generate(bars) + self.bollinger.generate(bars)
         )
-        all_signals = targets + sells + extra_signals
+        all_signals = self._attach_exit_prices(targets + sells + extra_signals, bars)
         result = self._dedup(all_signals, now)
         for s in result.to_push:
             self.ledger.insert(s, pushed=True, now=now)

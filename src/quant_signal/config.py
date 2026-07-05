@@ -29,6 +29,9 @@ class TrendGateSettings(BaseModel):
     chandelier_lookback: int = 22
     chandelier_atr: int = 14
     chandelier_mult: float = 3.0
+    # 止盈目标用波动率期望位：现价×(1+日波动×√horizon)，vol_lookback 日算波动
+    tp_vol_lookback: int = 60
+    tp_horizon: int = 20
 
 
 class EnrichmentSettings(BaseModel):

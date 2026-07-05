@@ -130,21 +130,24 @@ def _market_card(
             continue
         lines = [
             f"**【{_STRATEGY_LABEL[sid]}】**",
-            "| 标的 | 方向 | 参考价 | 现价 | 参考卖出价 | 原因 |",
-            "|---|---|---|---|---|---|",
+            "| 标的 | 方向 | 参考价 | 现价 | 止盈目标 | 止损价 | 原因 |",
+            "|---|---|---|---|---|---|---|",
         ]
         for s in ssigs:
             live = live_prices.get(s.ticker)
             live_str = f"{live:.2f}" if live is not None else "-"
-            sr = (s.extra or {}).get("sell_ref")
-            if isinstance(sr, (int, float)):
-                # 移动止损已在现价上方 = 已破位（应离场），标注避免"卖价>现价"的困惑
-                sell_str = f"{float(sr):.2f}" + (" ⚠破位" if float(sr) >= s.price else "")
+            extra = s.extra or {}
+            tp = extra.get("take_profit")
+            tp_str = f"{float(tp):.2f}" if isinstance(tp, (int, float)) else "-"
+            sl = extra.get("stop_loss")
+            if isinstance(sl, (int, float)):
+                # 止损已在现价上方 = 已破位（应离场），标注避免"止损>现价"的困惑
+                sl_str = f"{float(sl):.2f}" + (" ⚠破位" if float(sl) >= s.price else "")
             else:
-                sell_str = "-"
+                sl_str = "-"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
-                f" {live_str} | {sell_str} | {s.reason} |"
+                f" {live_str} | {tp_str} | {sl_str} | {s.reason} |"
             )
         parts.append("\n".join(lines))
     return report_card(f"📋 盘前早报 · {market}", "\n\n".join(parts))

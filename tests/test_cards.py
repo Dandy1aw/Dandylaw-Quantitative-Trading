@@ -89,26 +89,26 @@ def test_live_price_present_formatted() -> None:
     assert "123.46" in us.body_md
 
 
-def test_sell_ref_shown_when_present() -> None:
+def test_take_profit_and_stop_loss_shown() -> None:
     signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
-    signals[0].extra["sell_ref"] = 88.5  # type: ignore[index]
+    signals[0].extra.update({"take_profit": 117.0, "stop_loss": 92.0})  # type: ignore[union-attr]
     us = _card_by(premarket_cards(signals, INTL, {"MU": None}), "美股组")
-    assert "参考卖出价" in us.body_md
-    assert "88.50" in us.body_md
+    assert "止盈目标" in us.body_md and "止损价" in us.body_md
+    assert "117.00" in us.body_md and "92.00" in us.body_md
 
 
-def test_sell_ref_breach_marked_when_above_price() -> None:
+def test_stop_loss_breach_marked_when_above_price() -> None:
     signals = [_sig("DRAM", Direction.BUY, "momentum_rotation", price=60.74, rank=1)]
-    signals[0].extra["sell_ref"] = 62.73  # type: ignore[index]  # 止损在现价上方=已破位
+    signals[0].extra["stop_loss"] = 62.73  # type: ignore[index]  # 止损在现价上方=已破位
     us = _card_by(premarket_cards(signals, INTL, {"DRAM": None}), "美股组")
     assert "62.73 ⚠破位" in us.body_md
 
 
-def test_sell_ref_dash_when_absent() -> None:
+def test_exit_prices_dash_when_absent() -> None:
     signals = [_sig("GLD", Direction.BUY, "macd_cross")]
     us = _card_by(premarket_cards(signals, INTL, {"GLD": None}), "美股组")
-    assert "参考卖出价" in us.body_md   # 列头始终在
-    # GLD(MACD)无 sell_ref，该格显示 -
+    assert "止盈目标" in us.body_md and "止损价" in us.body_md  # 列头始终在
+    # GLD(MACD)无止盈/止损，两格显示 -
 
 
 def test_momentum_section_sorted_by_momentum_desc() -> None:

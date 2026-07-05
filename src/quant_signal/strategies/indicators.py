@@ -28,3 +28,17 @@ def chandelier_stop(
         return None
     highest = float(high.tail(lookback).max())
     return highest - mult * atr(high, low, close, atr_period)
+
+
+def expected_move_target(
+    close: pd.Series, vol_lookback: int = 60, horizon: int = 20
+) -> float | None:
+    """波动率期望位止盈目标：现价 ×(1 + 日波动率 × √horizon)，即未来 horizon 日约 1σ 上沿。
+
+    热门高波动股目标自然更高，随波动自适应；数据不足返回 None。
+    """
+    c = close.dropna()
+    if len(c) < vol_lookback + 1:
+        return None
+    daily_std = float(c.pct_change().dropna().tail(vol_lookback).std())
+    return float(float(c.iloc[-1]) * (1.0 + daily_std * (horizon ** 0.5)))
