@@ -44,6 +44,17 @@ strategies:
     volume_multiplier: 1.5
   price_deviation:
     threshold: 0.02                # 持仓/今日BUY目标相对当天参考价涨跌超此比例即提醒
+  rsi_reversion:
+    period: 14
+    oversold: 30
+    overbought: 70
+  macd_cross:
+    fast: 12
+    slow: 26
+    signal: 9
+  bollinger_breakout:
+    period: 20
+    num_std: 2.0
 
 notify:
   dedup_hours: 4

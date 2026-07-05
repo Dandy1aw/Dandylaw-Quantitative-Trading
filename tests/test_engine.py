@@ -72,6 +72,25 @@ def test_premarket_generates_rotation_and_report(env, daily_bars) -> None:  # ty
     assert "早报" in notifier.cards[0].title
 
 
+def test_premarket_report_shows_strategy_column_for_multiple_strategies(
+    env, daily_bars
+) -> None:  # type: ignore[no-untyped-def]
+    """conftest 的 daily_bars 全程零波动持续上涨，RSI 必然对所有标的判定超买(SELL)，
+    验证早报能同时展示动量轮动和 RSI 回归两个不同策略来源的信号。"""
+    settings, store, ledger, notifier = env
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+    engine.run_premarket(last_bar_ts + timedelta(hours=32))
+
+    body = notifier.cards[0].body_md
+    assert "动量轮动" in body
+    assert "RSI回归" in body
+
+    rows = ledger.signals_on(last_bar_ts.date())
+    strategy_ids = {r["strategy_id"] for r in rows}
+    assert "momentum_rotation" in strategy_ids and "rsi_reversion" in strategy_ids
+
+
 def test_premarket_dedup_second_run_no_push(env, daily_bars) -> None:  # type: ignore[no-untyped-def]
     settings, store, ledger, notifier = env
     engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)

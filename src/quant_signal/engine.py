@@ -15,13 +15,23 @@ from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.cards import alert_card, report_card, signal_card
 from quant_signal.notifier.dedup import apply_dedup
 from quant_signal.strategies.base import Direction, Signal
+from quant_signal.strategies.bollinger_breakout import BollingerBreakout
 from quant_signal.strategies.breakout_20d import Breakout20d
+from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
+from quant_signal.strategies.rsi_reversion import RsiReversion
 from quant_signal.watch_monitor import check_deviations
 
 log = structlog.get_logger()
 
 PREMARKET_REPORT_LIMIT = 5
+
+_STRATEGY_LABELS = {
+    "momentum_rotation": "动量轮动",
+    "rsi_reversion": "RSI回归",
+    "macd_cross": "MACD",
+    "bollinger_breakout": "布林带",
+}
 
 
 def _select_report_rows(signals: list[Signal], limit: int) -> tuple[list[Signal], int]:
@@ -93,6 +103,26 @@ class Engine:
             universe=settings.watchlist,
             high_lookback_days=int(bp["high_lookback_days"]),
             volume_multiplier=float(bp["volume_multiplier"]),
+        )
+        rp = settings.strategies.get("rsi_reversion", {})
+        mc = settings.strategies.get("macd_cross", {})
+        bb = settings.strategies.get("bollinger_breakout", {})
+        self.rsi = RsiReversion(
+            universe=settings.universe,
+            period=int(rp.get("period", 14)),
+            oversold=float(rp.get("oversold", 30)),
+            overbought=float(rp.get("overbought", 70)),
+        )
+        self.macd = MacdCross(
+            universe=settings.universe,
+            fast=int(mc.get("fast", 12)),
+            slow=int(mc.get("slow", 26)),
+            signal=int(mc.get("signal", 9)),
+        )
+        self.bollinger = BollingerBreakout(
+            universe=settings.universe,
+            period=int(bb.get("period", 20)),
+            num_std=float(bb.get("num_std", 2.0)),
         )
 
     # ---- 内部工具 ----
@@ -168,7 +198,10 @@ class Engine:
             for t in current
             if t not in target_tickers and t in bars.index.get_level_values("ticker")
         ]
-        all_signals = targets + sells
+        extra_signals = (
+            self.rsi.generate(bars) + self.macd.generate(bars) + self.bollinger.generate(bars)
+        )
+        all_signals = targets + sells + extra_signals
         result = self._dedup(all_signals, now)
         for s in result.to_push:
             self.ledger.insert(s, pushed=True, now=now)
@@ -178,12 +211,13 @@ class Engine:
 
         if result.to_push:
             shown, omitted = _select_report_rows(result.to_push, PREMARKET_REPORT_LIMIT)
-            lines = ["| 标的 | 方向 | 参考价 | 现价 | 原因 |", "|---|---|---|---|---|"]
+            lines = ["| 标的 | 策略 | 方向 | 参考价 | 现价 | 原因 |", "|---|---|---|---|---|---|"]
             for s in shown:
                 live = self._fetch_live_price(s.ticker)
                 live_str = f"{live:.2f}" if live is not None else "-"
+                label = _STRATEGY_LABELS.get(s.strategy_id, s.strategy_id)
                 lines.append(
-                    f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
+                    f"| {s.ticker} | {label} | {s.direction.value.upper()} | {s.price:.2f} |"
                     f" {live_str} | {s.reason} |"
                 )
             if omitted:
