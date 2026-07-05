@@ -48,6 +48,9 @@ def env(tmp_path: Path, daily_bars: pd.DataFrame):  # type: ignore[no-untyped-de
             # 避免意外继承生产配置里的美股ETF/个股细分名额
             "asset_type": {},
             "momentum_default_group_top_n": {},
+            # 趋势闸门需真实200日线历史+SPY/BIL数据，合成标的不适用，关掉保持
+            # 引擎测试聚焦动量本身（闸门逻辑由 test_trend_gate 覆盖）
+            "trend_gate": settings.trend_gate.model_copy(update={"enabled": False}),
         }
     )
     store = BarStore(tmp_path / "b.duckdb")

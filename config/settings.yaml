@@ -27,6 +27,14 @@ international_tickers:          # 港股/韩股等固定走 yfinance（Alpaca �
   "7709.HK": HKD
   "000660.KS": KRW
 
+trend_gate:                      # 趋势持有闸门+防御切换（阶段B回测选出的最优配置：仅200线+防御）
+  enabled: true                  # 动量选出后叠加，趋势失效切防御sleeve；回测降回撤44.5%->29.5%
+  ma_days: 200
+  buffer: 0.03                   # 200日线缓冲带
+  use_mom: false                 # 回测显示加绝对动量/相对强弱反而过度保守，关闭
+  benchmark: SPY                 # 个股相对强弱基准（use_mom=true时才用）
+  defensive: [BIL, TLT, GLD]     # 防御sleeve候选，按绝对动量选最强；BIL即现金地板
+
 momentum_group_top_n:            # 动量轮动按币种分组独立排名的名额，不配置的币种(含美股)归入默认组用 top_n
   HKD: 1                          # 港股组名额
   KRW: 1                          # 韩股组名额

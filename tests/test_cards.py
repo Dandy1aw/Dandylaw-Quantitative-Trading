@@ -89,6 +89,21 @@ def test_live_price_present_formatted() -> None:
     assert "123.46" in us.body_md
 
 
+def test_sell_ref_shown_when_present() -> None:
+    signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
+    signals[0].extra["sell_ref"] = 88.5  # type: ignore[index]
+    us = _card_by(premarket_cards(signals, INTL, {"MU": None}), "美股组")
+    assert "参考卖出价" in us.body_md
+    assert "88.50" in us.body_md
+
+
+def test_sell_ref_dash_when_absent() -> None:
+    signals = [_sig("GLD", Direction.BUY, "macd_cross")]
+    us = _card_by(premarket_cards(signals, INTL, {"GLD": None}), "美股组")
+    assert "参考卖出价" in us.body_md   # 列头始终在
+    # GLD(MACD)无 sell_ref，该格显示 -
+
+
 def test_momentum_section_sorted_by_momentum_desc() -> None:
     """同一动量小节里 ETF/个股混排时按动量降序，不因组内名次而交错。"""
     signals = [

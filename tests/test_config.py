@@ -9,6 +9,10 @@ def test_load_settings_from_repo_yaml() -> None:
     assert "SPY" in s.universe
     assert s.strategies["momentum_rotation"]["top_n"] == 3
     assert s.notify.dedup_hours == 4
+    # 趋势闸门：阶段B回测选出的最优配置(仅200线+防御，关绝对动量)
+    assert s.trend_gate.enabled is True
+    assert s.trend_gate.use_mom is False
+    assert s.trend_gate.defensive == ["BIL", "TLT", "GLD"]
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:

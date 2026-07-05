@@ -130,14 +130,17 @@ def _market_card(
             continue
         lines = [
             f"**【{_STRATEGY_LABEL[sid]}】**",
-            "| 标的 | 方向 | 参考价 | 现价 | 原因 |", "|---|---|---|---|---|",
+            "| 标的 | 方向 | 参考价 | 现价 | 参考卖出价 | 原因 |",
+            "|---|---|---|---|---|---|",
         ]
         for s in ssigs:
             live = live_prices.get(s.ticker)
             live_str = f"{live:.2f}" if live is not None else "-"
+            sr = (s.extra or {}).get("sell_ref")
+            sell_str = f"{float(sr):.2f}" if isinstance(sr, (int, float)) else "-"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
-                f" {live_str} | {s.reason} |"
+                f" {live_str} | {sell_str} | {s.reason} |"
             )
         parts.append("\n".join(lines))
     return report_card(f"📋 盘前早报 · {market}", "\n\n".join(parts))

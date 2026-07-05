@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from quant_signal.strategies.breakout_20d import Breakout20d
 from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.rsi_reversion import RsiReversion
+from quant_signal.strategies.trend_gate import TrendGateConfig, apply_trend_gate
 from quant_signal.watch_monitor import check_deviations
 
 log = structlog.get_logger()
@@ -86,6 +88,15 @@ class Engine:
             asset_type=settings.asset_type,
             default_group_top_n=settings.momentum_default_group_top_n,
         )
+        tg = settings.trend_gate
+        self.trend_gate_cfg = (
+            TrendGateConfig(
+                ma_days=tg.ma_days, mom_days=tg.mom_days, buffer=tg.buffer,
+                benchmark=tg.benchmark, defensive=tuple(tg.defensive),
+            )
+            if tg.enabled else None
+        )
+        self.trend_gate_use_mom = tg.use_mom
         self._intl_source = YFinanceSource()
         self.breakout = Breakout20d(
             universe=settings.watchlist,
@@ -127,7 +138,12 @@ class Engine:
         )
 
     def _refresh_daily(self, now: datetime) -> pd.DataFrame:
-        tickers = sorted(set(self.settings.universe) | set(self.settings.watchlist))
+        base = set(self.settings.universe) | set(self.settings.watchlist)
+        if self.trend_gate_cfg is not None:
+            # 趋势闸门需要 benchmark(SPY) 与防御 sleeve(BIL/TLT/GLD)的日线，BIL 非
+            # universe 成员，需一并抓取（只取数、不参与动量选股）
+            base |= {self.trend_gate_cfg.benchmark} | set(self.trend_gate_cfg.defensive)
+        tickers = sorted(base)
         intl = [t for t in tickers if t in self.settings.international_tickers]
         primary = [t for t in tickers if t not in self.settings.international_tickers]
         start = (now - timedelta(days=10)).date()
@@ -169,6 +185,20 @@ class Engine:
         bars = self._refresh_daily(now)
         self._refresh_fx_rates()
         targets = self.momentum.generate(bars)
+        if self.trend_gate_cfg is not None and targets:
+            # 动量选出后叠趋势闸门：趋势失效的仓位切防御 sleeve；给保留的趋势型
+            # 标的附上参考卖出价(sell_ref = SMA200×(1-buffer))供卡片展示
+            gated, infos = apply_trend_gate(
+                targets, bars, self.settings.asset_type,
+                self.settings.international_tickers, self.trend_gate_cfg,
+                use_mom=self.trend_gate_use_mom,
+            )
+            sell_map = {i.ticker: i.sell_ref for i in infos}
+            targets = [
+                replace(s, extra={**(s.extra or {}), "sell_ref": sell_map[s.ticker]})
+                if s.ticker in sell_map else s
+                for s in gated
+            ]
         target_tickers = [s.ticker for s in targets]
         current = self.ledger.get_holdings(self.momentum.strategy_id)
         # 与 targets 用同一根 bar 的时间戳，保证同一次调仓的信号落在同一天

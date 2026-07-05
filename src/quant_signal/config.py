@@ -16,6 +16,17 @@ class NotifySettings(BaseModel):
     hourly_limit: int = 10
 
 
+class TrendGateSettings(BaseModel):
+    enabled: bool = False
+    ma_days: int = 200
+    mom_days: int = 252
+    buffer: float = 0.03
+    # 回测(阶段B)显示"仅200线+防御"最优，绝对动量/相对强弱过度保守，默认关闭
+    use_mom: bool = False
+    benchmark: str = "SPY"
+    defensive: list[str] = ["BIL", "TLT", "GLD"]
+
+
 class EnrichmentSettings(BaseModel):
     enabled: bool = False
     uzi_run_py: str = ""
@@ -37,6 +48,7 @@ class Settings(BaseModel):
     international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
+    trend_gate: TrendGateSettings = TrendGateSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
     alpaca_secret: str = ""
