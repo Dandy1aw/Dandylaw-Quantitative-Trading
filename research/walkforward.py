@@ -15,8 +15,11 @@ import pandas as pd
 from quant_signal.config import load_settings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.strategies.base import Signal, Strategy
+from quant_signal.strategies.bollinger_breakout import BollingerBreakout
 from quant_signal.strategies.breakout_20d import Breakout20d
+from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
+from quant_signal.strategies.rsi_reversion import RsiReversion
 
 
 @dataclass
@@ -60,6 +63,9 @@ def main() -> None:
 
     mp = settings.strategies["momentum_rotation"]
     bp = settings.strategies["breakout_20d"]
+    rp = settings.strategies["rsi_reversion"]
+    mc = settings.strategies["macd_cross"]
+    bb = settings.strategies["bollinger_breakout"]
     strategies: list[Strategy] = [
         MomentumRotation(
             settings.universe,
@@ -70,6 +76,11 @@ def main() -> None:
         Breakout20d(
             settings.watchlist, int(bp["high_lookback_days"]), float(bp["volume_multiplier"])
         ),
+        RsiReversion(
+            settings.universe, int(rp["period"]), float(rp["oversold"]), float(rp["overbought"])
+        ),
+        MacdCross(settings.universe, int(mc["fast"]), int(mc["slow"]), int(mc["signal"])),
+        BollingerBreakout(settings.universe, int(bb["period"]), float(bb["num_std"])),
     ]
     failed = False
     for strat in strategies:
