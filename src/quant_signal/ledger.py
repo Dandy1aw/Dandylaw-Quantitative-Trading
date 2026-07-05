@@ -10,7 +10,7 @@ from quant_signal.strategies.base import Signal, dedup_key
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY,
-    ts TEXT NOT NULL,             -- UTC ISO8601
+    ts TEXT NOT NULL,             -- UTC ISO8601，信号触发时刻（可能是历史 bar 的时间）
     ticker TEXT NOT NULL,
     direction TEXT NOT NULL,
     price REAL NOT NULL,
@@ -18,10 +18,11 @@ CREATE TABLE IF NOT EXISTS signals (
     reason TEXT,
     suggested_weight REAL,
     pushed INTEGER DEFAULT 0,
+    pushed_at TEXT,               -- UTC ISO8601，实际执行/推送的墙钟时间，去重以此为准
     dedup_key TEXT,
     extra_json TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_signals_dedup ON signals(dedup_key, ts);
+CREATE INDEX IF NOT EXISTS idx_signals_dedup ON signals(dedup_key, pushed_at);
 CREATE TABLE IF NOT EXISTS holdings (
     strategy_id TEXT NOT NULL,
     ticker TEXT NOT NULL,
@@ -37,11 +38,12 @@ class SignalLedger:
         self._con.row_factory = sqlite3.Row
         self._con.executescript(_SCHEMA)
 
-    def insert(self, s: Signal, pushed: bool) -> int:
+    def insert(self, s: Signal, pushed: bool, now: datetime | None = None) -> int:
+        pushed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         cur = self._con.execute(
             "INSERT INTO signals (ts, ticker, direction, price, strategy_id, reason,"
-            " suggested_weight, pushed, dedup_key, extra_json)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " suggested_weight, pushed, pushed_at, dedup_key, extra_json)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 s.ts.astimezone(timezone.utc).isoformat(),
                 s.ticker,
@@ -51,6 +53,7 @@ class SignalLedger:
                 s.reason,
                 s.suggested_weight,
                 int(pushed),
+                pushed_at.isoformat(),
                 dedup_key(s),
                 json.dumps(s.extra, ensure_ascii=False) if s.extra else None,
             ),
@@ -59,16 +62,17 @@ class SignalLedger:
         return int(cur.lastrowid or 0)
 
     def last_push_by_key(self, since: datetime) -> dict[str, datetime]:
+        """按 pushed_at（推送执行的墙钟时间）而非信号自身 ts 判断去重窗口。"""
         rows = self._con.execute(
-            "SELECT dedup_key, max(ts) AS ts FROM signals"
-            " WHERE pushed = 1 AND ts >= ? GROUP BY dedup_key",
+            "SELECT dedup_key, max(pushed_at) AS pushed_at FROM signals"
+            " WHERE pushed = 1 AND pushed_at >= ? GROUP BY dedup_key",
             (since.astimezone(timezone.utc).isoformat(),),
         ).fetchall()
-        return {r["dedup_key"]: datetime.fromisoformat(r["ts"]) for r in rows}
+        return {r["dedup_key"]: datetime.fromisoformat(r["pushed_at"]) for r in rows}
 
     def pushed_count_since(self, since: datetime) -> int:
         row = self._con.execute(
-            "SELECT count(*) AS n FROM signals WHERE pushed = 1 AND ts >= ?",
+            "SELECT count(*) AS n FROM signals WHERE pushed = 1 AND pushed_at >= ?",
             (since.astimezone(timezone.utc).isoformat(),),
         ).fetchone()
         return int(row["n"])

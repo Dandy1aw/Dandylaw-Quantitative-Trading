@@ -37,17 +37,17 @@ def test_insert_and_query_day(ledger: SignalLedger) -> None:
 
 def test_last_push_by_key_only_pushed(ledger: SignalLedger) -> None:
     s = sig()
-    ledger.insert(s, pushed=False)
+    ledger.insert(s, pushed=False, now=NOW)
     assert ledger.last_push_by_key(NOW - timedelta(hours=4)) == {}
-    ledger.insert(s, pushed=True)
+    ledger.insert(s, pushed=True, now=NOW)
     got = ledger.last_push_by_key(NOW - timedelta(hours=4))
     assert got == {dedup_key(s): NOW}
 
 
 def test_pushed_count_since(ledger: SignalLedger) -> None:
-    ledger.insert(sig("A"), pushed=True)
-    ledger.insert(sig("B"), pushed=True)
-    ledger.insert(sig("C"), pushed=False)
+    ledger.insert(sig("A"), pushed=True, now=NOW)
+    ledger.insert(sig("B"), pushed=True, now=NOW)
+    ledger.insert(sig("C"), pushed=False, now=NOW)
     assert ledger.pushed_count_since(NOW - timedelta(hours=1)) == 2
 
 
