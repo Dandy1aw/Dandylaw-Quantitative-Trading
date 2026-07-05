@@ -128,6 +128,11 @@ Console），但美股数据质量和飞书推送体验会打折扣。
   BUY 信号
 - 非美元计价标的（`international_tickers` 里的）用**实时汇率**换算流动性门槛，
   汇率来自 yfinance 的 `{币种}=X` 报价，每次跑动量轮动时刷新一次
+- **按市场分组排名**（`momentum_group_top_n` 配置）：`international_tickers`
+  里的币种（如 HKD/KRW）各自独立排名、独立取名额，不跟默认组（美股/其余
+  标的，用 `top_n`）竞争——否则港股/韩股这类杠杆/热门标的动量经常极端
+  （实测 +386.7%），会把美股标的全部挤出 top-N。默认组的名额始终是完整
+  的 `top_n` 个，不会被其他组占用
 
 ### breakout_20d（20日突破，盘中5分钟级）
 
@@ -224,6 +229,10 @@ international_tickers:         # 固定走 yfinance 的标的 -> 币种（Alpaca
   "7709.HK": HKD
   "000660.KS": KRW
 
+momentum_group_top_n:          # 动量轮动按币种分组的独立名额，不配置的币种(含美股)用 top_n
+  HKD: 1
+  KRW: 1
+
 watchlist:                     # 20日突破策略监控的标的（跟 universe 独立）
   - NVDA
   - ...
@@ -311,6 +320,7 @@ ticker（全名太长会挤压其他列）。
 uv run python research/backtest_momentum.py       # vectorbt 参数扫描（lookback×top_n）
 uv run python research/backtest_breakout.py       # 突破策略回测（日线近似，5min历史数据不可得）
 uv run python research/backtest_new_strategies.py # RSI/MACD/布林带 事件驱动回测
+uv run python research/backtest_my_holdings.py    # 只针对真实持仓标的的专属回测(复用上面几个脚本的函数)
 uv run python research/walkforward.py             # 逐日喂数据 vs 全量回放，验证无未来函数（覆盖全部5个策略）
 ```
 
