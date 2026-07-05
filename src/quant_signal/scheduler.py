@@ -83,6 +83,13 @@ def build_scheduler(
     def watch_deviation() -> None:
         engine.run_watch_deviation(datetime.now(timezone.utc))
 
+    def enrichment() -> None:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="enrichment")
+            return
+        engine.run_enrichment(datetime.now(timezone.utc))
+
     def maintenance() -> None:
         from quant_signal.ingest import ingest_daily_split
 
@@ -117,4 +124,5 @@ def build_scheduler(
         CronTrigger(hour="0-21", minute="*/5", day_of_week="mon-fri", timezone=timezone.utc),
         id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
     )
+    sched.add_job(enrichment, CronTrigger(hour=8, minute=45), id="enrichment")
     return sched

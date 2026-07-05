@@ -16,6 +16,15 @@ class NotifySettings(BaseModel):
     hourly_limit: int = 10
 
 
+class EnrichmentSettings(BaseModel):
+    enabled: bool = False
+    uzi_run_py: str = ""
+    python_exe: str = "python"
+    depth: str = "lite"
+    timeout_seconds: int = 120
+    max_tickers: int = 8
+
+
 class Settings(BaseModel):
     data_source: Literal["yfinance", "alpaca"] = "yfinance"
     db_dir: str = "data"
@@ -24,6 +33,7 @@ class Settings(BaseModel):
     strategies: dict[str, dict[str, float | int]]
     international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
     notify: NotifySettings = NotifySettings()
+    enrichment: EnrichmentSettings = EnrichmentSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
     alpaca_secret: str = ""

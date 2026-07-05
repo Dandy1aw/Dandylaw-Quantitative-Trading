@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import structlog
@@ -10,9 +11,10 @@ from quant_signal.datafeed.base import DataSource
 from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
+from quant_signal.enrichment import run_uzi_analysis
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Notifier
-from quant_signal.notifier.cards import alert_card, report_card, signal_card
+from quant_signal.notifier.cards import alert_card, build_enrichment_card, report_card, signal_card
 from quant_signal.notifier.dedup import apply_dedup
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
@@ -286,3 +288,33 @@ class Engine:
         log.info(
             "watch_deviation.done", checked=len(ref_prices), pushed=len(result.to_push)
         )
+
+    def run_enrichment(self, now: datetime) -> None:
+        """UZI-Skill 深度分析信息增强：持仓+今日全部策略BUY信号，headless跑一遍
+        外部深度分析工具作为补充参考。enabled=false 时直接跳过。"""
+        cfg = self.settings.enrichment
+        if not cfg.enabled:
+            return
+
+        held = set(self.ledger.get_holdings(self.momentum.strategy_id))
+        today_buys = {
+            str(r["ticker"]) for r in self.ledger.signals_on(now.date()) if r["direction"] == "buy"
+        }
+        watch_set = sorted(held | today_buys)[: cfg.max_tickers]
+        if not watch_set:
+            log.info("enrichment.skip", reason="empty_watch_set")
+            return
+
+        results = []
+        for ticker in watch_set:
+            r = run_uzi_analysis(
+                ticker, Path(cfg.uzi_run_py), cfg.python_exe, cfg.depth, cfg.timeout_seconds
+            )
+            if r is not None:
+                results.append(r)
+        if not results:
+            log.info("enrichment.skip", reason="no_results", attempted=len(watch_set))
+            return
+
+        self.notifier.send(build_enrichment_card(results, held))
+        log.info("enrichment.done", attempted=len(watch_set), succeeded=len(results))

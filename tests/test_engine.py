@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_signal.config import load_settings
+from quant_signal.config import EnrichmentSettings, load_settings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine, _intraday_snapshot, _select_report_rows
 from quant_signal.ledger import SignalLedger
@@ -226,6 +226,82 @@ def test_select_report_rows_no_truncation_when_under_limit() -> None:
     signals = [_buy("A", rank=1), _sell("Z")]
     shown, omitted = _select_report_rows(signals, limit=5)
     assert len(shown) == 2 and omitted == 0
+
+
+def test_run_enrichment_skips_when_disabled(tmp_path: Path) -> None:
+    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    assert settings.enrichment.enabled is False   # 默认关闭
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    ledger.set_holdings("momentum_rotation", ["AAA"])
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    engine.run_enrichment(datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc))
+    assert notifier.cards == []
+
+
+def test_run_enrichment_pushes_card_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enrichment_cfg = EnrichmentSettings(
+        enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
+        depth="lite", timeout_seconds=120, max_tickers=8,
+    )
+    settings = load_settings().model_copy(
+        update={"universe": ["AAA"], "watchlist": [], "enrichment": enrichment_cfg}
+    )
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    now = datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc)
+
+    ledger.set_holdings("momentum_rotation", ["AAA"])
+    ledger.insert(
+        Signal(ticker="AAA", direction=Direction.BUY, price=100.0, reason="r",
+               strategy_id="momentum_rotation", ts=now),
+        pushed=True, now=now,
+    )
+
+    calls: list[str] = []
+
+    def fake_run_uzi_analysis(ticker, run_py_path, python_exe, depth, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls.append(ticker)
+        return {
+            "ticker": ticker, "name": "AAA Inc.", "overall_score": 80.0,
+            "verdict_label": "积极", "panel_consensus": 75.0, "risks": [],
+        }
+
+    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fake_run_uzi_analysis)
+
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    engine.run_enrichment(now)
+
+    assert calls == ["AAA"]
+    assert len(notifier.cards) == 1
+    assert "深度分析" in notifier.cards[0].title
+
+
+def test_run_enrichment_no_watch_set_is_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    enrichment_cfg = EnrichmentSettings(
+        enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
+        depth="lite", timeout_seconds=120, max_tickers=8,
+    )
+    settings = load_settings().model_copy(
+        update={"universe": ["AAA"], "watchlist": [], "enrichment": enrichment_cfg}
+    )
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+
+    def fail_if_called(*a, **k):  # type: ignore[no-untyped-def]
+        raise AssertionError("不该被调用：watch_set 为空")
+
+    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fail_if_called)
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    engine.run_enrichment(datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc))
+    assert notifier.cards == []
 
 
 def test_intraday_snapshot_appends_partial_day(daily_bars: pd.DataFrame) -> None:

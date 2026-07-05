@@ -59,3 +59,11 @@ strategies:
 notify:
   dedup_hours: 4
   hourly_limit: 10
+
+enrichment:                      # UZI-Skill 深度分析信息增强（可选，默认关闭）
+  enabled: false
+  uzi_run_py: "C:/Users/syw/.claude/plugins/cache/uzi-skill/stock-deep-analyzer/3.9.1/skills/deep-analysis/run.py"
+  python_exe: "python"
+  depth: lite
+  timeout_seconds: 120
+  max_tickers: 8

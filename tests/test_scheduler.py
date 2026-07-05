@@ -15,7 +15,7 @@ def test_scheduler_registers_all_jobs() -> None:
     ids = {j.id for j in sched.get_jobs()}
     assert ids == {
         "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
-        "rotation_asia_open", "rotation_asia_close", "watch_deviation",
+        "rotation_asia_open", "rotation_asia_close", "watch_deviation", "enrichment",
     }
 
 
