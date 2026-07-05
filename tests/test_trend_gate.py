@@ -6,6 +6,7 @@ from quant_signal.strategies.trend_gate import (
     TrendGateConfig,
     apply_trend_gate,
     trend_state,
+    weekly_state_map,
 )
 
 CFG = TrendGateConfig()
@@ -139,3 +140,14 @@ def test_all_long_no_defensive() -> None:
                                 asset_type={"MU": "STOCK"}, international_tickers={},
                                 cfg=TrendGateConfig())
     assert [s.ticker for s in final] == ["MU"]   # 无 FLAT，无防御替换
+
+
+def test_weekly_state_map_matches_trend_state_last() -> None:
+    """weekly_state_map 末周的 state 应与 trend_state(as_of=末日) 一致（共享 _replay）。"""
+    n = 320
+    close = _series(100.0 * np.cumprod(np.full(n, 1.004)))
+    rf = _flat_rf(n)
+    wsm = weekly_state_map(close, close, rf, is_stock=False, is_usd=True, cfg=CFG)
+    info = trend_state("X", close, close, rf, is_stock=False, is_usd=True,
+                       cfg=CFG, as_of=close.index[-1])
+    assert info is not None and wsm.iloc[-1] == info.state == "LONG"
