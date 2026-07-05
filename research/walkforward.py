@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from quant_signal.config import load_settings
+from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.strategies.base import Signal, Strategy
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
@@ -66,12 +67,17 @@ def main() -> None:
     rp = settings.strategies["rsi_reversion"]
     mc = settings.strategies["macd_cross"]
     bb = settings.strategies["bollinger_breakout"]
+    currencies = set(settings.international_tickers.values())
+    fx_rates = fetch_usd_rates(currencies) if currencies else {}
     strategies: list[Strategy] = [
         MomentumRotation(
             settings.universe,
             int(mp["lookback_days"]),
             int(mp["top_n"]),
             float(mp["min_dollar_volume"]),
+            ticker_currency=settings.international_tickers,
+            fx_rates=fx_rates,
+            group_top_n=settings.momentum_group_top_n,
         ),
         Breakout20d(
             settings.watchlist, int(bp["high_lookback_days"]), float(bp["volume_multiplier"])

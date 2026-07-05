@@ -50,6 +50,7 @@ def run_backtest(
         min_dollar_volume=min_dollar_volume,
         ticker_currency=settings.international_tickers,
         fx_rates=fx_rates,
+        group_top_n=settings.momentum_group_top_n,
     )
     close = bars["close"].unstack("ticker").sort_index()
     month_ends = close.groupby(close.index.tz_localize(None).to_period("M")).tail(1).index

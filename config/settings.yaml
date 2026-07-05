@@ -27,6 +27,10 @@ international_tickers:          # 港股/韩股等固定走 yfinance（Alpaca �
   "7709.HK": HKD
   "000660.KS": KRW
 
+momentum_group_top_n:            # 动量轮动按币种分组独立排名的名额，不配置的币种(含美股)归入默认组用 top_n
+  HKD: 1                          # 港股组名额
+  KRW: 1                          # 韩股组名额
+
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA
   - TSLA

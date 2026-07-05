@@ -99,6 +99,7 @@ class Engine:
             top_n=int(mp["top_n"]),
             min_dollar_volume=float(mp["min_dollar_volume"]),
             ticker_currency=settings.international_tickers,
+            group_top_n=settings.momentum_group_top_n,
         )
         self._intl_source = YFinanceSource()
         self.breakout = Breakout20d(

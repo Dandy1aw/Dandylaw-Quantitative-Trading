@@ -59,6 +59,61 @@ def test_survives_mismatched_trading_calendar(daily_bars: pd.DataFrame) -> None:
     assert tickers == {"AAA", "BBB"}   # AAA/BBB 不该因 KRT 多出的一天而消失
 
 
+def test_group_ranking_isolates_market_groups(daily_bars: pd.DataFrame) -> None:
+    """港股/韩股组的动量再夸张，也不该挤占默认组(美股)的名额，各自独立排名。"""
+    ts = daily_bars.index.get_level_values("ts")
+    n = len(ts.unique())
+    krt_close = 500_000.0 * np.cumprod(np.full(n, 1.03))  # 极端动量，KRW计价
+    krt = pd.DataFrame(
+        {"open": krt_close, "high": krt_close, "low": krt_close, "close": krt_close, "volume": 100_000},
+        index=pd.MultiIndex.from_product([["KRT"], ts.unique()], names=["ticker", "ts"]),
+    )
+    bars = pd.concat([daily_bars, krt]).sort_index()
+
+    strat = MomentumRotation(
+        universe=[*UNIVERSE, "KRT"], top_n=2, min_dollar_volume=50_000_000,
+        ticker_currency={"KRT": "KRW"}, fx_rates={"KRW": 1300.0},
+        group_top_n={"KRW": 1},
+    )
+    signals = strat.generate(bars)
+    tickers = {s.ticker for s in signals}
+    assert tickers == {"AAA", "BBB", "KRT"}   # 默认组仍是AAA/BBB，KRT占自己的韩股组名额
+
+    krt_signal = next(s for s in signals if s.ticker == "KRT")
+    assert "韩股组" in krt_signal.reason
+    aaa_signal = next(s for s in signals if s.ticker == "AAA")
+    assert "美股组" in aaa_signal.reason
+    assert all(s.suggested_weight == round(1 / 3, 4) for s in signals)   # 3只均分
+
+
+def test_group_with_no_eligible_candidate_does_not_backfill(daily_bars: pd.DataFrame) -> None:
+    """某组没有标的通过流动性门槛时，总选中数相应减少，不从其他组补位。"""
+    ts = daily_bars.index.get_level_values("ts")
+    krt_close = 500_000.0 * np.cumprod(np.full(len(ts.unique()), 1.03))
+    krt = pd.DataFrame(
+        {"open": krt_close, "high": krt_close, "low": krt_close, "close": krt_close, "volume": 1},  # 成交量极低，过不了流动性门槛
+        index=pd.MultiIndex.from_product([["KRT"], ts.unique()], names=["ticker", "ts"]),
+    )
+    bars = pd.concat([daily_bars, krt]).sort_index()
+
+    strat = MomentumRotation(
+        universe=[*UNIVERSE, "KRT"], top_n=2, min_dollar_volume=50_000_000,
+        ticker_currency={"KRT": "KRW"}, fx_rates={"KRW": 1300.0},
+        group_top_n={"KRW": 1},
+    )
+    signals = strat.generate(bars)
+    tickers = {s.ticker for s in signals}
+    assert tickers == {"AAA", "BBB"}   # 韩股组空缺，不补给默认组
+
+
+def test_empty_group_top_n_preserves_original_global_ranking(daily_bars: pd.DataFrame) -> None:
+    """不传 group_top_n（默认空字典）时，行为跟修改前完全一致——全局统一排名。"""
+    strat = MomentumRotation(universe=UNIVERSE, top_n=2, min_dollar_volume=50_000_000)
+    signals = strat.generate(daily_bars)
+    assert [s.ticker for s in signals] == ["AAA", "BBB"]
+    assert all("美股组" in s.reason for s in signals)
+
+
 def test_dollar_volume_filter_converts_foreign_currency() -> None:
     """非美元计价标的的成交额过滤必须换算成美元，否则原始数字会误判流动性达标。"""
     ts = pd.date_range("2025-08-01", periods=65, freq="B", tz="UTC")

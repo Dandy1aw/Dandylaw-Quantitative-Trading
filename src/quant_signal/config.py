@@ -31,6 +31,7 @@ class Settings(BaseModel):
     universe: list[str]
     watchlist: list[str]
     strategies: dict[str, dict[str, float | int]]
+    momentum_group_top_n: dict[str, int] = {}   # 币种 -> 独立名额，如 {"HKD": 1, "KRW": 1}
     international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
