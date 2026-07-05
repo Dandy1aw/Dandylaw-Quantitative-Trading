@@ -1,12 +1,25 @@
 data_source: alpaca            # yfinance | alpaca（填好 .env 后改这里切换）
 db_dir: data                   # duckdb/sqlite 存放目录，相对仓库根
 
-universe:                      # momentum_rotation 标的池
+universe:                      # momentum_rotation 标的池：原 ETF 候选池 + 用户实际持仓
   - SPY
   - QQQ
   - IWM
   - TLT
   - GLD
+  - MU
+  - DRAM
+  - RAM
+  - MRVL
+  - SNDK
+  - SNXX
+  - SMH
+  - QQQM
+  - NVDA
+  - AMD
+  - LLY
+  - INTC
+  - TSM
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA
   - TSLA
