@@ -70,6 +70,17 @@ class SignalLedger:
         ).fetchall()
         return {r["dedup_key"]: datetime.fromisoformat(r["pushed_at"]) for r in rows}
 
+    def latest_signal_price(
+        self, strategy_id: str, ticker: str, since: datetime
+    ) -> float | None:
+        """取该标的最近一次信号的价格（不论是否实际推送），用作盘中偏离监控的参考价。"""
+        row = self._con.execute(
+            "SELECT price FROM signals WHERE strategy_id = ? AND ticker = ?"
+            " AND pushed_at >= ? ORDER BY pushed_at DESC LIMIT 1",
+            (strategy_id, ticker, since.astimezone(timezone.utc).isoformat()),
+        ).fetchone()
+        return float(row["price"]) if row else None
+
     def pushed_count_since(self, since: datetime) -> int:
         row = self._con.execute(
             "SELECT count(*) AS n FROM signals WHERE pushed = 1 AND pushed_at >= ?",

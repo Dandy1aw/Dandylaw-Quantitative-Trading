@@ -75,13 +75,21 @@ def build_scheduler(
 
         notifier.send(build_daily_report(ledger, store, now_et.date()))
 
+    def rotation_push() -> None:
+        """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
+        独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
+        engine.run_premarket(datetime.now(timezone.utc))
+
+    def watch_deviation() -> None:
+        engine.run_watch_deviation(datetime.now(timezone.utc))
+
     def maintenance() -> None:
-        from quant_signal.ingest import ingest_daily
+        from quant_signal.ingest import ingest_daily_split
 
         if engine is not None:
-            ingest_daily(
+            ingest_daily_split(
                 store,
-                engine.source,
+                engine.settings,
                 engine.settings.universe + engine.settings.watchlist,
                 days=10,
             )
@@ -93,4 +101,20 @@ def build_scheduler(
     sched.add_job(postmarket, CronTrigger(hour=16, minute=30), id="postmarket")
     sched.add_job(maintenance, CronTrigger(hour=3, minute=0), id="maintenance")
     sched.add_job(hb.tick, IntervalTrigger(minutes=15), id="heartbeat")
+    # 以下三个 job 用固定 UTC 时刻门控，不随 scheduler 默认时区(ET)的夏令时漂移
+    sched.add_job(
+        rotation_push,
+        CronTrigger(hour=0, minute=0, day_of_week="mon-fri", timezone=timezone.utc),
+        id="rotation_asia_open",  # 08:00 北京时间
+    )
+    sched.add_job(
+        rotation_push,
+        CronTrigger(hour=7, minute=30, day_of_week="mon-fri", timezone=timezone.utc),
+        id="rotation_asia_close",  # 15:30 北京时间
+    )
+    sched.add_job(
+        watch_deviation,
+        CronTrigger(hour="0-21", minute="*/5", day_of_week="mon-fri", timezone=timezone.utc),
+        id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
+    )
     return sched

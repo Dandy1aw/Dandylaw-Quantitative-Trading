@@ -42,6 +42,8 @@ strategies:
   breakout_20d:
     high_lookback_days: 20
     volume_multiplier: 1.5
+  price_deviation:
+    threshold: 0.02                # 持仓/今日BUY目标相对当天参考价涨跌超此比例即提醒
 
 notify:
   dedup_hours: 4

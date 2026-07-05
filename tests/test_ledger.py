@@ -51,6 +51,26 @@ def test_pushed_count_since(ledger: SignalLedger) -> None:
     assert ledger.pushed_count_since(NOW - timedelta(hours=1)) == 2
 
 
+def test_latest_signal_price_returns_most_recent(ledger: SignalLedger) -> None:
+    ledger.insert(sig("SPY"), pushed=True, now=NOW - timedelta(hours=2))
+    ledger.insert(
+        Signal(
+            ticker="SPY", direction=Direction.BUY, price=105.0, reason="r2",
+            strategy_id="momentum_rotation", ts=NOW,
+        ),
+        pushed=False,
+        now=NOW,
+    )
+    price = ledger.latest_signal_price("momentum_rotation", "SPY", since=NOW - timedelta(hours=24))
+    assert price == 105.0   # 取最近一次插入的信号价，即使未实际推送
+
+
+def test_latest_signal_price_none_when_no_signal_today(ledger: SignalLedger) -> None:
+    ledger.insert(sig("SPY"), pushed=True, now=NOW - timedelta(hours=30))
+    price = ledger.latest_signal_price("momentum_rotation", "SPY", since=NOW - timedelta(hours=24))
+    assert price is None
+
+
 def test_holdings_roundtrip(ledger: SignalLedger) -> None:
     assert ledger.get_holdings("momentum_rotation") == []
     ledger.set_holdings("momentum_rotation", ["SPY", "QQQ"])

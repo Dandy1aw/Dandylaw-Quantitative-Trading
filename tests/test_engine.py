@@ -123,6 +123,64 @@ def test_premarket_routes_international_ticker_and_refreshes_fx(
     assert not stored.empty   # 国际标的数据确实经由独立的 yfinance 源写入
 
 
+def test_premarket_report_includes_live_price(env, daily_bars) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+    ts5 = pd.date_range(last_bar_ts + timedelta(hours=1), periods=1, freq="5min", tz="UTC")
+    idx = pd.MultiIndex.from_product([["AAA"], ts5], names=["ticker", "ts"])
+    intraday = pd.DataFrame(
+        {"open": 999.0, "high": 999.0, "low": 999.0, "close": 999.0, "volume": 1}, index=idx
+    )
+    engine = Engine(settings, store, FakeSource(daily_bars, intraday), ledger, notifier)
+    engine.run_premarket(last_bar_ts + timedelta(hours=32))
+
+    body = notifier.cards[0].body_md
+    assert "999.00" in body   # AAA 的实时价被抓取并展示
+    assert "-" in body        # BBB 没有对应的 intraday 数据，展示为 "-"
+
+
+def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path) -> None:
+    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    now = datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc)
+
+    ledger.set_holdings("momentum_rotation", ["AAA"])
+    ledger.insert(
+        Signal(
+            ticker="AAA", direction=Direction.BUY, price=100.0, reason="r",
+            strategy_id="momentum_rotation", ts=now - timedelta(hours=1),
+        ),
+        pushed=True,
+        now=now - timedelta(hours=1),
+    )
+
+    ts5 = pd.date_range("2026-07-06 04:55", periods=1, freq="5min", tz="UTC")
+    idx = pd.MultiIndex.from_product([["AAA"], ts5], names=["ticker", "ts"])
+    intraday = pd.DataFrame(
+        {"open": 105.0, "high": 106.0, "low": 104.0, "close": 105.0, "volume": 1000}, index=idx
+    )
+
+    engine = Engine(settings, store, FakeSource(pd.DataFrame(), intraday), ledger, notifier)
+    engine.run_watch_deviation(now)
+
+    rows = ledger.signals_on(now.date())
+    dev_rows = [r for r in rows if r["strategy_id"] == "price_deviation"]
+    assert len(dev_rows) == 1 and dev_rows[0]["direction"] == "buy"
+    assert len(notifier.cards) == 1
+
+
+def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:
+    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    engine.run_watch_deviation(datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc))
+    assert notifier.cards == []
+
+
 def _buy(ticker: str, rank: int) -> Signal:
     return Signal(
         ticker=ticker, direction=Direction.BUY, price=1.0, reason="r",

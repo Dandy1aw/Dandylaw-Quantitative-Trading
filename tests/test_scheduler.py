@@ -13,7 +13,10 @@ class FakeNotifier:
 def test_scheduler_registers_all_jobs() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     ids = {j.id for j in sched.get_jobs()}
-    assert ids == {"premarket", "intraday", "postmarket", "maintenance", "heartbeat"}
+    assert ids == {
+        "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
+        "rotation_asia_open", "rotation_asia_close", "watch_deviation",
+    }
 
 
 def test_heartbeat_alerts_after_consecutive_failures() -> None:
