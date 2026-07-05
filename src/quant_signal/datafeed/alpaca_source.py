@@ -1,24 +1,66 @@
-"""Alpaca 数据源。C1 阶段实现真实 REST 拉取，当前为占位。"""
-
 from __future__ import annotations
 
 from datetime import date
+from typing import Union
 
+import httpx
 import pandas as pd
+
+_QueryValue = Union[str, int, float, bool, None]
+
+_BASE = "https://data.alpaca.markets/v2/stocks/bars"
+_COLMAP = {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
 
 
 class AlpacaSource:
     def __init__(self, key: str, secret: str) -> None:
-        raise NotImplementedError(
-            "AlpacaSource 将在 C1 阶段实现；当前请使用 data_source: yfinance"
-        )
+        if not key or not secret:
+            raise ValueError("ALPACA_KEY/ALPACA_SECRET 未配置，请填写 config/.env")
+        self._headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
-    def fetch_daily_bars(
-        self, tickers: list[str], start: date, end: date
+    def _fetch(
+        self, tickers: list[str], timeframe: str, start: str, end: str | None
     ) -> pd.DataFrame:
-        raise NotImplementedError
+        frames: list[pd.DataFrame] = []
+        params: dict[str, _QueryValue] = {
+            "symbols": ",".join(tickers),
+            "timeframe": timeframe,
+            "start": start,
+            "adjustment": "all",
+            "feed": "iex",
+            "limit": 10_000,
+        }
+        if end:
+            params["end"] = end
+        while True:
+            resp = httpx.get(_BASE, params=params, headers=self._headers, timeout=30.0)
+            resp.raise_for_status()
+            body = resp.json()
+            for ticker, bars in (body.get("bars") or {}).items():
+                if not bars:
+                    continue
+                df = pd.DataFrame(bars).rename(columns=_COLMAP)
+                df["ts"] = pd.to_datetime(df["t"], utc=True)
+                df["ticker"] = ticker
+                frames.append(df.set_index(["ticker", "ts"])[list(_COLMAP.values())])
+            token = body.get("next_page_token")
+            if not token:
+                break
+            params["page_token"] = token
+        if not frames:
+            return pd.DataFrame(
+                columns=list(_COLMAP.values()),
+                index=pd.MultiIndex.from_arrays([[], []], names=["ticker", "ts"]),
+            )
+        return pd.concat(frames).sort_index()
+
+    def fetch_daily_bars(self, tickers: list[str], start: date, end: date) -> pd.DataFrame:
+        return self._fetch(tickers, "1Day", start.isoformat(), end.isoformat())
 
     def fetch_intraday_bars(
         self, tickers: list[str], lookback_days: int = 5
     ) -> pd.DataFrame:
-        raise NotImplementedError
+        from datetime import datetime, timedelta, timezone
+
+        start = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        return self._fetch(tickers, "5Min", start, None)
