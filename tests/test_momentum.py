@@ -86,6 +86,31 @@ def test_group_ranking_isolates_market_groups(daily_bars: pd.DataFrame) -> None:
     assert all(s.suggested_weight == round(1 / 3, 4) for s in signals)   # 3只均分
 
 
+def test_rank_is_within_group_not_global(daily_bars: pd.DataFrame) -> None:
+    """名次按组内算，每组都从第1起——不是全局名次。否则分组标签配全局名次会自相
+    矛盾（美股组标签却写着'第3'，韩股组第1只标的却写着'第2'）。"""
+    ts = daily_bars.index.get_level_values("ts")
+    n = len(ts.unique())
+    krt_close = 500_000.0 * np.cumprod(np.full(n, 1.03))  # 全局动量最高
+    krt = pd.DataFrame(
+        {"open": krt_close, "high": krt_close, "low": krt_close, "close": krt_close, "volume": 100_000},
+        index=pd.MultiIndex.from_product([["KRT"], ts.unique()], names=["ticker", "ts"]),
+    )
+    bars = pd.concat([daily_bars, krt]).sort_index()
+    strat = MomentumRotation(
+        universe=[*UNIVERSE, "KRT"], top_n=2, min_dollar_volume=50_000_000,
+        ticker_currency={"KRT": "KRW"}, fx_rates={"KRW": 1300.0}, group_top_n={"KRW": 1},
+    )
+    signals = {s.ticker: s for s in strat.generate(bars)}
+    # KRT 全局动量第1，韩股组内也是第1
+    assert "韩股组第1" in signals["KRT"].reason
+    # AAA/BBB 全局是第2/第3，但美股组内应是第1/第2
+    assert "美股组第1" in signals["AAA"].reason
+    assert "美股组第2" in signals["BBB"].reason
+    assert signals["AAA"].extra is not None and signals["AAA"].extra["rank"] == 1
+    assert signals["BBB"].extra is not None and signals["BBB"].extra["rank"] == 2
+
+
 def test_group_with_no_eligible_candidate_does_not_backfill(daily_bars: pd.DataFrame) -> None:
     """某组没有标的通过流动性门槛时，总选中数相应减少，不从其他组补位。"""
     ts = daily_bars.index.get_level_values("ts")

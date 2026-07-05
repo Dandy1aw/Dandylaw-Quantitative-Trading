@@ -80,11 +80,13 @@ def _market_of(ticker: str, international_tickers: dict[str, str]) -> str:
     return _MARKET_BY_CCY.get(international_tickers.get(ticker, ""), "美股组")
 
 
-def _sig_sort_key(s: Signal) -> tuple[int, int, str]:
-    rank = (s.extra or {}).get("rank", 999)
-    rank_i = int(rank) if isinstance(rank, int) else 999
+def _sig_sort_key(s: Signal) -> tuple[int, float, str]:
+    # 小节内排序：BUY 在前，再按动量降序（动量信号带 momentum_60d）；无动量的
+    # 技术信号按 ticker。用组内名次排序会让美股个股/ETF 交错，故改用动量。
     dir_rank = 0 if s.direction == Direction.BUY else 1
-    return (dir_rank, rank_i, s.ticker)
+    mom = (s.extra or {}).get("momentum_60d")
+    mom_key = -float(mom) if isinstance(mom, (int, float)) else 0.0
+    return (dir_rank, mom_key, s.ticker)
 
 
 def _confluence_rows(

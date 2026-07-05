@@ -86,7 +86,9 @@ class MomentumRotation(Strategy):
                 labels[key] = _DEFAULT_GROUP_LABEL
             groups[key].append((t, m))
 
-        selected: list[tuple[str, float, str]] = []
+        # 每组内独立按动量排名取名额，名次(rank)按"组内"算——各组都从第1起，
+        # 与"分组标签"一致；不用全局名次（否则'美股组'标签却配全局'第3'会自相矛盾）。
+        selected: list[tuple[str, float, str, int]] = []
         for key, items in groups.items():
             if key in self.group_top_n:
                 n = self.group_top_n[key]
@@ -95,9 +97,11 @@ class MomentumRotation(Strategy):
             else:
                 n = self.top_n
             top_in_group = sorted(items, key=lambda kv: kv[1], reverse=True)[:n]
-            selected += [(t, m, labels[key]) for t, m in top_in_group]
+            for gi, (t, m) in enumerate(top_in_group, start=1):
+                selected.append((t, m, labels[key], gi))
 
-        selected.sort(key=lambda x: x[1], reverse=True)  # 仅用于展示排名，不影响入选
+        # 展示顺序仍按动量降序（卡片读起来高→低），但每条的名次是组内名次
+        selected.sort(key=lambda x: x[1], reverse=True)
 
         last_ts = close.index[-1].to_pydatetime()
         weight = round(1.0 / len(selected), 4) if selected else None
@@ -106,11 +110,11 @@ class MomentumRotation(Strategy):
                 ticker=t,
                 direction=Direction.BUY,
                 price=last_price[t],
-                reason=f"{self.lookback_days}日动量 {mom:+.1%}，{label}第{i}",
+                reason=f"{self.lookback_days}日动量 {mom:+.1%}，{label}第{gi}",
                 strategy_id=self.strategy_id,
                 ts=last_ts,
                 suggested_weight=weight,
-                extra={"momentum_60d": mom, "rank": i},
+                extra={"momentum_60d": mom, "rank": gi},
             )
-            for i, (t, mom, label) in enumerate(selected, start=1)
+            for t, mom, label, gi in selected
         ]

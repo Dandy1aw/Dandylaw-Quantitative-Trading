@@ -7,11 +7,15 @@ TS = datetime(2026, 1, 2, tzinfo=timezone.utc)
 INTL = {"7709.HK": "HKD", "000660.KS": "KRW"}
 
 
-def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None):  # type: ignore[no-untyped-def]
-    extra = {"rank": rank} if rank is not None else None
+def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None, momentum=None):  # type: ignore[no-untyped-def]
+    extra: dict[str, object] = {}
+    if rank is not None:
+        extra["rank"] = rank
+    if momentum is not None:
+        extra["momentum_60d"] = momentum
     return Signal(
         ticker=ticker, direction=direction, price=price, reason=reason,
-        strategy_id=strategy_id, ts=TS, extra=extra,
+        strategy_id=strategy_id, ts=TS, extra=extra or None,
     )
 
 
@@ -83,3 +87,14 @@ def test_live_price_present_formatted() -> None:
     signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
     us = _card_by(premarket_cards(signals, INTL, {"MU": 123.456}), "美股组")
     assert "123.46" in us.body_md
+
+
+def test_momentum_section_sorted_by_momentum_desc() -> None:
+    """同一动量小节里 ETF/个股混排时按动量降序，不因组内名次而交错。"""
+    signals = [
+        _sig("AMD", Direction.BUY, "momentum_rotation", momentum=0.30),
+        _sig("MU", Direction.BUY, "momentum_rotation", momentum=0.90),
+        _sig("SMH", Direction.BUY, "momentum_rotation", momentum=0.50),
+    ]
+    us = _card_by(premarket_cards(signals, INTL, {}), "美股组")
+    assert us.body_md.index("MU") < us.body_md.index("SMH") < us.body_md.index("AMD")
