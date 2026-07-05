@@ -6,9 +6,10 @@ import pytest
 
 from quant_signal.config import load_settings
 from quant_signal.datafeed.store import BarStore
-from quant_signal.engine import Engine, _intraday_snapshot
+from quant_signal.engine import Engine, _intraday_snapshot, _select_report_rows
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
+from quant_signal.strategies.base import Direction, Signal
 
 
 class FakeNotifier:
@@ -120,6 +121,34 @@ def test_premarket_routes_international_ticker_and_refreshes_fx(
     assert engine.momentum.fx_rates == {"KRW": 1300.0}
     stored = store.read_daily_bars(["KRT"])
     assert not stored.empty   # 国际标的数据确实经由独立的 yfinance 源写入
+
+
+def _buy(ticker: str, rank: int) -> Signal:
+    return Signal(
+        ticker=ticker, direction=Direction.BUY, price=1.0, reason="r",
+        strategy_id="momentum_rotation", ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        extra={"rank": rank},
+    )
+
+
+def _sell(ticker: str) -> Signal:
+    return Signal(
+        ticker=ticker, direction=Direction.SELL, price=1.0, reason="r",
+        strategy_id="momentum_rotation", ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_select_report_rows_prioritizes_buy_by_rank_then_caps() -> None:
+    signals = [_sell("Z"), _sell("Y"), _buy("B", rank=2), _buy("A", rank=1), _sell("X")]
+    shown, omitted = _select_report_rows(signals, limit=3)
+    assert [s.ticker for s in shown] == ["A", "B", "Z"]   # BUY按rank优先，再补SELL
+    assert omitted == 2
+
+
+def test_select_report_rows_no_truncation_when_under_limit() -> None:
+    signals = [_buy("A", rank=1), _sell("Z")]
+    shown, omitted = _select_report_rows(signals, limit=5)
+    assert len(shown) == 2 and omitted == 0
 
 
 def test_intraday_snapshot_appends_partial_day(daily_bars: pd.DataFrame) -> None:

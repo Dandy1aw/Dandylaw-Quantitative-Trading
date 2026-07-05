@@ -20,6 +20,20 @@ from quant_signal.strategies.momentum_rotation import MomentumRotation
 
 log = structlog.get_logger()
 
+PREMARKET_REPORT_LIMIT = 5
+
+
+def _select_report_rows(signals: list[Signal], limit: int) -> tuple[list[Signal], int]:
+    """早报卡片最多展示 limit 条：BUY（按动量排名）优先于 SELL，超出的数量单独返回。"""
+    def _rank(s: Signal) -> int:
+        rank = (s.extra or {}).get("rank", 999)
+        return int(rank) if isinstance(rank, int) else 999
+
+    buys = sorted((s for s in signals if s.direction == Direction.BUY), key=_rank)
+    sells = [s for s in signals if s.direction != Direction.BUY]
+    ordered = buys + sells
+    return ordered[:limit], max(0, len(ordered) - limit)
+
 
 def _intraday_snapshot(
     daily: pd.DataFrame, intraday: pd.DataFrame, day: date
@@ -149,11 +163,14 @@ class Engine:
         self.ledger.set_holdings(self.momentum.strategy_id, target_tickers)
 
         if result.to_push:
+            shown, omitted = _select_report_rows(result.to_push, PREMARKET_REPORT_LIMIT)
             lines = ["| 标的 | 方向 | 价格 | 原因 |", "|---|---|---|---|"]
             lines += [
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} | {s.reason} |"
-                for s in result.to_push
+                for s in shown
             ]
+            if omitted:
+                lines.append(f"\n还有 {omitted} 条信号未展示，完整记录见台账。")
             self.notifier.send(report_card("📋 盘前早报", "\n".join(lines)))
         log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))
 

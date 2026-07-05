@@ -64,6 +64,7 @@ class MomentumRotation(Strategy):
                 strategy_id=self.strategy_id,
                 ts=last_ts,
                 suggested_weight=weight,
+                extra={"momentum_60d": mom, "rank": i},
             )
             for i, (t, mom) in enumerate(top, start=1)
         ]
