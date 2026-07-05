@@ -42,6 +42,33 @@ def test_successful_run_parses_synthesis(tmp_path: Path, monkeypatch: pytest.Mon
     assert result["risks"] == ["ROE 极低", "行业景气度承压"]
 
 
+def test_finds_synthesis_under_scripts_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实 UZI-Skill 安装里 run.py 内部会 chdir 到 scripts/ 子目录，
+    .cache 落在 {run.py目录}/scripts/.cache/ 下而非 run.py 同级。"""
+    run_py = _fake_run_py(tmp_path)
+    cache_dir = run_py.parent / "scripts" / ".cache" / "MU"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / "synthesis.json").write_text(
+        json.dumps(
+            {
+                "ticker": "MU", "name": "Micron Technology, Inc.", "overall_score": 49.8,
+                "verdict_label": "谨慎", "panel_consensus": 31.9, "risks": ["ROE 极低"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(args=a, returncode=0),
+    )
+    result = run_uzi_analysis("MU", run_py, "python", "lite", 120)
+    assert result is not None
+    assert result["overall_score"] == 49.8
+
+
 def test_nonzero_exit_code_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_py = _fake_run_py(tmp_path)
     monkeypatch.setattr(

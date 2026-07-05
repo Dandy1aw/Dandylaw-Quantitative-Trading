@@ -18,6 +18,16 @@ log = structlog.get_logger()
 _FIELDS = ("ticker", "name", "overall_score", "verdict_label", "panel_consensus", "risks")
 
 
+def _find_synthesis_path(run_py_path: Path, ticker: str) -> Path | None:
+    """run.py 内部按两种可能布局 chdir 到 scripts 目录（Hermes 安装 vs repo-root
+    布局），.cache 相对那个 cwd 创建，不一定跟 run.py 同级，两种都探测一下。"""
+    candidates = [
+        run_py_path.parent / "scripts" / ".cache" / ticker / "synthesis.json",
+        run_py_path.parent / ".cache" / ticker / "synthesis.json",
+    ]
+    return next((c for c in candidates if c.exists()), None)
+
+
 def run_uzi_analysis(
     ticker: str,
     run_py_path: Path,
@@ -44,9 +54,9 @@ def run_uzi_analysis(
         log.warning("enrichment.nonzero_exit", ticker=ticker, code=result.returncode)
         return None
 
-    synthesis_path = run_py_path.parent / ".cache" / ticker / "synthesis.json"
-    if not synthesis_path.exists():
-        log.warning("enrichment.missing_synthesis", ticker=ticker, path=str(synthesis_path))
+    synthesis_path = _find_synthesis_path(run_py_path, ticker)
+    if synthesis_path is None:
+        log.warning("enrichment.missing_synthesis", ticker=ticker, run_py=str(run_py_path))
         return None
 
     try:
