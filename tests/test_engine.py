@@ -6,7 +6,7 @@ import pytest
 
 from quant_signal.config import EnrichmentSettings, load_settings
 from quant_signal.datafeed.store import BarStore
-from quant_signal.engine import Engine, _intraday_snapshot, _select_report_rows
+from quant_signal.engine import Engine, _intraday_snapshot
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.strategies.base import Direction, Signal
@@ -72,8 +72,9 @@ def test_premarket_generates_rotation_and_report(env, daily_bars) -> None:  # ty
     assert ("CCC", "sell") in directions                 # 调仓卖出
     holdings = set(ledger.get_holdings("momentum_rotation"))
     assert {"AAA", "BBB"} <= holdings and "CCC" not in holdings
-    assert len(notifier.cards) == 1                      # 一张早报卡
-    assert "早报" in notifier.cards[0].title
+    titles = [c.title for c in notifier.cards]
+    assert any("美股组" in t for t in titles)            # 合成标的均为美股，出美股组卡
+    assert all("盘前早报" in t or "【重要】" in t for t in titles)
 
 
 def test_premarket_report_shows_strategy_column_for_multiple_strategies(
@@ -86,7 +87,7 @@ def test_premarket_report_shows_strategy_column_for_multiple_strategies(
     last_bar_ts = daily_bars.index.get_level_values("ts").max()
     engine.run_premarket(last_bar_ts + timedelta(hours=32))
 
-    body = notifier.cards[0].body_md
+    body = "\n".join(c.body_md for c in notifier.cards)
     assert "动量轮动" in body
     assert "RSI回归" in body
 
@@ -157,7 +158,7 @@ def test_premarket_report_includes_live_price(env, daily_bars) -> None:  # type:
     engine = Engine(settings, store, FakeSource(daily_bars, intraday), ledger, notifier)
     engine.run_premarket(last_bar_ts + timedelta(hours=32))
 
-    body = notifier.cards[0].body_md
+    body = "\n".join(c.body_md for c in notifier.cards)
     assert "999.00" in body   # AAA 的实时价被抓取并展示
     assert "-" in body        # BBB 没有对应的 intraday 数据，展示为 "-"
 
@@ -202,34 +203,6 @@ def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:
     engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
     engine.run_watch_deviation(datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc))
     assert notifier.cards == []
-
-
-def _buy(ticker: str, rank: int) -> Signal:
-    return Signal(
-        ticker=ticker, direction=Direction.BUY, price=1.0, reason="r",
-        strategy_id="momentum_rotation", ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        extra={"rank": rank},
-    )
-
-
-def _sell(ticker: str) -> Signal:
-    return Signal(
-        ticker=ticker, direction=Direction.SELL, price=1.0, reason="r",
-        strategy_id="momentum_rotation", ts=datetime(2026, 1, 1, tzinfo=timezone.utc),
-    )
-
-
-def test_select_report_rows_prioritizes_buy_by_rank_then_caps() -> None:
-    signals = [_sell("Z"), _sell("Y"), _buy("B", rank=2), _buy("A", rank=1), _sell("X")]
-    shown, omitted = _select_report_rows(signals, limit=3)
-    assert [s.ticker for s in shown] == ["A", "B", "Z"]   # BUY按rank优先，再补SELL
-    assert omitted == 2
-
-
-def test_select_report_rows_no_truncation_when_under_limit() -> None:
-    signals = [_buy("A", rank=1), _sell("Z")]
-    shown, omitted = _select_report_rows(signals, limit=5)
-    assert len(shown) == 2 and omitted == 0
 
 
 def test_run_enrichment_skips_when_disabled(tmp_path: Path) -> None:

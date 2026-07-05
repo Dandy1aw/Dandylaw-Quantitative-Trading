@@ -64,5 +64,6 @@ def test_feishu_retries_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_get_notifier_falls_back_to_console(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK", raising=False)
+    # 显式置空：load_dotenv 不覆盖已存在的环境变量，避免受本机 .env 已填 webhook 影响。
+    monkeypatch.setenv("FEISHU_WEBHOOK", "")
     assert isinstance(get_notifier(load_settings()), ConsoleNotifier)

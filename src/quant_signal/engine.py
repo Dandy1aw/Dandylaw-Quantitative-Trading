@@ -14,7 +14,12 @@ from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.enrichment import run_uzi_analysis
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Notifier
-from quant_signal.notifier.cards import alert_card, build_enrichment_card, report_card, signal_card
+from quant_signal.notifier.cards import (
+    alert_card,
+    build_enrichment_card,
+    premarket_cards,
+    signal_card,
+)
 from quant_signal.notifier.dedup import apply_dedup
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
@@ -25,28 +30,6 @@ from quant_signal.strategies.rsi_reversion import RsiReversion
 from quant_signal.watch_monitor import check_deviations
 
 log = structlog.get_logger()
-
-PREMARKET_REPORT_LIMIT = 5
-
-_STRATEGY_LABELS = {
-    "momentum_rotation": "动量轮动",
-    "rsi_reversion": "RSI回归",
-    "macd_cross": "MACD",
-    "bollinger_breakout": "布林带",
-}
-
-
-def _select_report_rows(signals: list[Signal], limit: int) -> tuple[list[Signal], int]:
-    """早报卡片最多展示 limit 条：BUY（按动量排名）优先于 SELL，超出的数量单独返回。"""
-    def _rank(s: Signal) -> int:
-        rank = (s.extra or {}).get("rank", 999)
-        return int(rank) if isinstance(rank, int) else 999
-
-    buys = sorted((s for s in signals if s.direction == Direction.BUY), key=_rank)
-    sells = [s for s in signals if s.direction != Direction.BUY]
-    ordered = buys + sells
-    return ordered[:limit], max(0, len(ordered) - limit)
-
 
 def _intraday_snapshot(
     daily: pd.DataFrame, intraday: pd.DataFrame, day: date
@@ -215,19 +198,12 @@ class Engine:
         self.ledger.set_holdings(self.momentum.strategy_id, target_tickers)
 
         if result.to_push:
-            shown, omitted = _select_report_rows(result.to_push, PREMARKET_REPORT_LIMIT)
-            lines = ["| 标的 | 策略 | 方向 | 参考价 | 现价 | 原因 |", "|---|---|---|---|---|---|"]
-            for s in shown:
-                live = self._fetch_live_price(s.ticker)
-                live_str = f"{live:.2f}" if live is not None else "-"
-                label = _STRATEGY_LABELS.get(s.strategy_id, s.strategy_id)
-                lines.append(
-                    f"| {s.ticker} | {label} | {s.direction.value.upper()} | {s.price:.2f} |"
-                    f" {live_str} | {s.reason} |"
-                )
-            if omitted:
-                lines.append(f"\n还有 {omitted} 条信号未展示，完整记录见台账。")
-            self.notifier.send(report_card("📋 盘前早报", "\n".join(lines)))
+            unique = {s.ticker for s in result.to_push}
+            live_prices = {t: self._fetch_live_price(t) for t in unique}
+            for card in premarket_cards(
+                result.to_push, self.settings.international_tickers, live_prices
+            ):
+                self.notifier.send(card)
         log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))
 
     def run_intraday(self, now: datetime) -> None:

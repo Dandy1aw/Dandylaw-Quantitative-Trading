@@ -12,6 +12,8 @@ def test_load_settings_from_repo_yaml() -> None:
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("FEISHU_WEBHOOK", raising=False)
+    # 显式置空而非 delenv：load_dotenv 默认不覆盖已存在的环境变量，这样测试
+    # 不受本机 config/.env 是否真的填了 webhook 影响，保持隔离。
+    monkeypatch.setenv("FEISHU_WEBHOOK", "")
     s = load_settings()
     assert s.feishu_webhook == ""
