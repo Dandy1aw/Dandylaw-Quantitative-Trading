@@ -14,6 +14,7 @@ import pandas as pd
 import vectorbt as vbt
 
 from quant_signal.config import load_settings
+from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.strategies.momentum_rotation import MomentumRotation
@@ -35,7 +36,11 @@ def load_bars(start: date) -> pd.DataFrame:
 
 
 def run_backtest(
-    bars: pd.DataFrame, lookback_days: int, top_n: int, min_dollar_volume: float
+    bars: pd.DataFrame,
+    lookback_days: int,
+    top_n: int,
+    min_dollar_volume: float,
+    fx_rates: dict[str, float],
 ) -> dict[str, float]:
     settings = load_settings()
     strat = MomentumRotation(
@@ -43,6 +48,8 @@ def run_backtest(
         lookback_days=lookback_days,
         top_n=top_n,
         min_dollar_volume=min_dollar_volume,
+        ticker_currency=settings.international_tickers,
+        fx_rates=fx_rates,
     )
     close = bars["close"].unstack("ticker").sort_index()
     month_ends = close.groupby(close.index.tz_localize(None).to_period("M")).tail(1).index
@@ -86,6 +93,8 @@ def main() -> None:
     bars = load_bars(args.start)
     settings = load_settings()
     base = settings.strategies["momentum_rotation"]
+    currencies = set(settings.international_tickers.values())
+    fx_rates = fetch_usd_rates(currencies) if currencies else {}
 
     rows = [
         "| lookback | top_n | 年化% | Sharpe | 最大回撤% | 年换手次数 |",
@@ -93,7 +102,7 @@ def main() -> None:
     ]
     for lookback in (30, 60, 90):
         for top_n in (2, 3):
-            m = run_backtest(bars, lookback, top_n, float(base["min_dollar_volume"]))
+            m = run_backtest(bars, lookback, top_n, float(base["min_dollar_volume"]), fx_rates)
             marker = (
                 " ←当前参数"
                 if (lookback, top_n) == (int(base["lookback_days"]), int(base["top_n"]))
@@ -104,12 +113,21 @@ def main() -> None:
                 f" {m['max_drawdown']:.1f} | {m['turnover_per_year']:.1f}{marker} |"
             )
 
+    fx_note = ""
+    if fx_rates:
+        fx_str = "、".join(f"1 USD = {v:,.2f} {k}" for k, v in fx_rates.items())
+        fx_note = (
+            f"- 国际标的（{', '.join(settings.international_tickers)}）成交额换算使用当前实时汇率"
+            f"（{fx_str}）统一套用到全部历史区间，非逐日历史汇率，为近似简化\n"
+        )
+
     REPORTS.mkdir(exist_ok=True)
     out = REPORTS / f"momentum_{datetime.now(timezone.utc):%Y%m%d}.md"
     out.write_text(
         "# 动量轮动回测报告\n\n"
         f"- 数据: {args.start} 至今，universe={settings.universe}\n"
-        f"- 月末调仓，等权持有 top_n\n\n" + "\n".join(rows) + "\n\n"
+        f"- 月末调仓，等权持有 top_n\n"
+        f"{fx_note}\n" + "\n".join(rows) + "\n\n"
         "> 回测结果仅供评估，不构成投资建议。参数修改由用户决定。\n",
         encoding="utf-8",
     )
