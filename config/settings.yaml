@@ -1,4 +1,4 @@
-data_source: yfinance          # yfinance | alpaca（填好 .env 后改这里切换）
+data_source: alpaca            # yfinance | alpaca（填好 .env 后改这里切换）
 db_dir: data                   # duckdb/sqlite 存放目录，相对仓库根
 
 universe:                      # momentum_rotation 标的池
