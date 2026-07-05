@@ -22,15 +22,16 @@ def build_daily_report(ledger: SignalLedger, store: BarStore, day: date) -> Card
         "|---|---|---|---|---|---|",
     ]
     for r in rows:
+        price = float(str(r["price"]))
         ret = "-"
         if r["direction"] == "buy":
             bars = store.read_daily_bars([str(r["ticker"])])
             if not bars.empty:
                 last_close = float(bars["close"].iloc[-1])
-                ret = f"{(last_close - float(r['price'])) / float(r['price']):+.1%}"
+                ret = f"{(last_close - price) / price:+.1%}"
         hhmm = str(r["ts"])[11:16]
         lines.append(
             f"| {hhmm} | {r['ticker']} | {str(r['direction']).upper()} |"
-            f" {float(r['price']):.2f} | {ret} | {r['strategy_id']} |"
+            f" {price:.2f} | {ret} | {r['strategy_id']} |"
         )
     return report_card(title, "\n".join(lines))
