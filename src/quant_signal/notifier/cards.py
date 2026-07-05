@@ -137,7 +137,11 @@ def _market_card(
             live = live_prices.get(s.ticker)
             live_str = f"{live:.2f}" if live is not None else "-"
             sr = (s.extra or {}).get("sell_ref")
-            sell_str = f"{float(sr):.2f}" if isinstance(sr, (int, float)) else "-"
+            if isinstance(sr, (int, float)):
+                # 移动止损已在现价上方 = 已破位（应离场），标注避免"卖价>现价"的困惑
+                sell_str = f"{float(sr):.2f}" + (" ⚠破位" if float(sr) >= s.price else "")
+            else:
+                sell_str = "-"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
                 f" {live_str} | {sell_str} | {s.reason} |"

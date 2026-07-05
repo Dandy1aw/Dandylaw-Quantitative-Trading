@@ -97,6 +97,13 @@ def test_sell_ref_shown_when_present() -> None:
     assert "88.50" in us.body_md
 
 
+def test_sell_ref_breach_marked_when_above_price() -> None:
+    signals = [_sig("DRAM", Direction.BUY, "momentum_rotation", price=60.74, rank=1)]
+    signals[0].extra["sell_ref"] = 62.73  # type: ignore[index]  # 止损在现价上方=已破位
+    us = _card_by(premarket_cards(signals, INTL, {"DRAM": None}), "美股组")
+    assert "62.73 ⚠破位" in us.body_md
+
+
 def test_sell_ref_dash_when_absent() -> None:
     signals = [_sig("GLD", Direction.BUY, "macd_cross")]
     us = _card_by(premarket_cards(signals, INTL, {"GLD": None}), "美股组")

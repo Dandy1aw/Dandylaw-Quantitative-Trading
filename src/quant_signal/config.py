@@ -25,6 +25,10 @@ class TrendGateSettings(BaseModel):
     use_mom: bool = False
     benchmark: str = "SPY"
     defensive: list[str] = ["BIL", "TLT", "GLD"]
+    # 卡片展示的"参考卖出价"用 ATR 吊灯移动止损（贴近价格），与内部200线闸门分工
+    chandelier_lookback: int = 22
+    chandelier_atr: int = 14
+    chandelier_mult: float = 3.0
 
 
 class EnrichmentSettings(BaseModel):
