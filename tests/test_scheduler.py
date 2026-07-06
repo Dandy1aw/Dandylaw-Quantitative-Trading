@@ -1,4 +1,15 @@
-from quant_signal.scheduler import HEARTBEAT_FAIL_THRESHOLD, Heartbeat, build_scheduler
+from quant_signal.scheduler import (
+    HEARTBEAT_FAIL_THRESHOLD,
+    Heartbeat,
+    JobHealth,
+    build_scheduler,
+)
+
+
+class _Event:
+    def __init__(self, job_id: str, exception: object | None) -> None:
+        self.job_id = job_id
+        self.exception = exception
 
 
 class FakeNotifier:
@@ -37,3 +48,25 @@ def test_heartbeat_recovers_resets_counter() -> None:
     ok["v"] = False
     hb.tick()                                         # 又失败 1 次，不到阈值
     assert n.cards == []
+
+
+def test_jobhealth_records_errors_and_ignores_success() -> None:
+    h = JobHealth()
+    h.listen(_Event("heartbeat", None))               # 成功不记
+    h.listen(_Event("premarket", RuntimeError("boom")))
+    assert h.drain_errors() == [("premarket", "boom")]
+    assert h.drain_errors() == []                     # drain 后清空
+
+
+def test_heartbeat_alerts_on_job_errors_once() -> None:
+    n = FakeNotifier()
+    h = JobHealth()
+    h.listen(_Event("rotation_asia_close", RuntimeError("SQLite ... same thread")))
+    h.listen(_Event("watch_deviation", RuntimeError("SQLite ... same thread")))
+    hb = Heartbeat(notifier=n, check=lambda: True, health=h)
+    hb.tick()
+    assert len(n.cards) == 1
+    body = n.cards[0].body_md                          # type: ignore[attr-defined]
+    assert "rotation_asia_close" in body and "watch_deviation" in body
+    hb.tick()                                          # 已 drain，不重复告警
+    assert len(n.cards) == 1

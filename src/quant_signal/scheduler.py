@@ -1,10 +1,10 @@
-from __future__ import annotations
-
+import threading
 from datetime import datetime, time, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import structlog
+from apscheduler.events import EVENT_JOB_ERROR
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -16,14 +16,61 @@ ET = ZoneInfo("America/New_York")
 HEARTBEAT_FAIL_THRESHOLD = 2
 
 
+class JobHealth:
+    """监听 APScheduler 的 job 执行事件，记录失败的任务，供心跳汇总告警。
+
+    定时任务跑在后台线程池里，异常默认只进 APScheduler 日志、不会中断进程，
+    容易像之前 ledger 跨线程 bug 那样长期无声失败。挂这个监听器把失败收集起来。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._errors: list[tuple[str, str]] = []
+
+    def listen(self, event: Any) -> None:
+        exc = getattr(event, "exception", None)
+        if exc is not None:
+            with self._lock:
+                self._errors.append((getattr(event, "job_id", "?"), str(exc)))
+
+    def drain_errors(self) -> list[tuple[str, str]]:
+        with self._lock:
+            errs = self._errors[:]
+            self._errors.clear()
+            return errs
+
+
 class Heartbeat:
-    def __init__(self, notifier: Any, check: Callable[[], bool]) -> None:
+    def __init__(
+        self, notifier: Any, check: Callable[[], bool], health: JobHealth | None = None
+    ) -> None:
         self._notifier = notifier
         self._check = check
+        self._health = health
         self._fails = 0
         self._alerted = False
 
     def tick(self) -> None:
+        from quant_signal.notifier.cards import alert_card
+
+        # 1) 定时任务执行失败：汇总本周期内失败的 job 并告警（每个 job 只报一次样本）
+        if self._health is not None:
+            errs = self._health.drain_errors()
+            if errs:
+                by_job: dict[str, tuple[int, str]] = {}
+                for jid, msg in errs:
+                    cnt = by_job.get(jid, (0, msg))[0] + 1
+                    by_job[jid] = (cnt, msg)
+                lines = [
+                    f"- **{jid}** 失败 {cnt} 次：{msg[:150]}"
+                    for jid, (cnt, msg) in by_job.items()
+                ]
+                self._notifier.send(
+                    alert_card("定时任务执行失败", "\n".join(lines))
+                )
+                log.warning("heartbeat.job_errors", jobs=list(by_job))
+
+        # 2) 进程/数据源自检
         try:
             ok = self._check()
         except Exception as e:  # noqa: BLE001
@@ -35,8 +82,6 @@ class Heartbeat:
             return
         self._fails += 1
         if self._fails >= HEARTBEAT_FAIL_THRESHOLD and not self._alerted:
-            from quant_signal.notifier.cards import alert_card
-
             self._notifier.send(
                 alert_card("心跳检查失败", f"连续 {self._fails} 次自检失败，请检查进程/数据源")
             )
@@ -101,7 +146,9 @@ def build_scheduler(
                 days=10,
             )
 
-    hb = Heartbeat(notifier=notifier, check=lambda: True)
+    health = JobHealth()
+    sched.add_listener(health.listen, EVENT_JOB_ERROR)
+    hb = Heartbeat(notifier=notifier, check=lambda: True, health=health)
 
     sched.add_job(premarket, CronTrigger(hour=8, minute=0), id="premarket")
     sched.add_job(intraday, CronTrigger(hour="9-15", minute="*/5"), id="intraday")
