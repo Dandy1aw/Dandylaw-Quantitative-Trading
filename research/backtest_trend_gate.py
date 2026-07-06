@@ -77,7 +77,9 @@ def _metrics(pf: vbt.Portfolio, close_index: pd.DatetimeIndex, changes: int) -> 
     }
 
 
-def run_variant(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_exit: bool):  # type: ignore[no-untyped-def]
+def build_weights(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_exit: bool):  # type: ignore[no-untyped-def]
+    """构建每日目标权重矩阵，返回 (weights, close, changes)。build_portfolio 与
+    盈亏比脚本共用，保证评估的是同一个策略。"""
     close = bars["close"].unstack("ticker").sort_index()
     cfg = TrendGateConfig(buffer=buffer)
     mom = _momentum(settings)
@@ -135,11 +137,22 @@ def run_variant(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_e
                 changes += len(names - prev)
                 prev = names
 
+    return weights, close, changes
+
+
+def build_portfolio(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_exit: bool):  # type: ignore[no-untyped-def]
+    """构建组合并返回 (pf, close_index, changes)。"""
+    weights, close, changes = build_weights(bars, settings, gate, buffer, weekly_exit)
     pf = vbt.Portfolio.from_orders(
         close=close, size=weights, size_type="targetpercent", freq="1D",
         cash_sharing=True, call_seq="auto",
     )
-    return _metrics(pf, pd.DatetimeIndex(close.index), changes)
+    return pf, pd.DatetimeIndex(close.index), changes
+
+
+def run_variant(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_exit: bool):  # type: ignore[no-untyped-def]
+    pf, idx, changes = build_portfolio(bars, settings, gate, buffer, weekly_exit)
+    return _metrics(pf, idx, changes)
 
 
 def _spy_bh(bars: pd.DataFrame) -> dict[str, float]:
