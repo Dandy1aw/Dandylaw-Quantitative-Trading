@@ -267,6 +267,41 @@ def test_run_enrichment_pushes_card_when_enabled(
     engine.run_enrichment(now)
 
     assert calls == ["AAA"]
+
+
+def test_run_enrichment_skips_international_tickers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UZI 只支持美股，港股/韩股会超时/无结果——enrichment 应跳过它们，不白等。"""
+    enrichment_cfg = EnrichmentSettings(
+        enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
+        depth="lite", timeout_seconds=120, max_tickers=8,
+    )
+    settings = load_settings().model_copy(
+        update={
+            "universe": ["AAA", "000660.KS"], "watchlist": [],
+            "international_tickers": {"000660.KS": "KRW"},
+            "enrichment": enrichment_cfg,
+        }
+    )
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    now = datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc)
+    ledger.set_holdings("momentum_rotation", ["AAA", "000660.KS"])
+
+    calls: list[str] = []
+
+    def fake_run_uzi_analysis(ticker, run_py_path, python_exe, depth, timeout_seconds):  # type: ignore[no-untyped-def]
+        calls.append(ticker)
+        return {"ticker": ticker, "name": "x", "overall_score": 80.0,
+                "verdict_label": "积极", "panel_consensus": 75.0, "risks": []}
+
+    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fake_run_uzi_analysis)
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    engine.run_enrichment(now)
+
+    assert calls == ["AAA"]   # 韩股 000660.KS 被跳过
     assert len(notifier.cards) == 1
     assert "深度分析" in notifier.cards[0].title
 

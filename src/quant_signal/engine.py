@@ -331,7 +331,9 @@ class Engine:
         today_buys = {
             str(r["ticker"]) for r in self.ledger.signals_on(now.date()) if r["direction"] == "buy"
         }
-        watch_set = sorted(held | today_buys)[: cfg.max_tickers]
+        # UZI 只支持美股，港股/韩股会超时或产不出结果——直接跳过，省掉那段空等
+        intl = set(self.settings.international_tickers)
+        watch_set = sorted((held | today_buys) - intl)[: cfg.max_tickers]
         if not watch_set:
             log.info("enrichment.skip", reason="empty_watch_set")
             return
