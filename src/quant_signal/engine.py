@@ -306,7 +306,10 @@ class Engine:
         threshold = float(
             self.settings.strategies.get("price_deviation", {}).get("threshold", 0.02)
         )
-        signals = check_deviations(ref_prices, live_prices, now=now, threshold=threshold)
+        # 升级告警档位：入场阈值 ×(1, 2.5, 5, 10)，如 2%→[2%,5%,10%,20%]。破到更高档
+        # 会再推一次，避免只在首次破 2% 时提醒、之后 4h 静默错过行情升级。
+        bands = [threshold * m for m in (1.0, 2.5, 5.0, 10.0)]
+        signals = check_deviations(ref_prices, live_prices, now=now, bands=bands)
         result = self._dedup(signals, now)
         for s in result.to_push:
             self.ledger.insert(s, pushed=True, now=now)
