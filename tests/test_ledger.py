@@ -35,6 +35,28 @@ def test_insert_and_query_day(ledger: SignalLedger) -> None:
     assert [r["pushed"] for r in sorted(rows, key=lambda r: str(r["ticker"]))] == [0, 1]
 
 
+def test_ledger_usable_from_another_thread(ledger: SignalLedger) -> None:
+    """调度器在后台线程池跑 job，ledger 的 sqlite 连接必须能跨线程使用
+    (check_same_thread=False)，否则 rotation/premarket/watch_deviation 全崩。"""
+    import threading
+
+    errors: list[Exception] = []
+
+    def worker() -> None:
+        try:
+            ledger.insert(sig("QQQ"), pushed=True, now=NOW)
+            ledger.set_holdings("momentum_rotation", ["QQQ"])
+            assert ledger.get_holdings("momentum_rotation") == ["QQQ"]
+            assert ledger.pushed_count_since(NOW - timedelta(hours=1)) >= 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert not errors, f"跨线程使用 ledger 失败: {errors}"
+
+
 def test_last_push_by_key_only_pushed(ledger: SignalLedger) -> None:
     s = sig()
     ledger.insert(s, pushed=False, now=NOW)
