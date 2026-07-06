@@ -12,6 +12,11 @@ def _normalize(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
     for t in tickers:
         if len(tickers) == 1:
             sub = raw.copy()
+            # yf.download([单票], group_by='ticker') 可能返回带 ticker 层的 MultiIndex 列，
+            # 剥掉外层，只留 Open/High/Low/Close/Volume，否则下面列名匹配不上
+            if isinstance(sub.columns, pd.MultiIndex):
+                lvl0 = sub.columns.get_level_values(0)
+                sub = pd.DataFrame(sub[t]) if t in lvl0 else sub.droplevel(0, axis=1)
         else:
             if t not in raw.columns.get_level_values(0):
                 continue
@@ -64,3 +69,24 @@ class YFinanceSource:
             threads=False,  # Windows 下多线程会触发 yfinance 缓存库锁
         )
         return _normalize(raw, tickers)
+
+    def fetch_live_price(self, ticker: str) -> float | None:
+        """取含盘前/盘后的最新价作为卡片'现价'展示：yfinance prepost=True。
+        美股盘前(4:00-9:30)/盘后(16:00-20:00)都能刷新——Alpaca 免费 IEX 源没有
+        盘前盘后数据，故现价改由 yf 取；港股/韩股无美式盘前盘后，prepost 对其无副作用。
+        尽力而为，取不到返回 None。"""
+        raw = yf.download(
+            [ticker],
+            period="1d",
+            interval="5m",
+            prepost=True,
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=False,  # Windows 下多线程会触发 yfinance 缓存库锁
+        )
+        df = _normalize(raw, [ticker])
+        if df.empty or ticker not in df.index.get_level_values("ticker"):
+            return None
+        sub = df.xs(ticker, level="ticker").sort_index()
+        return float(sub["close"].iloc[-1]) if not sub.empty else None

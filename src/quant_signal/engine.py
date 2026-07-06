@@ -195,17 +195,14 @@ class Engine:
         return out
 
     def _fetch_live_price(self, ticker: str) -> float | None:
-        """尽力而为抓取最新 5 分钟收盘价作为'现价'展示；失败不影响主流程。"""
-        source = self._intl_source if ticker in self.settings.international_tickers else self.source
+        """尽力而为抓取含盘前/盘后的最新价作为'现价'展示；失败不影响主流程。
+        统一走 yfinance(prepost=True)：Alpaca 免费 IEX 源无盘前/盘后，改用 yf 让
+        美股盘前盘后也能刷新现价。信号链路仍走各自数据源(Alpaca/yf)，不受此影响。"""
         try:
-            df = source.fetch_intraday_bars([ticker], lookback_days=1)
+            return self._intl_source.fetch_live_price(ticker)
         except Exception as e:  # noqa: BLE001
             log.warning("live_price.fetch_failed", ticker=ticker, error=str(e))
             return None
-        if df.empty or ticker not in df.index.get_level_values("ticker"):
-            return None
-        sub = df.xs(ticker, level="ticker").sort_index()
-        return float(sub["close"].iloc[-1]) if not sub.empty else None
 
     # ---- 调度入口 ----
 

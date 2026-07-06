@@ -34,6 +34,16 @@ class FakeSource:
         return self._intraday
 
 
+class FakeLiveSource:
+    """替身：现价统一走 yfinance(prepost)，测试里注入固定现价。"""
+
+    def __init__(self, prices: dict[str, float]) -> None:
+        self._prices = prices
+
+    def fetch_live_price(self, ticker: str) -> float | None:
+        return self._prices.get(ticker)
+
+
 @pytest.fixture
 def env(tmp_path: Path, daily_bars: pd.DataFrame):  # type: ignore[no-untyped-def]
     settings = load_settings()
@@ -150,23 +160,22 @@ def test_premarket_routes_international_ticker_and_refreshes_fx(
     assert not stored.empty   # 国际标的数据确实经由独立的 yfinance 源写入
 
 
-def test_premarket_report_includes_live_price(env, daily_bars) -> None:  # type: ignore[no-untyped-def]
+def test_premarket_report_includes_live_price(env, daily_bars, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings, store, ledger, notifier = env
     last_bar_ts = daily_bars.index.get_level_values("ts").max()
-    ts5 = pd.date_range(last_bar_ts + timedelta(hours=1), periods=1, freq="5min", tz="UTC")
-    idx = pd.MultiIndex.from_product([["AAA"], ts5], names=["ticker", "ts"])
-    intraday = pd.DataFrame(
-        {"open": 999.0, "high": 999.0, "low": 999.0, "close": 999.0, "volume": 1}, index=idx
+    # 现价统一走 yfinance(prepost)：用假的 live source 提供 AAA 的现价，BBB 无价
+    monkeypatch.setattr(
+        "quant_signal.engine.YFinanceSource", lambda: FakeLiveSource({"AAA": 999.0})
     )
-    engine = Engine(settings, store, FakeSource(daily_bars, intraday), ledger, notifier)
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
     engine.run_premarket(last_bar_ts + timedelta(hours=32))
 
     body = "\n".join(c.body_md for c in notifier.cards)
-    assert "999.00" in body   # AAA 的实时价被抓取并展示
-    assert "-" in body        # BBB 没有对应的 intraday 数据，展示为 "-"
+    assert "999.00" in body   # AAA 的现价(含盘前盘后)被抓取并展示
+    assert "-" in body        # BBB 没有现价，展示为 "-"
 
 
-def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path) -> None:
+def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -183,13 +192,11 @@ def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path) -> None:
         now=now - timedelta(hours=1),
     )
 
-    ts5 = pd.date_range("2026-07-06 04:55", periods=1, freq="5min", tz="UTC")
-    idx = pd.MultiIndex.from_product([["AAA"], ts5], names=["ticker", "ts"])
-    intraday = pd.DataFrame(
-        {"open": 105.0, "high": 106.0, "low": 104.0, "close": 105.0, "volume": 1000}, index=idx
+    # 现价走 yfinance(prepost)：注入 AAA=105（较参考价 100 偏离 +5%，触发告警）
+    monkeypatch.setattr(
+        "quant_signal.engine.YFinanceSource", lambda: FakeLiveSource({"AAA": 105.0})
     )
-
-    engine = Engine(settings, store, FakeSource(pd.DataFrame(), intraday), ledger, notifier)
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
     engine.run_watch_deviation(now)
 
     rows = ledger.signals_on(now.date())
