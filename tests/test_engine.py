@@ -216,8 +216,11 @@ def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:
 
 
 def test_run_enrichment_skips_when_disabled(tmp_path: Path) -> None:
-    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
-    assert settings.enrichment.enabled is False   # 默认关闭
+    disabled = load_settings().enrichment.model_copy(update={"enabled": False})
+    settings = load_settings().model_copy(
+        update={"universe": ["AAA"], "watchlist": [], "enrichment": disabled}
+    )
+    assert settings.enrichment.enabled is False   # 本测试显式关闭，验证跳过分支
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
     notifier = FakeNotifier()
