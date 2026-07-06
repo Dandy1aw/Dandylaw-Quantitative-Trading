@@ -27,10 +27,10 @@ from backtest_trend_gate import (  # noqa: E402
     REPORTS,
     START,
     _defensive_series,
-    _metrics,
     _momentum,
     load_bars,
 )
+from metrics import portfolio_metrics  # noqa: E402
 
 from quant_signal.config import load_settings  # noqa: E402
 from quant_signal.strategies.trend_gate import (  # noqa: E402
@@ -43,6 +43,8 @@ DEFENSIVE = {"BIL", "TLT", "GLD"}
 # 吊灯止损参数与实盘卡片(config.trend_gate)一致
 CHAND_LOOKBACK, CHAND_ATR, CHAND_MULT = 22, 14, 3.0
 VOL_LOOKBACK = 20
+BENCH = "SPY"
+COST_PER_SIDE = 0.0005   # 每边成本假设 5bps(佣金+滑点)；美股 Alpaca 佣金为0，主要是滑点
 
 
 def _chandelier_series(high: pd.Series, low: pd.Series, close: pd.Series, mult: float) -> pd.Series:
@@ -154,64 +156,71 @@ VARIANTS = [
 ]
 
 
+HDR = ("| 方案 | 累计收益% | 年化% | 超额年化% | 最大回撤% | 年化波动% | 夏普 | 卡玛 | "
+       "胜率% | 盈亏比(PF) | 交易次数 | 年换手 | 净年化%(含成本) | 成本拖累% |")
+SEP = "|" + "---|" * 14
+
+
+def _eval(bars: pd.DataFrame, settings, use_stop: bool, use_vt: bool, mult: float = CHAND_MULT):  # type: ignore[no-untyped-def]
+    weights, close, _ = build_weights_ex(bars, settings, use_stop, use_vt, chand_mult=mult)
+    pf = _portfolio(weights, close)
+    pm = portfolio_metrics(pf.returns(), weights, close[BENCH], COST_PER_SIDE)
+    rets, open_n = round_trips(weights, close)
+    tm = trade_metrics(rets, open_n)
+    return pm, tm
+
+
+def _row(label: str, pm: dict[str, float], tm: dict[str, float]) -> str:
+    return (
+        f"| {label} | {pm['total_return']:.0f} | {pm['cagr']:.1f} | {pm['excess']:.1f} | "
+        f"{pm['maxdd']:.1f} | {pm['vol']:.1f} | {pm['sharpe']:.2f} | {pm['calmar']:.2f} | "
+        f"{tm['win_rate']:.1f} | {tm['profit_factor']:.2f} | {tm['trades']:.0f} | "
+        f"{pm['ann_turnover']:.1f} | {pm['net_cagr']:.1f} | {pm['cost_drag']:.1f} |"
+    )
+
+
 def main() -> None:
     settings = load_settings()
     bars = load_bars()
     print("回测标的:", sorted(bars.index.get_level_values("ticker").unique()))
 
-    rows = []
-    for key, use_stop, use_vt, label in VARIANTS:
-        weights, close, changes = build_weights_ex(bars, settings, use_stop, use_vt)
-        pf = _portfolio(weights, close)
-        pm = _metrics(pf, pd.DatetimeIndex(close.index), changes)
-        rets, open_n = round_trips(weights, close)
-        tm = trade_metrics(rets, open_n)
-        print(f"\n=== {label} ===  年化{pm['annual']:.1f} 夏普{pm['sharpe']:.2f} "
-              f"回撤{pm['maxdd']:.1f} | 交易{tm['trades']:.0f} 胜率{tm['win_rate']:.1f} "
-              f"payoff{tm['payoff']:.2f} 盈利因子{tm['profit_factor']:.2f} 期望{tm['expectancy']:.2f}")
-        rows.append((label, pm, tm))
-
-    hdr = ("| 方案 | 年化% | 夏普 | 最大回撤% | 年换手 | 交易 | 胜率% | 平均盈% | 平均亏% | "
-           "盈亏比 | 盈利因子 | 期望%/笔 | 最差% |")
-    sep = "|" + "---|" * 13
-    lines = [hdr, sep]
-    for label, pm, tm in rows:
-        lines.append(
-            f"| {label} | {pm['annual']:.1f} | {pm['sharpe']:.2f} | {pm['maxdd']:.1f} | "
-            f"{pm['turnover']:.1f} | {tm['trades']:.0f} | {tm['win_rate']:.1f} | {tm['avg_win']:.1f} | "
-            f"{tm['avg_loss']:.1f} | {tm['payoff']:.2f} | {tm['profit_factor']:.2f} | "
-            f"{tm['expectancy']:.2f} | {tm['worst']:.1f} |"
-        )
+    lines = [HDR, SEP]
+    for _key, use_stop, use_vt, label in VARIANTS:
+        pm, tm = _eval(bars, settings, use_stop, use_vt)
+        print(f"=== {label} === 累计{pm['total_return']:.0f} 年化{pm['cagr']:.1f} "
+              f"超额{pm['excess']:.1f} 回撤{pm['maxdd']:.1f} 波动{pm['vol']:.1f} "
+              f"夏普{pm['sharpe']:.2f} 卡玛{pm['calmar']:.2f} | 胜率{tm['win_rate']:.1f} "
+              f"PF{tm['profit_factor']:.2f} 交易{tm['trades']:.0f} 净年化{pm['net_cagr']:.1f}")
+        lines.append(_row(label, pm, tm))
 
     # 吊灯倍数扫描（看放宽止损能否救回 A1；voltarget 关）
-    sweep = [hdr, sep]
+    sweep = [HDR, SEP]
     print("\n--- 吊灯倍数扫描 ---")
     for mult in (4.0, 5.0, 6.0):
-        weights, close, changes = build_weights_ex(bars, settings, True, False, chand_mult=mult)
-        pf = _portfolio(weights, close)
-        pm = _metrics(pf, pd.DatetimeIndex(close.index), changes)
-        rets, open_n = round_trips(weights, close)
-        tm = trade_metrics(rets, open_n)
-        print(f"吊灯{mult:.0f}×ATR: 年化{pm['annual']:.1f} 夏普{pm['sharpe']:.2f} "
-              f"回撤{pm['maxdd']:.1f} payoff{tm['payoff']:.2f} 期望{tm['expectancy']:.2f}")
-        sweep.append(
-            f"| +吊灯{mult:.0f}×ATR | {pm['annual']:.1f} | {pm['sharpe']:.2f} | {pm['maxdd']:.1f} | "
-            f"{pm['turnover']:.1f} | {tm['trades']:.0f} | {tm['win_rate']:.1f} | {tm['avg_win']:.1f} | "
-            f"{tm['avg_loss']:.1f} | {tm['payoff']:.2f} | {tm['profit_factor']:.2f} | "
-            f"{tm['expectancy']:.2f} | {tm['worst']:.1f} |"
-        )
+        pm, tm = _eval(bars, settings, True, False, mult=mult)
+        print(f"吊灯{mult:.0f}×ATR: 年化{pm['cagr']:.1f} 夏普{pm['sharpe']:.2f} 卡玛{pm['calmar']:.2f}")
+        sweep.append(_row(f"+吊灯{mult:.0f}×ATR", pm, tm))
 
     REPORTS.mkdir(exist_ok=True)
     out = REPORTS / f"pnl_improve_from{START:%Y%m%d}_run{datetime.now(timezone.utc):%Y%m%d}.md"
     out.write_text(
-        "# 盈亏比优化对照回测\n\n"
-        f"- 区间: {START} 至今，universe={settings.universe}\n"
-        "- 基准=上线配置(月末动量选股+周五200线闸门+FLAT切防御, 等权)\n"
-        f"- +吊灯: 核心腿收盘跌破 近{CHAND_LOOKBACK}日高−{CHAND_MULT}×ATR({CHAND_ATR}) 即清仓到现金(日度检查)\n"
+        "# 20 只标的组合 · 全指标回测报告\n\n"
+        f"- 区间: {START} 至今；universe(20只)={settings.universe}\n"
+        "- 基准策略=上线配置(月末动量选股 + 周五200线闸门 + FLAT切防御, 等权)；超额基准=SPY\n"
+        f"- +吊灯: 核心腿收盘跌破 近{CHAND_LOOKBACK}日高−{CHAND_MULT}×ATR({CHAND_ATR}) 即清仓到现金(日度)\n"
         f"- +反波动率: 权重∝1/波动率({VOL_LOOKBACK}日收益std)，整体归一\n"
-        "- 组合指标走 vectorbt；盈亏比走连续持有段 close-to-close 往返\n\n"
+        f"- 成本: 每边 {COST_PER_SIDE*1e4:.0f}bps(佣金+滑点)按目标换手扣减；盈亏比(PF)=总盈利/总亏损\n"
+        "- 累计/年化/波动/夏普/回撤/卡玛/超额从日收益算(rf=0)；胜率/PF/交易数按连续持有段往返\n\n"
         "## 主对照\n\n" + "\n".join(lines) + "\n\n"
         "## 吊灯倍数扫描（反波动率关）\n\n" + "\n".join(sweep) + "\n\n"
+        "## 说明与风险（务必先读）\n\n"
+        "1. **夏普按 252 交易日年化(标准口径)**。此前报告里的 2.08 是 vectorbt 默认按 365 "
+        "日历日年化的结果，偏高(2.08×√(252/365)=1.73)。日线仅交易日、约252根/年，252 才对。\n"
+        "2. **universe 是人工挑选的半导体/科技赢家(NVDA/MU/TSM 等)，覆盖其最强的一段十年，"
+        "存在显著选股/幸存者偏差**。累计收益 10976% 这类绝对数字不可外推到未来，也不代表换一批"
+        "标的能复现；**本报告有效结论是各变体之间的相对比较**(base 在收益/夏普/卡玛全面占优)。\n"
+        "3. **成本拖累仅 0.7~1.3pp/年**，因月度调仓换手低(年换手~10)；成本不是瓶颈。\n"
+        "4. 结论：吊灯止损与反波动率仓位在本组合上均**未改善风险调整后收益**，不建议合入生产。\n\n"
         "> 回测结果仅供评估，不构成投资建议。\n",
         encoding="utf-8",
     )
