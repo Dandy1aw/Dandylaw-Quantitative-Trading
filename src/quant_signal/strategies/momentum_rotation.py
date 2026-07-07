@@ -3,11 +3,13 @@ from __future__ import annotations
 from collections import defaultdict
 
 import pandas as pd
+import structlog
 
 from quant_signal.strategies.base import Direction, Signal, Strategy
 
 _GROUP_LABELS = {"HKD": "港股组", "KRW": "韩股组"}
 _DEFAULT_GROUP_LABEL = "美股组"
+log = structlog.get_logger()
 
 
 class MomentumRotation(Strategy):
@@ -66,7 +68,11 @@ class MomentumRotation(Strategy):
             last_price[t] = float(series.iloc[-1])
             vol = volume[t].reindex(series.index)
             native_dv = float((series * vol).tail(20).mean())
-            fx = self.fx_rates.get(self.ticker_currency.get(t, "USD"), 1.0)
+            currency = self.ticker_currency.get(t, "USD")
+            if currency != "USD" and currency not in self.fx_rates:
+                log.warning("momentum.missing_fx", ticker=t, currency=currency)
+                continue
+            fx = self.fx_rates.get(currency, 1.0)
             dollar_vol_usd[t] = native_dv / fx
 
         eligible = {t: m for t, m in momentum.items() if dollar_vol_usd.get(t, 0.0) >= self.min_dollar_volume}

@@ -142,6 +142,32 @@ def test_all_long_no_defensive() -> None:
     assert [s.ticker for s in final] == ["MU"]   # 无 FLAT，无防御替换
 
 
+def test_insufficient_history_pick_is_excluded_with_diagnostic() -> None:
+    n = 320
+    long_series = _series(100.0 * np.cumprod(np.full(n, 1.002)))
+    short_series = long_series.iloc[-50:]
+    bars = _bars_from(
+        {
+            "SNXX": short_series,
+            "SPY": long_series,
+            "BIL": _flat_rf(n),
+            "TLT": long_series,
+            "GLD": long_series * 0.9,
+        }
+    )
+
+    final, infos = apply_trend_gate(
+        [_pick("SNXX", float(short_series.iloc[-1]))],
+        bars,
+        asset_type={"SNXX": "ETF"},
+        international_tickers={},
+        cfg=TrendGateConfig(),
+    )
+
+    assert "SNXX" not in {s.ticker for s in final}
+    assert any(i.ticker == "SNXX" and i.state == "INSUFFICIENT" for i in infos)
+
+
 def test_weekly_state_map_matches_trend_state_last() -> None:
     """weekly_state_map 末周的 state 应与 trend_state(as_of=末日) 一致（共享 _replay）。"""
     n = 320

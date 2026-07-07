@@ -213,3 +213,20 @@ def test_dollar_volume_filter_converts_foreign_currency() -> None:
     tickers = {s.ticker for s in signals}
     assert "KRT" not in tickers   # 换算成美元后流动性不足，正确剔除
     assert "AAA" in tickers
+
+
+def test_missing_fx_rate_excludes_foreign_ticker() -> None:
+    ts = pd.date_range("2025-08-01", periods=65, freq="B", tz="UTC")
+    close = 500_000.0 * np.cumprod(np.full(len(ts), 1.01))
+    bars = pd.DataFrame(
+        {"open": close, "high": close, "low": close, "close": close, "volume": 1_000_000},
+        index=pd.MultiIndex.from_product([["KRT"], ts], names=["ticker", "ts"]),
+    )
+    strat = MomentumRotation(
+        universe=["KRT"], lookback_days=60, top_n=1,
+        min_dollar_volume=50_000_000,
+        ticker_currency={"KRT": "KRW"},
+        fx_rates={},
+    )
+
+    assert strat.generate(bars) == []

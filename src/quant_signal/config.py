@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,6 +60,27 @@ class Settings(BaseModel):
     alpaca_key: str = ""
     alpaca_secret: str = ""
     feishu_webhook: str = ""
+
+    @model_validator(mode="after")
+    def validate_universe_classification(self) -> Self:
+        classified = set(self.asset_type) | set(self.international_tickers)
+        missing = sorted(set(self.universe) - classified)
+        if missing:
+            raise ValueError(
+                "universe 标的缺少分类；美股需 asset_type，外币标的需 "
+                f"international_tickers: {', '.join(missing)}"
+            )
+        invalid_types = sorted(
+            ticker for ticker, kind in self.asset_type.items() if kind not in {"ETF", "STOCK"}
+        )
+        if invalid_types:
+            raise ValueError(f"asset_type 必须为 ETF 或 STOCK: {', '.join(invalid_types)}")
+        empty_currencies = sorted(
+            ticker for ticker, currency in self.international_tickers.items() if not currency
+        )
+        if empty_currencies:
+            raise ValueError(f"国际标的缺少币种: {', '.join(empty_currencies)}")
+        return self
 
     @property
     def db_path(self) -> Path:

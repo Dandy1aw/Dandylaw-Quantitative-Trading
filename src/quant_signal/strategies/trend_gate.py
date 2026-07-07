@@ -203,9 +203,23 @@ def apply_trend_gate(
             is_usd=p.ticker not in international_tickers,
             cfg=cfg, as_of=as_of, use_ma=use_ma, use_mom=use_mom,
         )
-        if info is not None:
-            infos.append(info)
-        if info is None or info.state == "LONG":
+        if info is None:
+            infos.append(
+                TrendInfo(
+                    ticker=p.ticker,
+                    state="INSUFFICIENT",
+                    signal="WARN",
+                    price=p.price,
+                    sma200=float("nan"),
+                    sell_ref=float("nan"),
+                    ret_12m=float("nan"),
+                    rf_12m=float("nan"),
+                )
+            )
+            freed += p.suggested_weight or 0.0
+            continue
+        infos.append(info)
+        if info.state == "LONG":
             kept.append(p)
         else:
             freed += p.suggested_weight or 0.0

@@ -1,4 +1,6 @@
-from quant_signal.config import load_settings
+from pydantic import ValidationError
+
+from quant_signal.config import Settings, load_settings
 
 import pytest
 
@@ -21,3 +23,26 @@ def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FEISHU_WEBHOOK", "")
     s = load_settings()
     assert s.feishu_webhook == ""
+
+
+@pytest.mark.parametrize("ticker", ["AAA", "7709.HK"])
+def test_settings_rejects_unclassified_universe_ticker(ticker: str) -> None:
+    with pytest.raises(ValidationError, match=ticker):
+        Settings(
+            universe=[ticker],
+            watchlist=[],
+            strategies={"momentum_rotation": {}, "breakout_20d": {}},
+            asset_type={},
+            international_tickers={},
+        )
+
+
+def test_settings_accepts_foreign_ticker_with_currency_mapping() -> None:
+    settings = Settings(
+        universe=["7709.HK"],
+        watchlist=[],
+        strategies={"momentum_rotation": {}, "breakout_20d": {}},
+        asset_type={},
+        international_tickers={"7709.HK": "HKD"},
+    )
+    assert settings.international_tickers == {"7709.HK": "HKD"}
