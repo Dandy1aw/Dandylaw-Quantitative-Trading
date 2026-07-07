@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from quant_signal.scheduler import (
     HEARTBEAT_FAIL_THRESHOLD,
     Heartbeat,
@@ -28,6 +30,16 @@ def test_scheduler_registers_all_jobs() -> None:
         "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
         "rotation_asia_open", "rotation_asia_close", "watch_deviation", "enrichment",
     }
+
+
+def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
+    sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+    assert jobs["premarket"].misfire_grace_time == 3600
+    assert jobs["rotation_asia_open"].misfire_grace_time == 3600
+    assert jobs["rotation_asia_close"].misfire_grace_time == 3600
+    assert jobs["intraday"].misfire_grace_time == 240
+    assert jobs["watch_deviation"].misfire_grace_time == 240
 
 
 def test_heartbeat_alerts_after_consecutive_failures() -> None:
@@ -70,3 +82,26 @@ def test_heartbeat_alerts_on_job_errors_once() -> None:
     assert "rotation_asia_close" in body and "watch_deviation" in body
     hb.tick()                                          # 已 drain，不重复告警
     assert len(n.cards) == 1
+
+
+def test_job_error_alert_is_silent_for_two_hours_per_job() -> None:
+    n = FakeNotifier()
+    h = JobHealth()
+    now = {"value": datetime(2026, 7, 8, tzinfo=timezone.utc)}
+    hb = Heartbeat(
+        notifier=n,
+        check=lambda: True,
+        health=h,
+        now_fn=lambda: now["value"],
+    )
+
+    h.listen(_Event("watch_deviation", RuntimeError("boom-1")))
+    hb.tick()
+    h.listen(_Event("watch_deviation", RuntimeError("boom-2")))
+    hb.tick()
+    assert len(n.cards) == 1
+
+    now["value"] += timedelta(hours=2, seconds=1)
+    h.listen(_Event("watch_deviation", RuntimeError("boom-3")))
+    hb.tick()
+    assert len(n.cards) == 2

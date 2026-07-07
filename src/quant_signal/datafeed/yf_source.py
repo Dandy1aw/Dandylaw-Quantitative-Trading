@@ -70,23 +70,34 @@ class YFinanceSource:
         )
         return _normalize(raw, tickers)
 
-    def fetch_live_price(self, ticker: str) -> float | None:
-        """取含盘前/盘后的最新价作为卡片'现价'展示：yfinance prepost=True。
-        美股盘前(4:00-9:30)/盘后(16:00-20:00)都能刷新——Alpaca 免费 IEX 源没有
-        盘前盘后数据，故现价改由 yf 取；港股/韩股无美式盘前盘后，prepost 对其无副作用。
-        尽力而为，取不到返回 None。"""
+    def fetch_live_prices(self, tickers: list[str]) -> dict[str, float]:
+        """One batched request for the latest pre/post-market prices."""
+        if not tickers:
+            return {}
         raw = yf.download(
-            [ticker],
+            tickers,
             period="1d",
             interval="5m",
             prepost=True,
             auto_adjust=True,
             group_by="ticker",
             progress=False,
-            threads=False,  # Windows 下多线程会触发 yfinance 缓存库锁
+            threads=False,
         )
-        df = _normalize(raw, [ticker])
-        if df.empty or ticker not in df.index.get_level_values("ticker"):
-            return None
-        sub = df.xs(ticker, level="ticker").sort_index()
-        return float(sub["close"].iloc[-1]) if not sub.empty else None
+        df = _normalize(raw, tickers)
+        prices: dict[str, float] = {}
+        available = set(df.index.get_level_values("ticker")) if not df.empty else set()
+        for ticker in tickers:
+            if ticker not in available:
+                continue
+            sub = df.xs(ticker, level="ticker").sort_index()
+            if not sub.empty:
+                prices[ticker] = float(sub["close"].iloc[-1])
+        return prices
+
+    def fetch_live_price(self, ticker: str) -> float | None:
+        """取含盘前/盘后的最新价作为卡片'现价'展示：yfinance prepost=True。
+        美股盘前(4:00-9:30)/盘后(16:00-20:00)都能刷新——Alpaca 免费 IEX 源没有
+        盘前盘后数据，故现价改由 yf 取；港股/韩股无美式盘前盘后，prepost 对其无副作用。
+        尽力而为，取不到返回 None。"""
+        return self.fetch_live_prices([ticker]).get(ticker)

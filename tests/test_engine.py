@@ -13,12 +13,13 @@ from quant_signal.strategies.base import Direction, Signal
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, success: bool = True) -> None:
         self.cards: list[Card] = []
+        self.success = success
 
     def send(self, card: Card) -> bool:
         self.cards.append(card)
-        return True
+        return self.success
 
 
 class FakeSource:
@@ -42,6 +43,9 @@ class FakeLiveSource:
 
     def fetch_live_price(self, ticker: str) -> float | None:
         return self._prices.get(ticker)
+
+    def fetch_live_prices(self, tickers: list[str]) -> dict[str, float]:
+        return {ticker: self._prices[ticker] for ticker in tickers if ticker in self._prices}
 
 
 @pytest.fixture
@@ -121,6 +125,24 @@ def test_premarket_dedup_second_run_no_push(env, daily_bars) -> None:  # type: i
     rows = ledger.signals_on(last_bar_ts.date())
     n_pushed = len([r for r in rows if r["pushed"]])
     assert n_pushed == n_first                           # 4h 窗口内不重复推
+
+
+def test_premarket_failed_delivery_is_not_recorded_as_pushed(
+    env, daily_bars, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    notifier.success = False
+    monkeypatch.setattr(
+        "quant_signal.engine.YFinanceSource", lambda: FakeLiveSource({})
+    )
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+
+    engine.run_premarket(last_bar_ts + timedelta(hours=32))
+
+    rows = ledger.signals_on(last_bar_ts.date())
+    assert rows
+    assert not any(bool(row["pushed"]) for row in rows)
 
 
 def test_premarket_routes_international_ticker_and_refreshes_fx(
@@ -204,6 +226,62 @@ def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path, monkeypatch)
     dev_rows = [r for r in rows if r["strategy_id"] == "price_deviation"]
     assert len(dev_rows) == 1 and dev_rows[0]["direction"] == "buy"
     assert len(notifier.cards) == 1
+
+
+def test_watch_deviation_failed_delivery_is_not_pushed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    store = BarStore(tmp_path / "b.duckdb")
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier(success=False)
+    now = datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc)
+    ledger.set_holdings("momentum_rotation", ["AAA"])
+    ledger.insert(
+        Signal(
+            ticker="AAA", direction=Direction.BUY, price=100.0, reason="r",
+            strategy_id="momentum_rotation", ts=now - timedelta(hours=1),
+        ),
+        pushed=True,
+        now=now - timedelta(hours=1),
+    )
+    monkeypatch.setattr(
+        "quant_signal.engine.YFinanceSource", lambda: FakeLiveSource({"AAA": 105.0})
+    )
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+
+    engine.run_watch_deviation(now)
+
+    row = next(r for r in ledger.signals_on(now.date()) if r["strategy_id"] == "price_deviation")
+    assert not bool(row["pushed"])
+
+
+def test_intraday_failed_delivery_is_not_pushed(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    notifier.success = False
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    empty_index = pd.MultiIndex.from_arrays([[], []], names=["ticker", "ts"])
+    empty_bars = pd.DataFrame(
+        columns=["open", "high", "low", "close", "volume"], index=empty_index
+    )
+    engine = Engine(settings, store, FakeSource(pd.DataFrame(), empty_bars), ledger, notifier)
+    monkeypatch.setattr(
+        engine.breakout,
+        "generate",
+        lambda bars: [
+            Signal(
+                ticker="AAA", direction=Direction.BUY, price=100.0,
+                reason="breakout", strategy_id="breakout_20d", ts=now,
+            )
+        ],
+    )
+
+    engine.run_intraday(now)
+
+    row = next(r for r in ledger.signals_on(now.date()) if r["strategy_id"] == "breakout_20d")
+    assert not bool(row["pushed"])
 
 
 def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:

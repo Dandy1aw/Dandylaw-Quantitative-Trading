@@ -205,6 +205,15 @@ class Engine:
             log.warning("live_price.fetch_failed", ticker=ticker, error=str(e))
             return None
 
+    def _fetch_live_prices(self, tickers: set[str]) -> dict[str, float | None]:
+        ordered = sorted(tickers)
+        try:
+            fetched = self._intl_source.fetch_live_prices(ordered)
+            return {ticker: fetched.get(ticker) for ticker in ordered}
+        except Exception as e:  # noqa: BLE001
+            log.warning("live_price.batch_failed", tickers=ordered, error=str(e))
+            return {ticker: None for ticker in ordered}
+
     # ---- 调度入口 ----
 
     def run_premarket(self, now: datetime) -> None:
@@ -243,19 +252,21 @@ class Engine:
         )
         all_signals = self._attach_exit_prices(targets + sells + extra_signals, bars)
         result = self._dedup(all_signals, now)
-        for s in result.to_push:
-            self.ledger.insert(s, pushed=True, now=now)
         for s in result.suppressed + result.overflow:
             self.ledger.insert(s, pushed=False, now=now)
-        self.ledger.set_holdings(self.momentum.strategy_id, target_tickers)
 
+        delivered = False
         if result.to_push:
             unique = {s.ticker for s in result.to_push}
-            live_prices = {t: self._fetch_live_price(t) for t in unique}
-            for card in premarket_cards(
+            live_prices = self._fetch_live_prices(unique)
+            cards = premarket_cards(
                 result.to_push, self.settings.international_tickers, live_prices
-            ):
-                self.notifier.send(card)
+            )
+            delivery_results = [self.notifier.send(card) for card in cards]
+            delivered = bool(cards) and all(delivery_results)
+            for s in result.to_push:
+                self.ledger.insert(s, pushed=delivered, now=now)
+        self.ledger.set_holdings(self.momentum.strategy_id, target_tickers)
         self.notifier.send(
             momentum_ranking_card(
                 ranking,
@@ -276,8 +287,8 @@ class Engine:
         result = self._dedup(self.breakout.generate(bars), now)
         delayed = self.settings.data_source == "yfinance"
         for s in result.to_push:
-            self.ledger.insert(s, pushed=True, now=now)
-            self.notifier.send(signal_card(s, delayed=delayed))
+            delivered = self.notifier.send(signal_card(s, delayed=delayed))
+            self.ledger.insert(s, pushed=delivered, now=now)
         for s in result.suppressed:
             self.ledger.insert(s, pushed=False, now=now)
         if result.overflow:
@@ -312,7 +323,9 @@ class Engine:
             return
 
         live_prices = {
-            t: p for t in ref_prices if (p := self._fetch_live_price(t)) is not None
+            ticker: price
+            for ticker, price in self._fetch_live_prices(set(ref_prices)).items()
+            if price is not None
         }
         threshold = float(
             self.settings.strategies.get("price_deviation", {}).get("threshold", 0.02)
@@ -323,8 +336,8 @@ class Engine:
         signals = check_deviations(ref_prices, live_prices, now=now, bands=bands)
         result = self._dedup(signals, now)
         for s in result.to_push:
-            self.ledger.insert(s, pushed=True, now=now)
-            self.notifier.send(signal_card(s))
+            delivered = self.notifier.send(signal_card(s))
+            self.ledger.insert(s, pushed=delivered, now=now)
         for s in result.suppressed + result.overflow:
             self.ledger.insert(s, pushed=False, now=now)
         log.info(

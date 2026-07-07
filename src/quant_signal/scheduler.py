@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -14,6 +14,7 @@ from quant_signal.calendar import is_trading_day
 log = structlog.get_logger()
 ET = ZoneInfo("America/New_York")
 HEARTBEAT_FAIL_THRESHOLD = 2
+JOB_ALERT_SILENCE = timedelta(hours=2)
 
 
 class JobHealth:
@@ -42,11 +43,17 @@ class JobHealth:
 
 class Heartbeat:
     def __init__(
-        self, notifier: Any, check: Callable[[], bool], health: JobHealth | None = None
+        self,
+        notifier: Any,
+        check: Callable[[], bool],
+        health: JobHealth | None = None,
+        now_fn: Callable[[], datetime] | None = None,
     ) -> None:
         self._notifier = notifier
         self._check = check
         self._health = health
+        self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._job_alerted_at: dict[str, datetime] = {}
         self._fails = 0
         self._alerted = False
 
@@ -61,14 +68,24 @@ class Heartbeat:
                 for jid, msg in errs:
                     cnt = by_job.get(jid, (0, msg))[0] + 1
                     by_job[jid] = (cnt, msg)
-                lines = [
-                    f"- **{jid}** 失败 {cnt} 次：{msg[:150]}"
-                    for jid, (cnt, msg) in by_job.items()
-                ]
-                self._notifier.send(
-                    alert_card("定时任务执行失败", "\n".join(lines))
-                )
-                log.warning("heartbeat.job_errors", jobs=list(by_job))
+                now = self._now_fn()
+                reportable = {
+                    jid: detail
+                    for jid, detail in by_job.items()
+                    if jid not in self._job_alerted_at
+                    or now - self._job_alerted_at[jid] >= JOB_ALERT_SILENCE
+                }
+                if reportable:
+                    lines = [
+                        f"- **{jid}** 失败 {cnt} 次：{msg[:150]}"
+                        for jid, (cnt, msg) in reportable.items()
+                    ]
+                    self._notifier.send(
+                        alert_card("定时任务执行失败", "\n".join(lines))
+                    )
+                    for jid in reportable:
+                        self._job_alerted_at[jid] = now
+                    log.warning("heartbeat.job_errors", jobs=list(reportable))
 
         # 2) 进程/数据源自检
         try:
@@ -150,8 +167,14 @@ def build_scheduler(
     sched.add_listener(health.listen, EVENT_JOB_ERROR)
     hb = Heartbeat(notifier=notifier, check=lambda: True, health=health)
 
-    sched.add_job(premarket, CronTrigger(hour=8, minute=0), id="premarket")
-    sched.add_job(intraday, CronTrigger(hour="9-15", minute="*/5"), id="intraday")
+    sched.add_job(
+        premarket, CronTrigger(hour=8, minute=0), id="premarket",
+        misfire_grace_time=3600,
+    )
+    sched.add_job(
+        intraday, CronTrigger(hour="9-15", minute="*/5"), id="intraday",
+        misfire_grace_time=240,
+    )
     sched.add_job(postmarket, CronTrigger(hour=16, minute=30), id="postmarket")
     sched.add_job(maintenance, CronTrigger(hour=3, minute=0), id="maintenance")
     sched.add_job(hb.tick, IntervalTrigger(minutes=15), id="heartbeat")
@@ -160,16 +183,19 @@ def build_scheduler(
         rotation_push,
         CronTrigger(hour=0, minute=0, day_of_week="mon-fri", timezone=timezone.utc),
         id="rotation_asia_open",  # 08:00 北京时间
+        misfire_grace_time=3600,
     )
     sched.add_job(
         rotation_push,
         CronTrigger(hour=7, minute=30, day_of_week="mon-fri", timezone=timezone.utc),
         id="rotation_asia_close",  # 15:30 北京时间
+        misfire_grace_time=3600,
     )
     sched.add_job(
         watch_deviation,
         CronTrigger(hour="0-21", minute="*/5", day_of_week="mon-fri", timezone=timezone.utc),
         id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
+        misfire_grace_time=240,
     )
     sched.add_job(enrichment, CronTrigger(hour=8, minute=45), id="enrichment")
     return sched

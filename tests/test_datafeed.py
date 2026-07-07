@@ -96,3 +96,23 @@ def test_fetch_live_price_handles_multiindex_columns(
 
     monkeypatch.setattr(m.yf, "download", fake_download)
     assert YFinanceSource().fetch_live_price("MU") == 61.5
+
+
+def test_fetch_live_prices_batches_all_tickers_in_one_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quant_signal.datafeed.yf_source as m
+
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def fake_download(tickers: object, **kwargs: object) -> pd.DataFrame:
+        calls.append((tickers, kwargs))
+        return fake_yf_download()
+
+    monkeypatch.setattr(m.yf, "download", fake_download)
+    prices = YFinanceSource().fetch_live_prices(["SPY", "QQQ"])
+
+    assert len(calls) == 1
+    assert calls[0][0] == ["SPY", "QQQ"]
+    assert calls[0][1].get("prepost") is True
+    assert prices == {"SPY": 1.0, "QQQ": 1.0}

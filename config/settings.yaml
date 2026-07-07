@@ -129,5 +129,5 @@ enrichment:                      # UZI-Skill 深度分析信息增强（盘前 0
   uzi_run_py: "C:/Users/syw/.claude/plugins/cache/uzi-skill/stock-deep-analyzer/3.9.1/skills/deep-analysis/run.py"
   python_exe: "python"
   depth: lite
-  timeout_seconds: 120
+  timeout_seconds: 60
   max_tickers: 8

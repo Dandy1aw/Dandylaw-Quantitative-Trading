@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from quant_signal.config import Settings, load_settings
+from quant_signal.config import EnrichmentSettings, Settings, load_settings
 
 import pytest
 
@@ -46,3 +46,7 @@ def test_settings_accepts_foreign_ticker_with_currency_mapping() -> None:
         international_tickers={"7709.HK": "HKD"},
     )
     assert settings.international_tickers == {"7709.HK": "HKD"}
+
+
+def test_enrichment_timeout_defaults_to_sixty_seconds() -> None:
+    assert EnrichmentSettings().timeout_seconds == 60

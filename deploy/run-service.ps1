@@ -29,6 +29,16 @@ function Write-Sup([string]$msg) {
         Add-Content -Path $SupLog -Encoding UTF8
 }
 
+# 每次 supervisor 启动时归档上一份监护日志，并只保留 14 天。这样持续运行时
+# 当前日志仍可被 status.ps1 读取，频繁重启也不会让单个文件无限增长。
+if ((Test-Path $SupLog) -and (Get-Item $SupLog).Length -gt 0) {
+    $supArchive = Join-Path $LogDir ("service-supervisor-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Move-Item -Path $SupLog -Destination $supArchive -Force
+}
+Get-ChildItem $LogDir -Filter 'service-supervisor-*.log' -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 Write-Sup "supervisor started (exe=$Exe)"
 
 # 清理 14 天前的旧运行日志（每次重启会新建一份带时间戳的日志，避免无限累积）

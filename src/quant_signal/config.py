@@ -39,7 +39,7 @@ class EnrichmentSettings(BaseModel):
     uzi_run_py: str = ""
     python_exe: str = "python"
     depth: str = "lite"
-    timeout_seconds: int = 120
+    timeout_seconds: int = 60
     max_tickers: int = 8
 
 
