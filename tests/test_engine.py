@@ -50,7 +50,14 @@ class FakeLiveSource:
 
 
 @pytest.fixture
-def env(tmp_path: Path, daily_bars: pd.DataFrame):  # type: ignore[no-untyped-def]
+def env(
+    tmp_path: Path,
+    daily_bars: pd.DataFrame,
+    monkeypatch: pytest.MonkeyPatch,
+):  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "quant_signal.engine.YFinanceSource", lambda: FakeLiveSource({})
+    )
     settings = make_test_settings()
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")

@@ -80,12 +80,17 @@ class Heartbeat:
                         f"- **{jid}** 失败 {cnt} 次：{msg[:150]}"
                         for jid, (cnt, msg) in reportable.items()
                     ]
-                    self._notifier.send(
+                    delivered = self._notifier.send(
                         alert_card("定时任务执行失败", "\n".join(lines))
                     )
-                    for jid in reportable:
-                        self._job_alerted_at[jid] = now
-                    log.warning("heartbeat.job_errors", jobs=list(reportable))
+                    if delivered:
+                        for jid in reportable:
+                            self._job_alerted_at[jid] = now
+                    log.warning(
+                        "heartbeat.job_errors",
+                        jobs=list(reportable),
+                        delivered=delivered,
+                    )
 
         # 2) 进程/数据源自检
         try:

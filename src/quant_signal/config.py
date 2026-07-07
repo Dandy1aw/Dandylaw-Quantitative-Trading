@@ -18,6 +18,17 @@ class NotifySettings(BaseModel):
     intraday_hourly_limit: int = 10
     deviation_hourly_limit: int = 10
 
+    @model_validator(mode="after")
+    def expand_legacy_hourly_limit(self) -> Self:
+        for field in (
+            "premarket_hourly_limit",
+            "intraday_hourly_limit",
+            "deviation_hourly_limit",
+        ):
+            if field not in self.model_fields_set:
+                setattr(self, field, self.hourly_limit)
+        return self
+
 
 class TrendGateSettings(BaseModel):
     enabled: bool = False

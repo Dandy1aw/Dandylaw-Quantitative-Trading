@@ -1,6 +1,6 @@
 from pydantic import ValidationError
 
-from quant_signal.config import EnrichmentSettings, Settings, load_settings
+from quant_signal.config import EnrichmentSettings, NotifySettings, Settings, load_settings
 
 import pytest
 
@@ -65,3 +65,10 @@ def test_ticker_registry_derives_legacy_market_fields() -> None:
     assert settings.universe == ["SPY", "7709.HK"]
     assert settings.asset_type == {"SPY": "ETF", "7709.HK": "STOCK"}
     assert settings.international_tickers == {"7709.HK": "HKD"}
+
+
+def test_legacy_hourly_limit_populates_all_notification_channels() -> None:
+    settings = NotifySettings(hourly_limit=3)
+    assert settings.premarket_hourly_limit == 3
+    assert settings.intraday_hourly_limit == 3
+    assert settings.deviation_hourly_limit == 3

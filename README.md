@@ -47,7 +47,7 @@
 单进程 monorepo，APScheduler 驱动 9 个定时任务（详见下文）。数据源
 （yfinance / Alpaca）与通知器（Console / 飞书）都是可切换的抽象：
 
-- 每个标的按 `international_tickers` 配置固定走 yfinance 或跟随
+- 每个标的按 `tickers.<symbol>.currency` 自动派生数据源：非 USD 固定走 yfinance，USD 跟随
   `data_source` 走 Alpaca——美股/ETF 走 Alpaca，港股/韩股等 Alpaca
   不支持的市场固定走 yfinance，两者数据合并进同一个 duckdb
 - `FEISHU_WEBHOOK` 未配置时自动降级为 Console 通知器（终端打印 +
@@ -62,7 +62,7 @@ uv run quant-signal                                # 启动调度器（前台运
 ```
 
 首次运行前建议先看一遍下面的[配置参考](#配置参考settingsyaml)，把
-`universe`/`watchlist` 改成你自己关心的标的，并跑一次
+`tickers`/`watchlist` 改成你自己关心的标的，并跑一次
 [`seed_holdings`](#命令行工具) 把真实持仓写进虚拟持仓台账。
 
 ## 凭证配置
@@ -82,8 +82,8 @@ Console），但美股数据质量和飞书推送体验会打折扣。
    ALPACA_KEY=你的API Key ID
    ALPACA_SECRET=你的Secret Key
    ```
-6. 把 `config/settings.yaml` 里的 `data_source` 改成 `alpaca`（`international_tickers`
-   里列出的标的不受这个开关影响，永远走 yfinance）
+6. 把 `config/settings.yaml` 里的 `data_source` 改成 `alpaca`（注册表中非 USD
+   标的不受这个开关影响，永远走 yfinance）
 7. 验证：`uv run python -m quant_signal.ingest --days 30`，duckdb 里应能看到 `source='alpaca'` 的数据
 8. **如果你的网络需要代理才能访问 Alpaca**（比如国内网络），确保
    `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 环境变量已设置；若代理是
@@ -113,7 +113,8 @@ Console），但美股数据质量和飞书推送体验会打折扣。
   "现价"是推送那一刻额外抓的最新 5 分钟价，两者分开展示，互不影响计算逻辑。
 - **去重（dedup）**：同一 `(标的, 方向, 策略)` 在 `notify.dedup_hours`（默认 4 小时）
   内只推送一次，按**实际推送的墙钟时间**（不是信号自身的时间戳）判断，跨进程重启后
-  依然有效。超过 `notify.hourly_limit`（默认每小时 10 条）的部分会合并成一条汇总告警。
+  依然有效。只有通知发送成功才记录 `pushed=true`；失败会在下轮重试。盘前、突破、偏离
+  三条通道各有独立小时配额，互不挤占。
 
 ## 策略
 
@@ -127,12 +128,15 @@ Console），但美股数据质量和飞书推送体验会打折扣。
 - 已持仓但跌出 top-N 的标的会产出 SELL 信号（"轮动调出"），新进入 top-N 的产出
   BUY 信号
 - 非美元计价标的（`international_tickers` 里的）用**实时汇率**换算流动性门槛，
-  汇率来自 yfinance 的 `{币种}=X` 报价，每次跑动量轮动时刷新一次
+  汇率来自 yfinance 的 `{币种}=X` 报价，每次跑动量轮动时刷新一次；取不到汇率时
+  该币种标的本轮直接剔除，不按 1:1 静默误算
 - **按市场分组排名**（`momentum_group_top_n` 配置）：`international_tickers`
   里的币种（如 HKD/KRW）各自独立排名、独立取名额，不跟默认组（美股/其余
   标的，用 `top_n`）竞争——否则港股/韩股这类杠杆/热门标的动量经常极端
   （实测 +386.7%），会把美股标的全部挤出 top-N。默认组的名额始终是完整
   的 `top_n` 个，不会被其他组占用
+- 每次盘前流程额外发送“动量全池榜单”：Top5 买入候选与 Bottom3 卖出警示；持仓、
+  趋势 FLAT、历史不足会显式标注。榜单只用于展示，不改变已回测的组内选股逻辑
 
 ### breakout_20d（20日突破，盘中5分钟级）
 
@@ -193,7 +197,7 @@ BUY 端历史表现尚可（20日胜率52-60%，正收益），**SELL 端（超�
 - 子进程失败/超时/解析异常一律静默跳过该标的，不影响主流程；需要用户
   本机单独装好 UZI-Skill 及其依赖（akshare/baostock/playwright 等），跟
   quant-signal 自己的 uv 环境完全隔离
-- 韩股等 UZI-Skill 覆盖较弱的市场，实测会触发 `timeout_seconds`（默认120秒）
+- 韩股等 UZI-Skill 覆盖较弱的市场，实测会触发 `timeout_seconds`（默认60秒）
   超时，属于预期的优雅降级，不是 bug
 
 ## 调度：一天跑哪些任务
@@ -218,16 +222,13 @@ BUY 端历史表现尚可（20日胜率52-60%，正收益），**SELL 端（超�
 ## 配置参考（settings.yaml）
 
 ```yaml
-data_source: alpaca            # yfinance | alpaca，非 international_tickers 标的用这个
+data_source: alpaca            # yfinance | alpaca，USD 标的用这个
 db_dir: data                   # duckdb/sqlite 存放目录
 
-universe:                      # 动量轮动的标的池
-  - SPY
-  - ...
-
-international_tickers:         # 固定走 yfinance 的标的 -> 币种（Alpaca 不支持这些市场）
-  "7709.HK": HKD
-  "000660.KS": KRW
+tickers:                       # 单一来源：自动派生 universe/asset_type/国际标的
+  SPY: {asset_type: ETF, currency: USD}
+  AAPL: {asset_type: STOCK, currency: USD}
+  "7709.HK": {asset_type: STOCK, currency: HKD}
 
 momentum_group_top_n:          # 动量轮动按币种分组的独立名额，不配置的币种(含美股)用 top_n
   HKD: 1
@@ -261,14 +262,16 @@ strategies:
 
 notify:
   dedup_hours: 4
-  hourly_limit: 10
+  premarket_hourly_limit: 10
+  intraday_hourly_limit: 10
+  deviation_hourly_limit: 10
 
 enrichment:                      # UZI-Skill 深度分析，可选，默认关闭
   enabled: false
   uzi_run_py: ""                  # 你的 UZI-Skill run.py 绝对路径
   python_exe: "python"
   depth: lite
-  timeout_seconds: 120
+  timeout_seconds: 60
   max_tickers: 8
 ```
 
@@ -294,13 +297,13 @@ uv run quant-signal
 
 - `DataSource` 协议只有两个方法：`fetch_daily_bars` / `fetch_intraday_bars`，
   `YFinanceSource` 和 `AlpacaSource` 都实现它
-- 每次拉数据时，`universe`/`watchlist` 里的标的会按 `international_tickers`
+- 每次拉数据时，派生出的 `universe`/`watchlist` 会按注册表币种
   是否包含它来分流：包含则固定走 `YFinanceSource`，否则走 `data_source`
   配置指定的源——这样你可以美股用 Alpaca（更稳定、无延迟）、港股韩股用
   yfinance（Alpaca 完全不支持这些市场）
 - 想加新的港股/韩股标的：先用 yfinance 确认准确代码格式（港股是 4-5 位数字
   + `.HK`，如 `7709.HK`；韩股是 6 位数字 + `.KS`，如 `000660.KS`），加进
-  `universe`，同时在 `international_tickers` 里补上对应币种
+  `tickers` 并填写 `asset_type` 与 `currency`；无需再同步多个列表
 
 ## 飞书卡片格式
 
@@ -370,8 +373,9 @@ quant-signal/
 │   └── .env                    # 凭证（不提交 git）
 ├── src/quant_signal/
 │   ├── main.py                 # 入口：uv run quant-signal
-│   ├── scheduler.py            # 8 个定时任务的注册与门控逻辑
-│   ├── engine.py                # 串联策略→去重→台账→推送的核心编排
+│   ├── scheduler.py            # 9 个定时任务的注册与门控逻辑
+│   ├── engine.py                # 依赖装配与兼容入口
+│   ├── pipelines/               # premarket/intraday/deviation/enrichment 工作流
 │   ├── config.py                # 配置加载（yaml + .env）
 │   ├── calendar.py               # NYSE 交易日历
 │   ├── ledger.py                 # sqlite 信号台账 + 虚拟持仓 + 参考价查询

@@ -15,12 +15,13 @@ class _Event:
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, success: bool = True) -> None:
         self.cards: list[object] = []
+        self.success = success
 
     def send(self, card: object) -> bool:
         self.cards.append(card)
-        return True
+        return self.success
 
 
 def test_scheduler_registers_all_jobs() -> None:
@@ -105,3 +106,15 @@ def test_job_error_alert_is_silent_for_two_hours_per_job() -> None:
     h.listen(_Event("watch_deviation", RuntimeError("boom-3")))
     hb.tick()
     assert len(n.cards) == 2
+
+
+def test_failed_job_error_alert_is_retried_next_tick() -> None:
+    notifier = FakeNotifier(success=False)
+    health = JobHealth()
+    hb = Heartbeat(notifier=notifier, check=lambda: True, health=health)
+    health.listen(_Event("premarket", RuntimeError("boom-1")))
+    hb.tick()
+    notifier.success = True
+    health.listen(_Event("premarket", RuntimeError("boom-2")))
+    hb.tick()
+    assert len(notifier.cards) == 2

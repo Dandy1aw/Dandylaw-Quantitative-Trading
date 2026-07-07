@@ -20,6 +20,7 @@ def run(engine: Engine, now: datetime) -> None:
     engine._refresh_fx_rates()
     ranking = engine.momentum.rank(bars)
     targets = engine.momentum.generate(bars)
+    current = engine.ledger.get_holdings(engine.momentum.strategy_id)
     trend_infos: list[TrendInfo] = []
     if engine.trend_gate_cfg is not None and targets:
         targets, trend_infos = apply_trend_gate(
@@ -30,8 +31,32 @@ def run(engine: Engine, now: datetime) -> None:
             engine.trend_gate_cfg,
             use_mom=engine.trend_gate_use_mom,
         )
+        held_diagnostics = [
+            Signal(
+                ticker=ticker,
+                direction=Direction.BUY,
+                price=float(bars.xs(ticker, level="ticker")["close"].iloc[-1]),
+                reason="持仓趋势复核",
+                strategy_id=engine.momentum.strategy_id,
+                ts=now,
+                suggested_weight=0.0,
+            )
+            for ticker in current
+            if ticker in bars.index.get_level_values("ticker")
+        ]
+        if held_diagnostics:
+            _, held_infos = apply_trend_gate(
+                held_diagnostics,
+                bars,
+                engine.settings.asset_type,
+                engine.settings.international_tickers,
+                engine.trend_gate_cfg,
+                use_mom=engine.trend_gate_use_mom,
+            )
+            info_by_ticker = {info.ticker: info for info in trend_infos}
+            info_by_ticker.update({info.ticker: info for info in held_infos})
+            trend_infos = list(info_by_ticker.values())
     target_tickers = [signal.ticker for signal in targets]
-    current = engine.ledger.get_holdings(engine.momentum.strategy_id)
     as_of = targets[0].ts if targets else now
     sells = [
         Signal(
