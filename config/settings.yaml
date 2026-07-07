@@ -1,25 +1,41 @@
 data_source: alpaca            # yfinance | alpaca（填好 .env 后改这里切换）
 db_dir: data                   # duckdb/sqlite 存放目录，相对仓库根
 
-universe:                      # momentum_rotation 标的池：原 ETF 候选池 + 用户实际持仓
+universe:                      # momentum_rotation 标的池：ETF候选 + Mag7 + 用户自选(去重)
+  # --- ETF / 指数 ---
   - SPY
   - QQQ
+  - QQQM
   - IWM
   - TLT
   - GLD
+  - SMH
+  - DRAM                          # Roundhill Memory ETF
+  - RAM                           # 2x DRAM ETF
+  - SNXX                          # 2x SNDK ETF
+  - MUU                           # 2x MU ETF
+  # --- Mag7 ---
+  - AAPL
+  - MSFT
+  - GOOGL
+  - AMZN
+  - META
+  - NVDA
+  - TSLA
+  # --- 半导体/科技个股 ---
   - MU
-  - DRAM
-  - RAM
   - MRVL
   - SNDK
-  - SNXX
-  - SMH
-  - QQQM
-  - NVDA
   - AMD
-  - LLY
   - INTC
   - TSM
+  - NBIS                          # Nebius
+  - PLTR
+  - NOW                           # ServiceNow
+  - GLW                           # Corning 康宁
+  - LLY
+  - JNJ
+  # --- 港股/韩股 ---
   - 7709.HK
   - 000660.KS
 
@@ -46,22 +62,34 @@ momentum_default_group_top_n:    # 美股默认组内部再按资产类型独立
 asset_type:                      # ticker -> ETF|STOCK，仅用于美股默认组内部再分名额
   SPY: ETF
   QQQ: ETF
+  QQQM: ETF
   IWM: ETF
   TLT: ETF
   GLD: ETF
+  SMH: ETF
   DRAM: ETF
   RAM: ETF
-  SMH: ETF
-  QQQM: ETF
   SNXX: ETF                        # Tradr 2X Long SNDK Daily ETF，虽跟踪个股但本身是ETF产品
+  MUU: ETF                         # 2X Long MU ETF
+  AAPL: STOCK
+  MSFT: STOCK
+  GOOGL: STOCK
+  AMZN: STOCK
+  META: STOCK
+  NVDA: STOCK
+  TSLA: STOCK
   MU: STOCK
   MRVL: STOCK
   SNDK: STOCK
-  NVDA: STOCK
   AMD: STOCK
-  LLY: STOCK
   INTC: STOCK
   TSM: STOCK
+  NBIS: STOCK
+  PLTR: STOCK
+  NOW: STOCK
+  GLW: STOCK
+  LLY: STOCK
+  JNJ: STOCK
 
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA

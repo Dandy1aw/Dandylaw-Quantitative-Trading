@@ -42,12 +42,15 @@ class MomentumRotation(Strategy):
         self.asset_type = asset_type or {}
         self.default_group_top_n = default_group_top_n or {}
 
-    def generate(self, bars: pd.DataFrame) -> list[Signal]:
+    def _compute(
+        self, bars: pd.DataFrame
+    ) -> tuple[dict[str, float], dict[str, float], pd.Timestamp | None]:
+        """算出通过成交额过滤的标的动量与最新价，返回 (eligible动量, 最新价, 最新bar时间)。"""
         close = bars["close"].unstack("ticker").sort_index()
         volume = bars["volume"].unstack("ticker").sort_index()
         close = close[[t for t in self.universe if t in close.columns]]
         if close.empty:
-            return []
+            return {}, {}, None
 
         # 按各标的自身的有效数据取"最新一行"，不用全市场统一的行位置——
         # 否则不同交易日历的标的（如美股假期但港股/韩股照常交易）会让
@@ -67,6 +70,21 @@ class MomentumRotation(Strategy):
             dollar_vol_usd[t] = native_dv / fx
 
         eligible = {t: m for t, m in momentum.items() if dollar_vol_usd.get(t, 0.0) >= self.min_dollar_volume}
+        return eligible, last_price, close.index[-1]
+
+    def rank(self, bars: pd.DataFrame) -> list[tuple[str, float, float]]:
+        """全池按动量降序：返回 (ticker, 动量, 最新价)，供 Top5买/Top3卖 榜单用。
+        与 generate 用同一套动量/成交额口径，只是不做分组截断、返回全部合格标的。"""
+        eligible, last_price, _ = self._compute(bars)
+        return sorted(
+            ((t, m, last_price[t]) for t, m in eligible.items()),
+            key=lambda x: x[1], reverse=True,
+        )
+
+    def generate(self, bars: pd.DataFrame) -> list[Signal]:
+        eligible, last_price, last_bar_ts = self._compute(bars)
+        if not eligible or last_bar_ts is None:
+            return []
 
         # 按币种分组，组内独立排名取各自名额——组之间互不挤占彼此的名额。
         # 默认组(USD)若配置了 default_group_top_n，内部再按资产类型细分。
@@ -103,7 +121,7 @@ class MomentumRotation(Strategy):
         # 展示顺序仍按动量降序（卡片读起来高→低），但每条的名次是组内名次
         selected.sort(key=lambda x: x[1], reverse=True)
 
-        last_ts = close.index[-1].to_pydatetime()
+        last_ts = last_bar_ts.to_pydatetime()
         weight = round(1.0 / len(selected), 4) if selected else None
         return [
             Signal(

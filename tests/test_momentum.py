@@ -34,6 +34,17 @@ def test_insufficient_history_returns_empty(daily_bars: pd.DataFrame) -> None:
     assert make().generate(short) == []
 
 
+def test_rank_returns_all_eligible_sorted_desc(daily_bars: pd.DataFrame) -> None:
+    """rank() 暴露全池排名(不止 top_n)，按动量降序，含最新价；供 Top5/Top3 榜单用。"""
+    ranking = make().rank(daily_bars)            # 元素为 (ticker, momentum, last_price)
+    tickers = [t for t, _, _ in ranking]
+    moms = [m for _, m, _ in ranking]
+    assert "DDD" not in tickers                 # 低成交额被过滤，榜单也不含
+    assert "AAA" in tickers and "BBB" in tickers
+    assert moms == sorted(moms, reverse=True)    # 动量降序
+    assert all(p > 0 for _, _, p in ranking)     # 带最新价
+
+
 def test_no_lookahead_truncation(daily_bars: pd.DataFrame) -> None:
     """同一策略实例先看过全量数据后，对截断数据的输出必须与新实例一致（无内部状态泄漏未来信息）。"""
     ts = daily_bars.index.get_level_values("ts").unique().sort_values()
