@@ -4,12 +4,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_signal.config import EnrichmentSettings, load_settings
+from quant_signal.config import EnrichmentSettings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine, _intraday_snapshot
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.strategies.base import Direction, Signal
+from conftest import make_test_settings
 
 
 class FakeNotifier:
@@ -50,23 +51,7 @@ class FakeLiveSource:
 
 @pytest.fixture
 def env(tmp_path: Path, daily_bars: pd.DataFrame):  # type: ignore[no-untyped-def]
-    settings = load_settings()
-    strategies = dict(settings.strategies)
-    strategies["momentum_rotation"] = {**strategies["momentum_rotation"], "top_n": 2}
-    settings = settings.model_copy(
-        update={
-            "universe": ["AAA", "BBB", "CCC", "DDD"],
-            "watchlist": ["AAA"],
-            "strategies": strategies,
-            # 测试用的合成标的不在真实的 asset_type/分组配置里，重置为空
-            # 避免意外继承生产配置里的美股ETF/个股细分名额
-            "asset_type": {},
-            "momentum_default_group_top_n": {},
-            # 趋势闸门需真实200日线历史+SPY/BIL数据，合成标的不适用，关掉保持
-            # 引擎测试聚焦动量本身（闸门逻辑由 test_trend_gate 覆盖）
-            "trend_gate": settings.trend_gate.model_copy(update={"enabled": False}),
-        }
-    )
+    settings = make_test_settings()
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
     notifier = FakeNotifier()
@@ -155,12 +140,9 @@ def test_premarket_routes_international_ticker_and_refreshes_fx(
         [("KRT", ts) for ts in krt_bars.index.get_level_values("ts")], names=["ticker", "ts"]
     )
 
-    settings = load_settings().model_copy(
-        update={
-            "universe": ["AAA", "KRT"],
-            "watchlist": [],
-            "international_tickers": {"KRT": "KRW"},
-        }
+    settings = make_test_settings(
+        universe=["AAA", "KRT"], watchlist=[],
+        international_tickers={"KRT": "KRW"},
     )
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -199,7 +181,7 @@ def test_premarket_report_includes_live_price(env, daily_bars, monkeypatch) -> N
 
 
 def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    settings = make_test_settings(universe=["AAA"], watchlist=[])
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
     notifier = FakeNotifier()
@@ -231,7 +213,7 @@ def test_watch_deviation_pushes_alert_on_large_move(tmp_path: Path, monkeypatch)
 def test_watch_deviation_failed_delivery_is_not_pushed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    settings = make_test_settings(universe=["AAA"], watchlist=[])
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
     notifier = FakeNotifier(success=False)
@@ -284,8 +266,31 @@ def test_intraday_failed_delivery_is_not_pushed(
     assert not bool(row["pushed"])
 
 
+def test_premarket_quota_is_not_consumed_by_intraday_signals(env) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    now = datetime(2026, 7, 6, 14, 0, tzinfo=timezone.utc)
+    for i in range(10):
+        ledger.insert(
+            Signal(
+                ticker=f"I{i}", direction=Direction.BUY, price=100.0,
+                reason="breakout", strategy_id="breakout_20d", ts=now,
+            ),
+            pushed=True,
+            now=now,
+        )
+    engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
+    candidate = Signal(
+        ticker="AAA", direction=Direction.BUY, price=100.0,
+        reason="momentum", strategy_id="momentum_rotation", ts=now,
+    )
+
+    result = engine._dedup([candidate], now, channel="premarket")
+
+    assert result.to_push == [candidate]
+
+
 def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:
-    settings = load_settings().model_copy(update={"universe": ["AAA"], "watchlist": []})
+    settings = make_test_settings(universe=["AAA"], watchlist=[])
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
     notifier = FakeNotifier()
@@ -295,10 +300,8 @@ def test_watch_deviation_no_holdings_is_noop(tmp_path: Path) -> None:
 
 
 def test_run_enrichment_skips_when_disabled(tmp_path: Path) -> None:
-    disabled = load_settings().enrichment.model_copy(update={"enabled": False})
-    settings = load_settings().model_copy(
-        update={"universe": ["AAA"], "watchlist": [], "enrichment": disabled}
-    )
+    disabled = EnrichmentSettings(enabled=False)
+    settings = make_test_settings(universe=["AAA"], watchlist=[], enrichment=disabled)
     assert settings.enrichment.enabled is False   # 本测试显式关闭，验证跳过分支
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -316,8 +319,8 @@ def test_run_enrichment_pushes_card_when_enabled(
         enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
         depth="lite", timeout_seconds=120, max_tickers=8,
     )
-    settings = load_settings().model_copy(
-        update={"universe": ["AAA"], "watchlist": [], "enrichment": enrichment_cfg}
+    settings = make_test_settings(
+        universe=["AAA"], watchlist=[], enrichment=enrichment_cfg
     )
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -340,7 +343,9 @@ def test_run_enrichment_pushes_card_when_enabled(
             "verdict_label": "积极", "panel_consensus": 75.0, "risks": [],
         }
 
-    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fake_run_uzi_analysis)
+    monkeypatch.setattr(
+        "quant_signal.pipelines.enrichment.run_uzi_analysis", fake_run_uzi_analysis
+    )
 
     engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
     engine.run_enrichment(now)
@@ -356,12 +361,10 @@ def test_run_enrichment_skips_international_tickers(
         enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
         depth="lite", timeout_seconds=120, max_tickers=8,
     )
-    settings = load_settings().model_copy(
-        update={
-            "universe": ["AAA", "000660.KS"], "watchlist": [],
-            "international_tickers": {"000660.KS": "KRW"},
-            "enrichment": enrichment_cfg,
-        }
+    settings = make_test_settings(
+        universe=["AAA", "000660.KS"], watchlist=[],
+        international_tickers={"000660.KS": "KRW"},
+        enrichment=enrichment_cfg,
     )
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -376,7 +379,9 @@ def test_run_enrichment_skips_international_tickers(
         return {"ticker": ticker, "name": "x", "overall_score": 80.0,
                 "verdict_label": "积极", "panel_consensus": 75.0, "risks": []}
 
-    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fake_run_uzi_analysis)
+    monkeypatch.setattr(
+        "quant_signal.pipelines.enrichment.run_uzi_analysis", fake_run_uzi_analysis
+    )
     engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
     engine.run_enrichment(now)
 
@@ -392,8 +397,8 @@ def test_run_enrichment_no_watch_set_is_noop(
         enabled=True, uzi_run_py="C:/fake/run.py", python_exe="python",
         depth="lite", timeout_seconds=120, max_tickers=8,
     )
-    settings = load_settings().model_copy(
-        update={"universe": ["AAA"], "watchlist": [], "enrichment": enrichment_cfg}
+    settings = make_test_settings(
+        universe=["AAA"], watchlist=[], enrichment=enrichment_cfg
     )
     store = BarStore(tmp_path / "b.duckdb")
     ledger = SignalLedger(tmp_path / "s.db")
@@ -402,7 +407,9 @@ def test_run_enrichment_no_watch_set_is_noop(
     def fail_if_called(*a, **k):  # type: ignore[no-untyped-def]
         raise AssertionError("不该被调用：watch_set 为空")
 
-    monkeypatch.setattr("quant_signal.engine.run_uzi_analysis", fail_if_called)
+    monkeypatch.setattr(
+        "quant_signal.pipelines.enrichment.run_uzi_analysis", fail_if_called
+    )
     engine = Engine(settings, store, FakeSource(pd.DataFrame()), ledger, notifier)
     engine.run_enrichment(datetime(2026, 7, 6, 5, 0, tzinfo=timezone.utc))
     assert notifier.cards == []

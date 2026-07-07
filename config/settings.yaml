@@ -1,47 +1,39 @@
 data_source: alpaca            # yfinance | alpaca（填好 .env 后改这里切换）
 db_dir: data                   # duckdb/sqlite 存放目录，相对仓库根
 
-universe:                      # momentum_rotation 标的池：ETF候选 + Mag7 + 用户自选(去重)
-  # --- ETF / 指数 ---
-  - SPY
-  - QQQ
-  - QQQM
-  - IWM
-  - TLT
-  - GLD
-  - SMH
-  - DRAM                          # Roundhill Memory ETF
-  - RAM                           # 2x DRAM ETF
-  - SNXX                          # 2x SNDK ETF
-  - MUU                           # 2x MU ETF
-  # --- Mag7 ---
-  - AAPL
-  - MSFT
-  - GOOGL
-  - AMZN
-  - META
-  - NVDA
-  - TSLA
-  # --- 半导体/科技个股 ---
-  - MU
-  - MRVL
-  - SNDK
-  - AMD
-  - INTC
-  - TSM
-  - NBIS                          # Nebius
-  - PLTR
-  - NOW                           # ServiceNow
-  - GLW                           # Corning 康宁
-  - LLY
-  - JNJ
-  # --- 港股/韩股 ---
-  - 7709.HK
-  - 000660.KS
-
-international_tickers:          # 港股/韩股等固定走 yfinance（Alpaca 不支持），ticker -> 币种
-  "7709.HK": HKD
-  "000660.KS": KRW
+tickers:                       # 标的注册表：动量池、资产类型、计价币种的单一来源
+  SPY: {asset_type: ETF, currency: USD}
+  QQQ: {asset_type: ETF, currency: USD}
+  QQQM: {asset_type: ETF, currency: USD}
+  IWM: {asset_type: ETF, currency: USD}
+  TLT: {asset_type: ETF, currency: USD}
+  GLD: {asset_type: ETF, currency: USD}
+  SMH: {asset_type: ETF, currency: USD}
+  DRAM: {asset_type: ETF, currency: USD}
+  RAM: {asset_type: ETF, currency: USD}
+  SNXX: {asset_type: ETF, currency: USD}
+  MUU: {asset_type: ETF, currency: USD}
+  AAPL: {asset_type: STOCK, currency: USD}
+  MSFT: {asset_type: STOCK, currency: USD}
+  GOOGL: {asset_type: STOCK, currency: USD}
+  AMZN: {asset_type: STOCK, currency: USD}
+  META: {asset_type: STOCK, currency: USD}
+  NVDA: {asset_type: STOCK, currency: USD}
+  TSLA: {asset_type: STOCK, currency: USD}
+  MU: {asset_type: STOCK, currency: USD}
+  MRVL: {asset_type: STOCK, currency: USD}
+  SNDK: {asset_type: STOCK, currency: USD}
+  AMD: {asset_type: STOCK, currency: USD}
+  INTC: {asset_type: STOCK, currency: USD}
+  TSM: {asset_type: STOCK, currency: USD}
+  NBIS: {asset_type: STOCK, currency: USD}
+  PLTR: {asset_type: STOCK, currency: USD}
+  NOW: {asset_type: STOCK, currency: USD}
+  GLW: {asset_type: STOCK, currency: USD}
+  LLY: {asset_type: STOCK, currency: USD}
+  JNJ: {asset_type: STOCK, currency: USD}
+  "7709.HK": {asset_type: STOCK, currency: HKD}
+  "000660.KS": {asset_type: STOCK, currency: KRW}
 
 trend_gate:                      # 趋势持有闸门+防御切换（阶段B回测选出的最优配置：仅200线+防御）
   enabled: true                  # 动量选出后叠加，趋势失效切防御sleeve；回测降回撤44.5%->29.5%
@@ -58,38 +50,6 @@ momentum_group_top_n:            # 动量轮动按币种分组独立排名的名
 momentum_default_group_top_n:    # 美股默认组内部再按资产类型独立排名的名额
   ETF: 2
   STOCK: 3
-
-asset_type:                      # ticker -> ETF|STOCK，仅用于美股默认组内部再分名额
-  SPY: ETF
-  QQQ: ETF
-  QQQM: ETF
-  IWM: ETF
-  TLT: ETF
-  GLD: ETF
-  SMH: ETF
-  DRAM: ETF
-  RAM: ETF
-  SNXX: ETF                        # Tradr 2X Long SNDK Daily ETF，虽跟踪个股但本身是ETF产品
-  MUU: ETF                         # 2X Long MU ETF
-  AAPL: STOCK
-  MSFT: STOCK
-  GOOGL: STOCK
-  AMZN: STOCK
-  META: STOCK
-  NVDA: STOCK
-  TSLA: STOCK
-  MU: STOCK
-  MRVL: STOCK
-  SNDK: STOCK
-  AMD: STOCK
-  INTC: STOCK
-  TSM: STOCK
-  NBIS: STOCK
-  PLTR: STOCK
-  NOW: STOCK
-  GLW: STOCK
-  LLY: STOCK
-  JNJ: STOCK
 
 watchlist:                     # breakout_20d 盘中观察列表
   - NVDA
@@ -122,7 +82,9 @@ strategies:
 
 notify:
   dedup_hours: 4
-  hourly_limit: 10
+  premarket_hourly_limit: 10
+  intraday_hourly_limit: 10
+  deviation_hourly_limit: 10
 
 enrichment:                      # UZI-Skill 深度分析信息增强（盘前 08:45 ET 跑一次）
   enabled: true

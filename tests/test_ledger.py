@@ -9,13 +9,17 @@ from quant_signal.strategies.base import Direction, Signal, dedup_key
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 
 
-def sig(ticker: str = "SPY", ts: datetime = NOW) -> Signal:
+def sig(
+    ticker: str = "SPY",
+    ts: datetime = NOW,
+    strategy_id: str = "momentum_rotation",
+) -> Signal:
     return Signal(
         ticker=ticker,
         direction=Direction.BUY,
         price=100.0,
         reason="r",
-        strategy_id="momentum_rotation",
+        strategy_id=strategy_id,
         ts=ts,
         suggested_weight=0.33,
     )
@@ -71,6 +75,19 @@ def test_pushed_count_since(ledger: SignalLedger) -> None:
     ledger.insert(sig("B"), pushed=True, now=NOW)
     ledger.insert(sig("C"), pushed=False, now=NOW)
     assert ledger.pushed_count_since(NOW - timedelta(hours=1)) == 2
+
+
+def test_pushed_count_since_can_filter_strategy_channel(ledger: SignalLedger) -> None:
+    ledger.insert(sig("A", strategy_id="momentum_rotation"), pushed=True, now=NOW)
+    ledger.insert(sig("B", strategy_id="breakout_20d"), pushed=True, now=NOW)
+    ledger.insert(sig("C", strategy_id="price_deviation"), pushed=True, now=NOW)
+
+    assert ledger.pushed_count_since(
+        NOW - timedelta(hours=1), {"momentum_rotation", "rsi_reversion"}
+    ) == 1
+    assert ledger.pushed_count_since(
+        NOW - timedelta(hours=1), {"breakout_20d"}
+    ) == 1
 
 
 def test_latest_signal_price_returns_most_recent(ledger: SignalLedger) -> None:

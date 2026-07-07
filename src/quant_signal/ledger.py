@@ -88,12 +88,19 @@ class SignalLedger:
             ).fetchone()
         return float(row["price"]) if row else None
 
-    def pushed_count_since(self, since: datetime) -> int:
+    def pushed_count_since(
+        self, since: datetime, strategy_ids: set[str] | None = None
+    ) -> int:
+        if strategy_ids == set():
+            return 0
+        query = "SELECT count(*) AS n FROM signals WHERE pushed = 1 AND pushed_at >= ?"
+        params: list[object] = [since.astimezone(timezone.utc).isoformat()]
+        if strategy_ids is not None:
+            placeholders = ",".join("?" for _ in strategy_ids)
+            query += f" AND strategy_id IN ({placeholders})"
+            params.extend(sorted(strategy_ids))
         with self._lock:
-            row = self._con.execute(
-                "SELECT count(*) AS n FROM signals WHERE pushed = 1 AND pushed_at >= ?",
-                (since.astimezone(timezone.utc).isoformat(),),
-            ).fetchone()
+            row = self._con.execute(query, params).fetchone()
         return int(row["n"])
 
     def signals_on(self, day: date) -> list[dict[str, object]]:

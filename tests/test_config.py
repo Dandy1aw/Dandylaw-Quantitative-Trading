@@ -50,3 +50,18 @@ def test_settings_accepts_foreign_ticker_with_currency_mapping() -> None:
 
 def test_enrichment_timeout_defaults_to_sixty_seconds() -> None:
     assert EnrichmentSettings().timeout_seconds == 60
+
+
+def test_ticker_registry_derives_legacy_market_fields() -> None:
+    settings = Settings(
+        tickers={
+            "SPY": {"asset_type": "ETF", "currency": "USD"},
+            "7709.HK": {"asset_type": "STOCK", "currency": "HKD"},
+        },
+        watchlist=["SPY"],
+        strategies={"momentum_rotation": {}, "breakout_20d": {}},
+    )
+
+    assert settings.universe == ["SPY", "7709.HK"]
+    assert settings.asset_type == {"SPY": "ETF", "7709.HK": "STOCK"}
+    assert settings.international_tickers == {"7709.HK": "HKD"}

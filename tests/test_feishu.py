@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-from quant_signal.config import load_settings
+from conftest import make_test_settings
 from quant_signal.notifier.base import ConsoleNotifier, CardKind
 from quant_signal.notifier.cards import alert_card, signal_card
 from quant_signal.notifier.feishu import FeishuNotifier, get_notifier
@@ -66,4 +66,4 @@ def test_feishu_retries_then_fails(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_get_notifier_falls_back_to_console(monkeypatch: pytest.MonkeyPatch) -> None:
     # 显式置空：load_dotenv 不覆盖已存在的环境变量，避免受本机 .env 已填 webhook 影响。
     monkeypatch.setenv("FEISHU_WEBHOOK", "")
-    assert isinstance(get_notifier(load_settings()), ConsoleNotifier)
+    assert isinstance(get_notifier(make_test_settings(feishu_webhook="")), ConsoleNotifier)

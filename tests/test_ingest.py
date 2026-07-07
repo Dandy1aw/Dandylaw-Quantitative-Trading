@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 import quant_signal.ingest as ingest_mod
-from quant_signal.config import load_settings
+from conftest import make_test_settings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.ingest import find_missing_sessions, ingest_daily, ingest_daily_split
 
@@ -59,12 +59,9 @@ def test_ingest_daily_split_routes_international_to_yfinance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = BarStore(tmp_path / "b.duckdb")
-    settings = load_settings().model_copy(
-        update={
-            "universe": ["SPY", "7709.HK"],
-            "watchlist": [],
-            "international_tickers": {"7709.HK": "HKD"},
-        }
+    settings = make_test_settings(
+        universe=["SPY", "7709.HK"], watchlist=[],
+        international_tickers={"7709.HK": "HKD"},
     )
     calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(ingest_mod, "get_source", lambda s: RecordingSource("primary", calls))

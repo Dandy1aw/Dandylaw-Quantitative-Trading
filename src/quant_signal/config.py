@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -14,6 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 class NotifySettings(BaseModel):
     dedup_hours: int = 4
     hourly_limit: int = 10
+    premarket_hourly_limit: int = 10
+    intraday_hourly_limit: int = 10
+    deviation_hourly_limit: int = 10
 
 
 class TrendGateSettings(BaseModel):
@@ -43,16 +46,22 @@ class EnrichmentSettings(BaseModel):
     max_tickers: int = 8
 
 
+class TickerSettings(BaseModel):
+    asset_type: Literal["ETF", "STOCK"]
+    currency: str = "USD"
+
+
 class Settings(BaseModel):
     data_source: Literal["yfinance", "alpaca"] = "yfinance"
     db_dir: str = "data"
-    universe: list[str]
-    watchlist: list[str]
+    tickers: dict[str, TickerSettings] = Field(default_factory=dict)
+    universe: list[str] = Field(default_factory=list)
+    watchlist: list[str] = Field(default_factory=list)
     strategies: dict[str, dict[str, float | int]]
-    momentum_group_top_n: dict[str, int] = {}   # 币种 -> 独立名额，如 {"HKD": 1, "KRW": 1}
-    momentum_default_group_top_n: dict[str, int] = {}   # 默认组内 ETF/STOCK 各自名额
-    asset_type: dict[str, str] = {}   # ticker -> "ETF"|"STOCK"，仅用于默认组内部再分
-    international_tickers: dict[str, str] = {}   # ticker -> 币种，固定走 yfinance
+    momentum_group_top_n: dict[str, int] = Field(default_factory=dict)
+    momentum_default_group_top_n: dict[str, int] = Field(default_factory=dict)
+    asset_type: dict[str, str] = Field(default_factory=dict)
+    international_tickers: dict[str, str] = Field(default_factory=dict)
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
     trend_gate: TrendGateSettings = TrendGateSettings()
@@ -63,6 +72,16 @@ class Settings(BaseModel):
 
     @model_validator(mode="after")
     def validate_universe_classification(self) -> Self:
+        if self.tickers:
+            self.universe = list(self.tickers)
+            self.asset_type = {
+                ticker: metadata.asset_type for ticker, metadata in self.tickers.items()
+            }
+            self.international_tickers = {
+                ticker: metadata.currency
+                for ticker, metadata in self.tickers.items()
+                if metadata.currency != "USD"
+            }
         classified = set(self.asset_type) | set(self.international_tickers)
         missing = sorted(set(self.universe) - classified)
         if missing:
