@@ -18,6 +18,7 @@ from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.cards import (
     alert_card,
     build_enrichment_card,
+    momentum_ranking_card,
     premarket_cards,
     signal_card,
 )
@@ -29,7 +30,7 @@ from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.rsi_reversion import RsiReversion
 from quant_signal.strategies.indicators import chandelier_stop, expected_move_target
-from quant_signal.strategies.trend_gate import TrendGateConfig, apply_trend_gate
+from quant_signal.strategies.trend_gate import TrendGateConfig, TrendInfo, apply_trend_gate
 from quant_signal.watch_monitor import check_deviations
 
 log = structlog.get_logger()
@@ -209,10 +210,12 @@ class Engine:
     def run_premarket(self, now: datetime) -> None:
         bars = self._refresh_daily(now)
         self._refresh_fx_rates()
+        ranking = self.momentum.rank(bars)
         targets = self.momentum.generate(bars)
+        trend_infos: list[TrendInfo] = []
         if self.trend_gate_cfg is not None and targets:
             # 动量选出后叠趋势闸门：趋势失效(跌破200线)的仓位切防御 sleeve
-            gated, _ = apply_trend_gate(
+            gated, trend_infos = apply_trend_gate(
                 targets, bars, self.settings.asset_type,
                 self.settings.international_tickers, self.trend_gate_cfg,
                 use_mom=self.trend_gate_use_mom,
@@ -253,6 +256,14 @@ class Engine:
                 result.to_push, self.settings.international_tickers, live_prices
             ):
                 self.notifier.send(card)
+        self.notifier.send(
+            momentum_ranking_card(
+                ranking,
+                held=set(current),
+                trend_flat={i.ticker for i in trend_infos if i.state == "FLAT"},
+                insufficient={i.ticker for i in trend_infos if i.state == "INSUFFICIENT"},
+            )
+        )
         log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))
 
     def run_intraday(self, now: datetime) -> None:

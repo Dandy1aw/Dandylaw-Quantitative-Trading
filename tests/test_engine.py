@@ -87,7 +87,8 @@ def test_premarket_generates_rotation_and_report(env, daily_bars) -> None:  # ty
     assert {"AAA", "BBB"} <= holdings and "CCC" not in holdings
     titles = [c.title for c in notifier.cards]
     assert any("美股组" in t for t in titles)            # 合成标的均为美股，出美股组卡
-    assert all("盘前早报" in t or "【重要】" in t for t in titles)
+    assert "📊 动量全池榜单" in titles
+    assert all("盘前早报" in t or "【重要】" in t or "动量全池榜单" in t for t in titles)
 
 
 def test_premarket_report_shows_strategy_column_for_multiple_strategies(

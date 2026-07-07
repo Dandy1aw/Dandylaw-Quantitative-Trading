@@ -37,6 +37,58 @@ def alert_card(title: str, body_md: str) -> Card:
     return Card(kind=CardKind.ALERT, title=f"🚨 {title}", body_md=body_md)
 
 
+def momentum_ranking_card(
+    ranking: list[tuple[str, float, float]],
+    held: set[str],
+    trend_flat: set[str] | None = None,
+    insufficient: set[str] | None = None,
+) -> Card:
+    """Render a display-only whole-universe momentum ranking.
+
+    Selection remains controlled by the market/asset-group quotas.  This card
+    deliberately exposes the untruncated ranking so weak held positions and
+    strong candidates outside those quotas stay visible.
+    """
+    flat = trend_flat or set()
+    short_history = insufficient or set()
+
+    def label(ticker: str) -> str:
+        marks: list[str] = []
+        if ticker in held:
+            marks.append("⚠持仓")
+        if ticker in flat:
+            marks.append("⚠趋势FLAT")
+        if ticker in short_history:
+            marks.append("⚠数据不足")
+        return " ".join([ticker, *marks])
+
+    def rows(items: list[tuple[str, float, float]]) -> list[str]:
+        return [
+            f"| {label(ticker)} | {momentum:+.1%} | {price:.2f} |"
+            for ticker, momentum, price in items
+        ]
+
+    top = ranking[:5]
+    warning_by_ticker = {ticker: (ticker, momentum, price) for ticker, momentum, price in ranking[-3:]}
+    for item in ranking:
+        if item[0] in flat:
+            warning_by_ticker.setdefault(item[0], item)
+    warning = sorted(warning_by_ticker.values(), key=lambda item: item[1])
+
+    parts = [
+        "**Top 5 买入候选**",
+        "| 标的 | 60日动量 | 参考价 |",
+        "|---|---|---|",
+        *rows(top),
+        "",
+        "**Bottom 3 卖出警示**",
+        "| 标的 | 60日动量 | 参考价 |",
+        "|---|---|---|",
+        *rows(warning),
+    ]
+    return report_card("📊 动量全池榜单", "\n".join(parts))
+
+
 _BEARISH_KEYWORDS = ("看空", "谨慎")
 
 

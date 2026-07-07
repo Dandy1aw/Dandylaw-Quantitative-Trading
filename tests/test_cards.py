@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from quant_signal.notifier import cards as cards_module
 from quant_signal.notifier.cards import premarket_cards
 from quant_signal.strategies.base import Direction, Signal
 
@@ -120,3 +121,33 @@ def test_momentum_section_sorted_by_momentum_desc() -> None:
     ]
     us = _card_by(premarket_cards(signals, INTL, {}), "美股组")
     assert us.body_md.index("MU") < us.body_md.index("SMH") < us.body_md.index("AMD")
+
+
+def test_momentum_ranking_card_shows_top_bottom_and_risk_markers() -> None:
+    ranking = [
+        ("TOP1", 0.50, 150.0),
+        ("TOP2", 0.40, 140.0),
+        ("TOP3", 0.30, 130.0),
+        ("TOP4", 0.20, 120.0),
+        ("TOP5", 0.10, 110.0),
+        ("MID", 0.05, 105.0),
+        ("LOW1", -0.10, 90.0),
+        ("LOW2", -0.20, 80.0),
+        ("LOW3", -0.30, 70.0),
+    ]
+
+    card = cards_module.momentum_ranking_card(
+        ranking,
+        held={"TOP2", "LOW2"},
+        trend_flat={"MID"},
+        insufficient={"TOP5"},
+    )
+
+    assert card.title == "📊 动量全池榜单"
+    assert "Top 5 买入候选" in card.body_md
+    assert "Bottom 3 卖出警示" in card.body_md
+    assert "TOP2 ⚠持仓" in card.body_md
+    assert "LOW2 ⚠持仓" in card.body_md
+    assert "MID ⚠趋势FLAT" in card.body_md
+    assert "TOP5 ⚠数据不足" in card.body_md
+    assert "LOW1" in card.body_md and "LOW3" in card.body_md
