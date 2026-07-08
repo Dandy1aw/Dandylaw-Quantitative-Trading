@@ -116,3 +116,30 @@ def test_fetch_live_prices_batches_all_tickers_in_one_download(
     assert calls[0][0] == ["SPY", "QQQ"]
     assert calls[0][1].get("prepost") is True
     assert prices == {"SPY": 1.0, "QQQ": 1.0}
+
+
+def test_yfinance_drops_row_with_volume_but_missing_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quant_signal.datafeed.yf_source as m
+
+    def fake_download(*args: object, **kwargs: object) -> pd.DataFrame:
+        index = pd.date_range("2026-07-06", periods=2, freq="D")
+        return pd.DataFrame(
+            {
+                "Open": [100.0, float("nan")],
+                "High": [101.0, float("nan")],
+                "Low": [99.0, float("nan")],
+                "Close": [100.5, float("nan")],
+                "Volume": [1_000, 2_000],
+            },
+            index=index,
+        )
+
+    monkeypatch.setattr(m.yf, "download", fake_download)
+    bars = YFinanceSource().fetch_daily_bars(
+        ["7709.HK"], date(2026, 7, 6), date(2026, 7, 8)
+    )
+
+    assert len(bars) == 1
+    assert bars["close"].notna().all()

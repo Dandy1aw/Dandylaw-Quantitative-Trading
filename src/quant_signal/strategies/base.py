@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import math
 
 import pandas as pd
 
@@ -26,6 +27,10 @@ class Signal:
     # 去重键后缀：同标的同方向同策略下再细分（如偏离监控按 2%/5%/10% 档位分开，
     # 升到更高档=新键=会再推一次"升级告警"，同档在窗口内仍压制）
     dedup_suffix: str | None = None
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.price):
+            raise ValueError(f"Signal.price must be finite: {self.ticker}={self.price}")
 
 
 def dedup_key(s: Signal) -> str:

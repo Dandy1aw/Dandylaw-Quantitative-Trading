@@ -1,4 +1,8 @@
 from datetime import datetime, timedelta, timezone
+import threading
+import time
+
+import pytest
 
 from quant_signal.scheduler import (
     HEARTBEAT_FAIL_THRESHOLD,
@@ -41,6 +45,54 @@ def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
     assert jobs["rotation_asia_close"].misfire_grace_time == 3600
     assert jobs["intraday"].misfire_grace_time == 240
     assert jobs["watch_deviation"].misfire_grace_time == 240
+
+
+def test_us_market_jobs_use_new_york_trigger_timezone() -> None:
+    sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+    for job_id in ("premarket", "intraday", "postmarket", "maintenance", "enrichment"):
+        assert str(jobs[job_id].trigger.timezone) == "America/New_York"
+
+
+def test_rotation_and_premarket_share_execution_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+
+    class RecordingEngine:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.guard = threading.Lock()
+
+        def run_premarket(self, now: datetime) -> None:
+            with self.guard:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.05)
+            with self.guard:
+                self.active -= 1
+
+    engine = RecordingEngine()
+    sched = build_scheduler(engine=engine, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+    start = threading.Barrier(3)
+
+    def invoke(job_id: str) -> None:
+        start.wait()
+        jobs[job_id].func()
+
+    threads = [
+        threading.Thread(target=invoke, args=("premarket",)),
+        threading.Thread(target=invoke, args=("rotation_asia_open",)),
+    ]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert engine.max_active == 1
 
 
 def test_heartbeat_alerts_after_consecutive_failures() -> None:

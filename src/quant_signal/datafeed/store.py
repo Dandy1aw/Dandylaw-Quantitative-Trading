@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+import threading
 
 import duckdb
+import numpy as np
 import pandas as pd
 
 _SCHEMA = """
@@ -22,18 +24,26 @@ _COLS = ["open", "high", "low", "close", "volume"]
 class BarStore:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self._con = duckdb.connect(str(db_path))
-        for table in ("bars_1d", "bars_5min"):
-            self._con.execute(_SCHEMA.format(table=table))
+        with self._lock:
+            for table in ("bars_1d", "bars_5min"):
+                self._con.execute(_SCHEMA.format(table=table))
 
     def _write(self, table: str, df: pd.DataFrame, source: str) -> int:
         if df.empty:
             return 0
         flat = df.reset_index()[["ticker", "ts", *_COLS]].copy()
+        flat = flat[np.isfinite(pd.to_numeric(flat["close"], errors="coerce"))].copy()
+        if flat.empty:
+            return 0
         flat["source"] = source
-        self._con.register("_incoming", flat)
-        self._con.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM _incoming")
-        self._con.unregister("_incoming")
+        with self._lock:
+            self._con.register("_incoming", flat)
+            try:
+                self._con.execute(f"INSERT OR REPLACE INTO {table} SELECT * FROM _incoming")
+            finally:
+                self._con.unregister("_incoming")
         return len(flat)
 
     def _read(
@@ -52,7 +62,8 @@ class BarStore:
             q += " AND ts <= ?"
             params.append(end)
         q += " ORDER BY ticker, ts"
-        flat = self._con.execute(q, params).df()
+        with self._lock:
+            flat = self._con.execute(q, params).df()
         flat["ts"] = pd.to_datetime(flat["ts"], utc=True)
         return flat.set_index(["ticker", "ts"])
 
@@ -86,7 +97,8 @@ class BarStore:
         return self._read("bars_5min", tickers, start, end)
 
     def daily_bar_count(self, ticker: str) -> int:
-        row = self._con.execute(
-            "SELECT count(*) FROM bars_1d WHERE ticker = ?", [ticker]
-        ).fetchone()
+        with self._lock:
+            row = self._con.execute(
+                "SELECT count(*) FROM bars_1d WHERE ticker = ?", [ticker]
+            ).fetchone()
         return int(row[0]) if row else 0

@@ -7,6 +7,7 @@ import pytest
 from quant_signal.config import EnrichmentSettings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine, _intraday_snapshot
+from quant_signal.pipelines import premarket as premarket_pipeline
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.strategies.base import Direction, Signal
@@ -434,3 +435,13 @@ def test_intraday_snapshot_appends_partial_day(daily_bars: pd.DataFrame) -> None
     assert aaa.index[-1].date() == date(2026, 7, 6)
     assert aaa["volume"].iloc[-1] == 60_000              # 6 根 5min 量累加
     assert aaa["high"].iloc[-1] == 201.0
+
+
+def test_premarket_latest_close_skips_nan_tail(daily_bars: pd.DataFrame) -> None:
+    aaa = daily_bars.xs("AAA", level="ticker").copy()
+    aaa.iloc[-1, aaa.columns.get_loc("close")] = float("nan")
+    bars = pd.concat({"AAA": aaa}, names=["ticker"])
+
+    price = premarket_pipeline._latest_finite_close(bars, "AAA")
+
+    assert price == pytest.approx(float(aaa["close"].dropna().iloc[-1]))

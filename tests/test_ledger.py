@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import math
 
 import pytest
 
@@ -115,3 +116,15 @@ def test_holdings_roundtrip(ledger: SignalLedger) -> None:
     ledger.set_holdings("momentum_rotation", ["SPY", "QQQ"])
     ledger.set_holdings("momentum_rotation", ["QQQ", "GLD"])   # 覆盖式更新
     assert sorted(ledger.get_holdings("momentum_rotation")) == ["GLD", "QQQ"]
+
+
+def test_signal_rejects_non_finite_price() -> None:
+    with pytest.raises(ValueError, match="finite"):
+        Signal(
+            ticker="BAD",
+            direction=Direction.BUY,
+            price=math.nan,
+            reason="bad feed",
+            strategy_id="momentum_rotation",
+            ts=NOW,
+        )

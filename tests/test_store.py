@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
+import time
 
 import pandas as pd
 import pytest
@@ -72,3 +74,52 @@ def test_write_daily_bars_dedupes_same_day_across_sources(store: BarStore) -> No
     store.write_daily_bars(df1, source="alpaca")
     store.write_daily_bars(df2, source="yfinance")
     assert store.daily_bar_count("SPY") == 1
+
+
+def test_shared_duckdb_connection_serializes_concurrent_writes(store: BarStore) -> None:
+    class DetectingConnection:
+        def __init__(self) -> None:
+            self.guard = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def register(self, name: str, frame: pd.DataFrame) -> None:
+            return None
+
+        def execute(self, query: str) -> None:
+            with self.guard:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.05)
+            with self.guard:
+                self.active -= 1
+
+        def unregister(self, name: str) -> None:
+            return None
+
+    connection = DetectingConnection()
+    store._con = connection  # type: ignore[assignment]
+    start = threading.Barrier(3)
+
+    def write(ticker: str) -> None:
+        start.wait()
+        store.write_daily_bars(make_bars(ticker), source="test")
+
+    threads = [threading.Thread(target=write, args=(ticker,)) for ticker in ("AAA", "BBB")]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join()
+
+    assert connection.max_active == 1
+
+
+def test_write_drops_non_finite_close_even_when_volume_exists(store: BarStore) -> None:
+    bars = make_bars("7709.HK", n=2)
+    bars.iloc[-1, bars.columns.get_loc("close")] = float("nan")
+
+    written = store.write_daily_bars(bars, source="yfinance")
+
+    assert written == 1
+    assert store.daily_bar_count("7709.HK") == 1

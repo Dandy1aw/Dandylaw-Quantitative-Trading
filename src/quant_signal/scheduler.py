@@ -118,13 +118,19 @@ def build_scheduler(
     engine: Any, ledger: Any, store: Any, notifier: Any
 ) -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone=ET)
+    rotation_lock = threading.Lock()
+
+    def run_rotation_once() -> None:
+        # premarket 与亚洲两次 rotation 共用同一 Engine/BarStore，必须跨 job 串行。
+        with rotation_lock:
+            engine.run_premarket(datetime.now(timezone.utc))
 
     def premarket() -> None:
         now_et = _now_et()
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="premarket")
             return
-        engine.run_premarket(datetime.now(timezone.utc))
+        run_rotation_once()
 
     def intraday() -> None:
         now_et = _now_et()
@@ -145,7 +151,7 @@ def build_scheduler(
     def rotation_push() -> None:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
-        engine.run_premarket(datetime.now(timezone.utc))
+        run_rotation_once()
 
     def watch_deviation() -> None:
         engine.run_watch_deviation(datetime.now(timezone.utc))
@@ -173,15 +179,19 @@ def build_scheduler(
     hb = Heartbeat(notifier=notifier, check=lambda: True, health=health)
 
     sched.add_job(
-        premarket, CronTrigger(hour=8, minute=0), id="premarket",
+        premarket, CronTrigger(hour=8, minute=0, timezone=ET), id="premarket",
         misfire_grace_time=3600,
     )
     sched.add_job(
-        intraday, CronTrigger(hour="9-15", minute="*/5"), id="intraday",
+        intraday, CronTrigger(hour="9-15", minute="*/5", timezone=ET), id="intraday",
         misfire_grace_time=240,
     )
-    sched.add_job(postmarket, CronTrigger(hour=16, minute=30), id="postmarket")
-    sched.add_job(maintenance, CronTrigger(hour=3, minute=0), id="maintenance")
+    sched.add_job(
+        postmarket, CronTrigger(hour=16, minute=30, timezone=ET), id="postmarket"
+    )
+    sched.add_job(
+        maintenance, CronTrigger(hour=3, minute=0, timezone=ET), id="maintenance"
+    )
     sched.add_job(hb.tick, IntervalTrigger(minutes=15), id="heartbeat")
     # 以下三个 job 用固定 UTC 时刻门控，不随 scheduler 默认时区(ET)的夏令时漂移
     sched.add_job(
@@ -202,5 +212,7 @@ def build_scheduler(
         id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
         misfire_grace_time=240,
     )
-    sched.add_job(enrichment, CronTrigger(hour=8, minute=45), id="enrichment")
+    sched.add_job(
+        enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"
+    )
     return sched

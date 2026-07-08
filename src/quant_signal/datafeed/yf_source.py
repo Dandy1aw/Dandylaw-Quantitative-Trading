@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -26,6 +27,7 @@ def _normalize(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
             continue  # yfinance 对该标的/时段没有返回任何数据
         sub = sub[["open", "high", "low", "close", "volume"]]
         sub = sub.dropna(how="all")
+        sub = sub[np.isfinite(sub["close"].astype(float))]
         idx = pd.to_datetime(sub.index)
         idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
         sub.index = pd.MultiIndex.from_arrays(

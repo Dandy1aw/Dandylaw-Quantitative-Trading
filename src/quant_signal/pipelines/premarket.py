@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 from typing import TYPE_CHECKING
 
+import pandas as pd
 import structlog
 
 from quant_signal.notifier.cards import momentum_ranking_card, premarket_cards
@@ -13,6 +15,12 @@ if TYPE_CHECKING:
     from quant_signal.engine import Engine
 
 log = structlog.get_logger()
+
+
+def _latest_finite_close(bars: pd.DataFrame, ticker: str) -> float | None:
+    series = bars.xs(ticker, level="ticker")["close"].dropna()
+    finite = series[series.map(lambda value: math.isfinite(float(value)))]
+    return float(finite.iloc[-1]) if not finite.empty else None
 
 
 def run(engine: Engine, now: datetime) -> None:
@@ -35,7 +43,7 @@ def run(engine: Engine, now: datetime) -> None:
             Signal(
                 ticker=ticker,
                 direction=Direction.BUY,
-                price=float(bars.xs(ticker, level="ticker")["close"].iloc[-1]),
+                price=price,
                 reason="持仓趋势复核",
                 strategy_id=engine.momentum.strategy_id,
                 ts=now,
@@ -43,6 +51,7 @@ def run(engine: Engine, now: datetime) -> None:
             )
             for ticker in current
             if ticker in bars.index.get_level_values("ticker")
+            and (price := _latest_finite_close(bars, ticker)) is not None
         ]
         if held_diagnostics:
             _, held_infos = apply_trend_gate(
@@ -62,13 +71,14 @@ def run(engine: Engine, now: datetime) -> None:
         Signal(
             ticker=ticker,
             direction=Direction.SELL,
-            price=float(bars.xs(ticker, level="ticker")["close"].iloc[-1]),
+            price=price,
             reason="动量排名跌出前列，轮动调出",
             strategy_id=engine.momentum.strategy_id,
             ts=as_of,
         )
         for ticker in current
         if ticker not in target_tickers and ticker in bars.index.get_level_values("ticker")
+        and (price := _latest_finite_close(bars, ticker)) is not None
     ]
     extra_signals = (
         engine.rsi.generate(bars)
