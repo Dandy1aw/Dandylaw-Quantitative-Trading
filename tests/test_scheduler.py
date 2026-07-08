@@ -34,6 +34,7 @@ def test_scheduler_registers_all_jobs() -> None:
     assert ids == {
         "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
         "rotation_asia_open", "rotation_asia_close", "watch_deviation", "enrichment",
+        "performance",
     }
 
 

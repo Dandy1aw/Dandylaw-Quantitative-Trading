@@ -118,6 +118,15 @@ def test_holdings_roundtrip(ledger: SignalLedger) -> None:
     assert sorted(ledger.get_holdings("momentum_rotation")) == ["GLD", "QQQ"]
 
 
+def test_pushed_signals_window_and_order(ledger: SignalLedger) -> None:
+    ledger.insert(sig("OLD"), pushed=True, now=NOW - timedelta(days=120))   # 窗口外
+    ledger.insert(sig("B"), pushed=True, now=NOW - timedelta(days=2))
+    ledger.insert(sig("A"), pushed=True, now=NOW - timedelta(days=1))
+    ledger.insert(sig("N"), pushed=False, now=NOW)                          # 未推送不计
+    rows = ledger.pushed_signals(NOW - timedelta(days=90))
+    assert [r["ticker"] for r in rows] == ["B", "A"]
+
+
 def test_latest_price_for_direction(ledger: SignalLedger) -> None:
     """P3 卖出持有期盈亏：取该标的最近一次 BUY 信号价, 不限时间窗口。"""
     ledger.insert(sig("MU"), pushed=True, now=NOW - timedelta(days=40))     # BUY @100

@@ -22,6 +22,7 @@ from quant_signal.pipelines.intraday import (
     intraday_snapshot as _intraday_snapshot,
     run as run_intraday_pipeline,
 )
+from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
@@ -267,3 +268,6 @@ class Engine:
 
     def run_enrichment(self, now: datetime) -> None:
         run_enrichment_pipeline(self, now)
+
+    def run_performance(self, now: datetime) -> None:
+        run_performance_pipeline(self, now)

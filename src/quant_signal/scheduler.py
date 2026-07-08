@@ -215,4 +215,15 @@ def build_scheduler(
     sched.add_job(
         enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"
     )
+
+    def performance() -> None:
+        engine.run_performance(datetime.now(timezone.utc))
+
+    # 每周六 09:00 ET(周五收盘后)复盘近90天信号虚拟盘；错过宽限6小时
+    sched.add_job(
+        performance,
+        CronTrigger(day_of_week="sat", hour=9, minute=0, timezone=ET),
+        id="performance",
+        misfire_grace_time=21600,
+    )
     return sched

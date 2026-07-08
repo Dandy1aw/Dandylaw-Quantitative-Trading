@@ -115,6 +115,16 @@ class SignalLedger:
             row = self._con.execute(query, params).fetchone()
         return int(row["n"])
 
+    def pushed_signals(self, since: datetime) -> list[dict[str, object]]:
+        """近窗口内全部已推送信号(按推送时间升序)，供绩效虚拟盘重放。"""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM signals WHERE pushed = 1 AND pushed_at >= ?"
+                " ORDER BY pushed_at",
+                (since.astimezone(timezone.utc).isoformat(),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def signals_on(self, day: date) -> list[dict[str, object]]:
         with self._lock:
             rows = self._con.execute(
