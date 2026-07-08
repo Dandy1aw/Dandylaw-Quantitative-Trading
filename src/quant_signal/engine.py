@@ -23,6 +23,7 @@ from quant_signal.pipelines.intraday import (
     intraday_snapshot as _intraday_snapshot,
     run as run_intraday_pipeline,
 )
+from quant_signal.pipelines.dataqa import run as run_dataqa_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
@@ -274,3 +275,6 @@ class Engine:
 
     def run_performance(self, now: datetime) -> None:
         run_performance_pipeline(self, now)
+
+    def run_data_qa(self, now: datetime) -> None:
+        run_dataqa_pipeline(self, now)

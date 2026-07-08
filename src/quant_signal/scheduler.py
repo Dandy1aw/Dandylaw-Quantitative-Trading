@@ -219,6 +219,14 @@ def build_scheduler(
     def performance() -> None:
         engine.run_performance(datetime.now(timezone.utc))
 
+    def data_qa() -> None:
+        engine.run_data_qa(datetime.now(timezone.utc))
+
+    # 每日 03:30 ET(maintenance 之后)体检两源收盘价偏差
+    sched.add_job(
+        data_qa, CronTrigger(hour=3, minute=30, timezone=ET), id="data_qa"
+    )
+
     # 每周六 09:00 ET(周五收盘后)复盘近90天信号虚拟盘；错过宽限6小时
     sched.add_job(
         performance,
