@@ -28,6 +28,7 @@ class MomentumRotation(Strategy):
         asset_type: dict[str, str] | None = None,
         default_group_top_n: dict[str, int] | None = None,
         leverage_factor: dict[str, float] | None = None,
+        lookbacks: list[int] | None = None,
     ) -> None:
         self.universe = universe
         self.lookback_days = lookback_days
@@ -48,6 +49,9 @@ class MomentumRotation(Strategy):
         # 建议权重 = (等权 ÷ 倍数) 整体归一——同一份权重承担的风险与 1x 标的对齐。
         # 倍数是产品构造事实(说明书)，非拟合参数；回测见 research/backtest_lev_adjust.py。
         self.leverage_factor = leverage_factor or {}
+        # S2 多周期集成：传入如 [63,126,252] 时 score=各周期动量均值，降低单参数
+        # "选参运气"；None=沿用单 lookback_days(生产默认)。要求历史覆盖最长周期。
+        self.lookbacks = lookbacks
 
     def _compute(
         self, bars: pd.DataFrame
@@ -67,9 +71,13 @@ class MomentumRotation(Strategy):
         dollar_vol_usd: dict[str, float] = {}
         for t in close.columns:
             series = close[t].dropna()
-            if len(series) < self.lookback_days + 1:
+            horizons = self.lookbacks or [self.lookback_days]
+            if len(series) < max(horizons) + 1:
                 continue
-            momentum[t] = float(series.iloc[-1] / series.iloc[-1 - self.lookback_days] - 1.0)
+            momentum[t] = float(
+                sum(series.iloc[-1] / series.iloc[-1 - h] - 1.0 for h in horizons)
+                / len(horizons)
+            )
             last_price[t] = float(series.iloc[-1])
             vol = volume[t].reindex(series.index)
             native_dv = float((series * vol).tail(20).mean())

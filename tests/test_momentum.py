@@ -36,6 +36,31 @@ def test_leverage_factor_halves_2x_etf_weight(daily_bars: pd.DataFrame) -> None:
     assert sum(w for w in weights.values() if w) == pytest.approx(1.0, abs=1e-3)
 
 
+def test_multi_horizon_composite_is_mean_of_lookbacks(daily_bars: pd.DataFrame) -> None:
+    """S2 多周期集成：score = 各周期动量均值；与单周期在同池上可比。"""
+    single = MomentumRotation(
+        universe=UNIVERSE, lookback_days=60, top_n=2, min_dollar_volume=50_000_000
+    ).rank(daily_bars)
+    multi = MomentumRotation(
+        universe=UNIVERSE, lookback_days=60, top_n=2, min_dollar_volume=50_000_000,
+        lookbacks=[20, 60],
+    ).rank(daily_bars)
+    assert {t for t, _, _ in multi} == {t for t, _, _ in single}   # 同池同过滤
+    close = daily_bars["close"].unstack("ticker")["AAA"].dropna()
+    expect = ((close.iloc[-1] / close.iloc[-21] - 1) + (close.iloc[-1] / close.iloc[-61] - 1)) / 2
+    got = {t: m for t, m, _ in multi}["AAA"]
+    assert got == pytest.approx(float(expect), rel=1e-9)
+
+
+def test_multi_horizon_requires_longest_history(daily_bars: pd.DataFrame) -> None:
+    """历史不足最长周期的标的整体跳过(不允许部分周期缺失的偏科打分)。"""
+    strat = MomentumRotation(
+        universe=UNIVERSE, lookback_days=60, top_n=2, min_dollar_volume=50_000_000,
+        lookbacks=[20, 10_000],
+    )
+    assert strat.rank(daily_bars) == []
+
+
 def test_signal_ts_is_last_bar_ts(daily_bars: pd.DataFrame) -> None:
     signals = make().generate(daily_bars)
     last_ts = daily_bars.index.get_level_values("ts").max()
