@@ -185,8 +185,8 @@ def _market_card(
             continue
         lines = [
             f"**【{_STRATEGY_LABEL[sid]}】**",
-            "| 标的 | 方向 | 参考价 | 现价 | 止盈目标 | 止损价 | 原因 |",
-            "|---|---|---|---|---|---|---|",
+            "| 标的 | 方向 | 参考价 | 现价 | 建议买入带 | 止盈目标 | 止损价 | 原因 |",
+            "|---|---|---|---|---|---|---|---|",
         ]
         for s in ssigs:
             live = live_prices.get(s.ticker)
@@ -200,9 +200,20 @@ def _market_card(
                 sl_str = f"{float(sl):.2f}" + (" ⚠破位" if float(sl) >= s.price else "")
             else:
                 sl_str = "-"
+            entry_low, entry_high = extra.get("entry_low"), extra.get("entry_high")
+            if isinstance(entry_low, (int, float)) and isinstance(entry_high, (int, float)):
+                band_str = f"{float(entry_low):.2f}~{float(entry_high):.2f}"
+                if extra.get("overheat"):
+                    band_str += " ⚠过热"
+            else:
+                band_str = "-"
+            reason = s.reason
+            hold = extra.get("holding_return")
+            if isinstance(hold, (int, float)):
+                reason = f"{reason}，持有期 {float(hold):+.1%}"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
-                f" {live_str} | {tp_str} | {sl_str} | {s.reason} |"
+                f" {live_str} | {band_str} | {tp_str} | {sl_str} | {reason} |"
             )
         parts.append("\n".join(lines))
     return report_card(f"📋 盘前早报 · {market}", "\n\n".join(parts))

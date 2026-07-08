@@ -68,19 +68,31 @@ def run(engine: Engine, now: datetime) -> None:
             trend_infos = list(info_by_ticker.values())
     target_tickers = [signal.ticker for signal in targets]
     as_of = targets[0].ts if targets else now
-    sells = [
-        Signal(
-            ticker=ticker,
-            direction=Direction.SELL,
-            price=price,
-            reason="动量排名跌出前列，轮动调出",
-            strategy_id=engine.momentum.strategy_id,
-            ts=as_of,
+    sells = []
+    for ticker in current:
+        if ticker in target_tickers or ticker not in bars.index.get_level_values("ticker"):
+            continue
+        price = _latest_finite_close(bars, ticker)
+        if price is None:
+            continue
+        # P3: 卖出信号带持有期收益(相对最近一次 BUY 信号价)，给盈亏语境
+        buy_price = engine.ledger.latest_price_for(
+            engine.momentum.strategy_id, ticker, Direction.BUY.value
         )
-        for ticker in current
-        if ticker not in target_tickers and ticker in bars.index.get_level_values("ticker")
-        and (price := _latest_finite_close(bars, ticker)) is not None
-    ]
+        extra: dict[str, object] | None = (
+            {"holding_return": price / buy_price - 1.0} if buy_price else None
+        )
+        sells.append(
+            Signal(
+                ticker=ticker,
+                direction=Direction.SELL,
+                price=price,
+                reason="动量排名跌出前列，轮动调出",
+                strategy_id=engine.momentum.strategy_id,
+                ts=as_of,
+                extra=extra,
+            )
+        )
     extra_signals = (
         engine.rsi.generate(bars)
         + engine.macd.generate(bars)

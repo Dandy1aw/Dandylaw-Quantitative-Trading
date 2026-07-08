@@ -118,6 +118,18 @@ def test_holdings_roundtrip(ledger: SignalLedger) -> None:
     assert sorted(ledger.get_holdings("momentum_rotation")) == ["GLD", "QQQ"]
 
 
+def test_latest_price_for_direction(ledger: SignalLedger) -> None:
+    """P3 卖出持有期盈亏：取该标的最近一次 BUY 信号价, 不限时间窗口。"""
+    ledger.insert(sig("MU"), pushed=True, now=NOW - timedelta(days=40))     # BUY @100
+    ledger.insert(
+        Signal(ticker="MU", direction=Direction.SELL, price=120.0, reason="r",
+               strategy_id="momentum_rotation", ts=NOW),
+        pushed=True, now=NOW,
+    )
+    assert ledger.latest_price_for("momentum_rotation", "MU", "buy") == 100.0
+    assert ledger.latest_price_for("momentum_rotation", "XX", "buy") is None
+
+
 def test_signal_rejects_non_finite_price() -> None:
     with pytest.raises(ValueError, match="finite"):
         Signal(

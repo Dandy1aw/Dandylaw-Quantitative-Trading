@@ -25,7 +25,11 @@ from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
 from quant_signal.strategies.breakout_20d import Breakout20d
-from quant_signal.strategies.indicators import chandelier_stop, expected_move_target
+from quant_signal.strategies.indicators import (
+    chandelier_stop,
+    entry_hint,
+    expected_move_target,
+)
 from quant_signal.strategies.macd_cross import MacdCross
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.rsi_reversion import RsiReversion
@@ -210,6 +214,15 @@ class Engine:
                 extra["stop_loss"] = round(stop_loss, 2)
             if take_profit is not None:
                 extra["take_profit"] = round(take_profit, 2)
+            hint = entry_hint(
+                ticker_bars["high"], ticker_bars["low"], ticker_bars["close"]
+            )
+            if hint is not None:
+                entry_low, entry_high, overheated = hint
+                extra["entry_low"] = round(entry_low, 2)
+                extra["entry_high"] = round(entry_high, 2)
+                if overheated:
+                    extra["overheat"] = True
             output.append(
                 replace(signal, extra=extra)
                 if extra != (signal.extra or {})

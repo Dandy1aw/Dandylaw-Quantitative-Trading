@@ -1,7 +1,41 @@
 import numpy as np
 import pandas as pd
 
-from quant_signal.strategies.indicators import atr, chandelier_stop, expected_move_target
+from quant_signal.strategies.indicators import (
+    atr,
+    chandelier_stop,
+    entry_hint,
+    expected_move_target,
+)
+
+
+def test_entry_hint_band_below_price_not_overheated() -> None:
+    idx = pd.bdate_range("2024-01-02", periods=60, tz="UTC")
+    close = pd.Series(100.0 + np.arange(60) * 0.1, index=idx)   # 温和上行
+    high, low = close + 1.0, close - 1.0
+    hint = entry_hint(high, low, close)
+    assert hint is not None
+    lo, hi, overheated = hint
+    assert lo <= hi == float(close.iloc[-1])   # 带上沿=现价, 下沿不高于现价
+    assert lo >= float(close.iloc[-1]) - atr(high, low, close) - 1e-9
+    assert overheated is False
+
+
+def test_entry_hint_overheated_when_far_above_ma20() -> None:
+    idx = pd.bdate_range("2024-01-02", periods=60, tz="UTC")
+    base = np.full(60, 100.0)
+    base[-5:] = [130, 150, 170, 190, 210]      # 末端抛物线拉升, 远离20日均线
+    close = pd.Series(base, index=idx)
+    high, low = close + 1.0, close - 1.0
+    hint = entry_hint(high, low, close)
+    assert hint is not None
+    assert hint[2] is True
+
+
+def test_entry_hint_insufficient_history_none() -> None:
+    idx = pd.bdate_range("2024-01-02", periods=10, tz="UTC")
+    close = pd.Series(100.0, index=idx)
+    assert entry_hint(close + 1, close - 1, close) is None
 
 
 def _ohlc(n, base=100.0, rng=2.0):  # type: ignore[no-untyped-def]

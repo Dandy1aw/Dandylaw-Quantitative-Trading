@@ -30,6 +30,33 @@ def chandelier_stop(
     return highest - mult * atr(high, low, close, atr_period)
 
 
+def entry_hint(
+    high: pd.Series,
+    low: pd.Series,
+    close: pd.Series,
+    band_ma: int = 10,
+    overheat_ma: int = 20,
+    atr_period: int = 14,
+    overheat_mult: float = 2.5,
+) -> tuple[float, float, bool] | None:
+    """建议买入带与过热标注（P3 展示层）。
+
+    带上沿 = 现价（愿意追就现价）；下沿 = max(10日均线, 现价−1×ATR) 再夹到不超过现价
+    （常见回踩位）。现价距 20 日均线超过 overheat_mult×ATR 视为短线过热。
+    数据不足返回 None。
+    """
+    c = close.dropna()
+    if len(c) < max(band_ma, overheat_ma, atr_period) + 1:
+        return None
+    price = float(c.iloc[-1])
+    a = atr(high, low, close, atr_period)
+    sma_band = float(c.tail(band_ma).mean())
+    entry_low = min(price, max(sma_band, price - a))
+    sma_overheat = float(c.tail(overheat_ma).mean())
+    overheated = a > 0 and (price - sma_overheat) / a > overheat_mult
+    return entry_low, price, overheated
+
+
 def expected_move_target(
     close: pd.Series, vol_lookback: int = 60, horizon: int = 20
 ) -> float | None:

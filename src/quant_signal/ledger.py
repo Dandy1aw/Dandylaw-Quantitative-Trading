@@ -88,6 +88,18 @@ class SignalLedger:
             ).fetchone()
         return float(row["price"]) if row else None
 
+    def latest_price_for(
+        self, strategy_id: str, ticker: str, direction: str
+    ) -> float | None:
+        """取该标的最近一次指定方向信号的价格(不限时间窗)，用于卖出时算持有期收益。"""
+        with self._lock:
+            row = self._con.execute(
+                "SELECT price FROM signals WHERE strategy_id = ? AND ticker = ?"
+                " AND direction = ? ORDER BY pushed_at DESC LIMIT 1",
+                (strategy_id, ticker, direction),
+            ).fetchone()
+        return float(row["price"]) if row else None
+
     def pushed_count_since(
         self, since: datetime, strategy_ids: set[str] | None = None
     ) -> int:
