@@ -218,6 +218,12 @@ def _market_card(
             quality = extra.get("quality_flag")
             if isinstance(quality, str) and quality:
                 reason = f"{reason}，⚠质量差({quality})"
+            surprise = extra.get("earnings_surprise")
+            if isinstance(surprise, (int, float)):
+                if surprise >= 0:
+                    reason = f"{reason}，财报超预期+{float(surprise):.0f}%"
+                else:
+                    reason = f"{reason}，⚠财报不及预期{float(surprise):.0f}%"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
                 f" {live_str} | {band_str} | {tp_str} | {sl_str} | {reason} |"

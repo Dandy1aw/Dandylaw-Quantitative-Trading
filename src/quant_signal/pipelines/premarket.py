@@ -37,6 +37,11 @@ def _annotate_earnings(
         if engine.earnings_source is not None
         else {}
     )
+    surprises = (
+        engine.earnings_source.recent_surprise(buy_tickers, now.date())
+        if engine.earnings_source is not None
+        else {}
+    )
     quality = (
         engine.fundamentals_source.quality_flags(buy_tickers)
         if engine.fundamentals_source is not None
@@ -53,6 +58,9 @@ def _annotate_earnings(
             flag = quality.get(s.ticker)
             if flag:
                 extra["quality_flag"] = flag
+            surprise = surprises.get(s.ticker)
+            if surprise is not None:
+                extra["earnings_surprise"] = surprise
         out.append(replace(s, extra=extra) if extra != (s.extra or {}) else s)
     return out
 

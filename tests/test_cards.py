@@ -113,6 +113,17 @@ def test_entry_band_shown_with_overheat_mark() -> None:
     assert "93.50~100.00" in us.body_md and "⚠过热" in us.body_md
 
 
+def test_earnings_surprise_context_in_reason() -> None:
+    up = [_sig("MU", Direction.BUY, "momentum_rotation", price=10.0, rank=1)]
+    up[0].extra["earnings_surprise"] = 12.3  # type: ignore[index]
+    body = _card_by(premarket_cards(up, INTL, {"MU": None}), "美股组").body_md
+    assert "财报超预期+12%" in body
+    down = [_sig("MU", Direction.BUY, "momentum_rotation", price=10.0, rank=1)]
+    down[0].extra["earnings_surprise"] = -8.0  # type: ignore[index]
+    body = _card_by(premarket_cards(down, INTL, {"MU": None}), "美股组").body_md
+    assert "⚠财报不及预期-8%" in body
+
+
 def test_quality_flag_marked_in_reason() -> None:
     signals = [_sig("BADCO", Direction.BUY, "momentum_rotation", price=10.0, rank=1)]
     signals[0].extra["quality_flag"] = "ROE为负/高负债"  # type: ignore[index]

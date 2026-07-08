@@ -18,8 +18,33 @@ log = structlog.get_logger()
 class EarningsSource(Protocol):
     def next_dates(self, tickers: list[str]) -> dict[str, date]: ...
 
+    def recent_surprise(self, tickers: list[str], now: date) -> dict[str, float]: ...
+
 
 class YFinanceEarnings:
+    SURPRISE_WINDOW_DAYS = 30
+
+    def recent_surprise(self, tickers: list[str], now: date) -> dict[str, float]:
+        """S5 PEAD：近30天内最近一次已公布财报的 EPS 超预期幅度(%)。
+        财报后价格漂移(PEAD)是文献充分记录的效应——超预期为正向语境，
+        不及预期提示拖累。取不到数据的标的缺席，仅提示不决策。"""
+        out: dict[str, float] = {}
+        for ticker in tickers:
+            try:
+                df = yf.Ticker(ticker).earnings_dates
+                if df is None or df.empty or "Surprise(%)" not in df.columns:
+                    continue
+                reported = df["Surprise(%)"].dropna()
+                if reported.empty:
+                    continue
+                latest_ts = max(reported.index)
+                latest_day = latest_ts.date() if hasattr(latest_ts, "date") else latest_ts
+                if 0 <= (now - latest_day).days <= self.SURPRISE_WINDOW_DAYS:
+                    out[ticker] = float(reported.loc[latest_ts])
+            except Exception as error:  # noqa: BLE001
+                log.warning("earnings.surprise_failed", ticker=ticker, error=str(error))
+        return out
+
     def next_dates(self, tickers: list[str]) -> dict[str, date]:
         """返回 {ticker: 下次财报日}；查不到/出错的标的直接缺席。"""
         out: dict[str, date] = {}
