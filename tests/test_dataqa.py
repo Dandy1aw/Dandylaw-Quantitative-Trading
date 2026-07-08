@@ -19,6 +19,13 @@ def test_latest_common_closes_uses_shared_latest_day() -> None:
     assert pairs == {"MU": (100.0, 100.4)}   # 共同最新日=07-06; XX 只在单源, 跳过
 
 
+def test_latest_common_closes_matches_by_calendar_day() -> None:
+    """Alpaca 日bar时间戳带盘前时刻(04:00Z), yfinance 是零点——必须按日历日对齐。"""
+    a = _frame({"MU": [("2026-07-06 04:00", 100.0)]})
+    b = _frame({"MU": [("2026-07-06 00:00", 100.8)]})
+    assert latest_common_closes(a, b) == {"MU": (100.0, 100.8)}
+
+
 def test_divergences_threshold_and_order() -> None:
     pairs = {
         "OK": (100.0, 100.2),     # 0.2% 不报

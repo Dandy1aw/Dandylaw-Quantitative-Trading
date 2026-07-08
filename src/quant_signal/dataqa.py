@@ -20,8 +20,12 @@ def latest_common_closes(
         return out
     tickers = set(a.index.get_level_values("ticker")) & set(b.index.get_level_values("ticker"))
     for ticker in sorted(tickers):
+        # 两源日bar时间戳不同(Alpaca带盘前时刻04:00Z, yfinance为零点)——按日历日对齐
         sa = a.xs(ticker, level="ticker")["close"].dropna()
         sb = b.xs(ticker, level="ticker")["close"].dropna()
+        sa.index = pd.DatetimeIndex(sa.index).normalize()
+        sb.index = pd.DatetimeIndex(sb.index).normalize()
+        sa, sb = sa.groupby(level=0).last(), sb.groupby(level=0).last()
         common = sa.index.intersection(sb.index)
         if len(common) == 0:
             continue
