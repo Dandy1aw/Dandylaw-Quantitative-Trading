@@ -57,6 +57,30 @@ class AlpacaSource:
     def fetch_daily_bars(self, tickers: list[str], start: date, end: date) -> pd.DataFrame:
         return self._fetch(tickers, "1Day", start.isoformat(), end.isoformat())
 
+    def list_active_symbols(self) -> list[str]:
+        """全部 active+tradable 美股普通股代码(排除 OTC 与带后缀的权证/单位类)。
+        交易 API 与数据 API 分属不同 host；live 拒绝就试 paper。"""
+        for host in ("https://api.alpaca.markets", "https://paper-api.alpaca.markets"):
+            resp = httpx.get(
+                f"{host}/v2/assets",
+                params={"status": "active", "asset_class": "us_equity"},
+                headers=self._headers,
+                timeout=60.0,
+            )
+            if resp.status_code in (401, 403):
+                continue
+            resp.raise_for_status()
+            return sorted(
+                {
+                    str(asset["symbol"])
+                    for asset in resp.json()
+                    if asset.get("tradable")
+                    and asset.get("exchange") != "OTC"
+                    and str(asset["symbol"]).isalpha()
+                }
+            )
+        return []
+
     def fetch_intraday_bars(
         self, tickers: list[str], lookback_days: int = 5
     ) -> pd.DataFrame:

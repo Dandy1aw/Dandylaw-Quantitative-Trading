@@ -23,6 +23,7 @@ _LABELS = {
     "macd_cross": "MACD",
     "rsi_reversion": "RSI回归",
     "bollinger_breakout": "布林带",
+    "market_scan": "全市场扫描",
 }
 
 

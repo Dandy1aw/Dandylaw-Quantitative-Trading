@@ -222,6 +222,21 @@ def build_scheduler(
     def data_qa() -> None:
         engine.run_data_qa(datetime.now(timezone.utc))
 
+    def market_scan() -> None:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="market_scan")
+            return
+        engine.run_market_scan(datetime.now(timezone.utc))
+
+    # 每交易日 07:00 ET(早于盘前早报)全市场扫描 Top1；最重的 job, 错过宽限 1h
+    sched.add_job(
+        market_scan,
+        CronTrigger(day_of_week="mon-fri", hour=7, minute=0, timezone=ET),
+        id="market_scan",
+        misfire_grace_time=3600,
+    )
+
     # 每日 03:30 ET(maintenance 之后)体检两源收盘价偏差
     sched.add_job(
         data_qa, CronTrigger(hour=3, minute=30, timezone=ET), id="data_qa"
