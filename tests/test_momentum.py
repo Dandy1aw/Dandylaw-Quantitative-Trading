@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_signal.strategies.base import Direction
 from quant_signal.strategies.momentum_rotation import MomentumRotation
@@ -20,6 +21,19 @@ def test_picks_top_momentum_and_filters_low_volume(daily_bars: pd.DataFrame) -> 
     assert all(s.direction is Direction.BUY for s in signals)
     assert all(s.suggested_weight == 0.5 for s in signals)
     assert all(s.strategy_id == "momentum_rotation" for s in signals)
+
+
+def test_leverage_factor_halves_2x_etf_weight(daily_bars: pd.DataFrame) -> None:
+    """P1 风险等价折算：2x 标的权重 ÷ 杠杆倍数后整体归一。
+    AAA(1x) 与 BBB(2x) 入选时：AAA=0.5/0.75≈0.667, BBB=0.25/0.75≈0.333。"""
+    strat = MomentumRotation(
+        universe=UNIVERSE, lookback_days=60, top_n=2, min_dollar_volume=50_000_000,
+        leverage_factor={"BBB": 2.0},
+    )
+    weights = {s.ticker: s.suggested_weight for s in strat.generate(daily_bars)}
+    assert weights["AAA"] == pytest.approx(2 / 3, abs=1e-3)
+    assert weights["BBB"] == pytest.approx(1 / 3, abs=1e-3)
+    assert sum(w for w in weights.values() if w) == pytest.approx(1.0, abs=1e-3)
 
 
 def test_signal_ts_is_last_bar_ts(daily_bars: pd.DataFrame) -> None:

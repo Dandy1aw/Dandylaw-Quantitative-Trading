@@ -60,6 +60,9 @@ class EnrichmentSettings(BaseModel):
 class TickerSettings(BaseModel):
     asset_type: Literal["ETF", "STOCK"]
     currency: str = "USD"
+    # 杠杆倍数(产品构造事实, 如 2x 日内杠杆 ETF 填 2)。建议仓位按 等权÷倍数 归一,
+    # 让同一份权重承担的风险与 1x 标的对齐。回测: research/backtest_lev_adjust.py
+    leverage: float = 1.0
 
 
 class Settings(BaseModel):
@@ -69,6 +72,7 @@ class Settings(BaseModel):
     universe: list[str] = Field(default_factory=list)
     watchlist: list[str] = Field(default_factory=list)
     strategies: dict[str, dict[str, float | int]]
+    leverage_factor: dict[str, float] = Field(default_factory=dict)   # 由 tickers.leverage 派生
     momentum_group_top_n: dict[str, int] = Field(default_factory=dict)
     momentum_default_group_top_n: dict[str, int] = Field(default_factory=dict)
     asset_type: dict[str, str] = Field(default_factory=dict)
@@ -93,6 +97,14 @@ class Settings(BaseModel):
                 for ticker, metadata in self.tickers.items()
                 if metadata.currency != "USD"
             }
+            self.leverage_factor = {
+                ticker: metadata.leverage
+                for ticker, metadata in self.tickers.items()
+                if metadata.leverage != 1.0
+            }
+        bad_leverage = sorted(t for t, v in self.leverage_factor.items() if v < 1.0)
+        if bad_leverage:
+            raise ValueError(f"leverage 必须 ≥1: {', '.join(bad_leverage)}")
         classified = set(self.asset_type) | set(self.international_tickers)
         missing = sorted(set(self.universe) - classified)
         if missing:

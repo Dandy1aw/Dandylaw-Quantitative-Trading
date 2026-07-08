@@ -67,6 +67,25 @@ def test_ticker_registry_derives_legacy_market_fields() -> None:
     assert settings.international_tickers == {"7709.HK": "HKD"}
 
 
+def test_ticker_registry_derives_leverage_factor() -> None:
+    settings = Settings(
+        tickers={
+            "SPY": {"asset_type": "ETF", "currency": "USD"},
+            "SNXX": {"asset_type": "ETF", "currency": "USD", "leverage": 2},
+        },
+        strategies={"momentum_rotation": {}, "breakout_20d": {}},
+    )
+    assert settings.leverage_factor == {"SNXX": 2.0}   # 1x 不入 map
+
+
+def test_ticker_registry_rejects_sub_one_leverage() -> None:
+    with pytest.raises(ValueError, match="leverage"):
+        Settings(
+            tickers={"BAD": {"asset_type": "ETF", "currency": "USD", "leverage": 0.5}},
+            strategies={"momentum_rotation": {}, "breakout_20d": {}},
+        )
+
+
 def test_legacy_hourly_limit_populates_all_notification_channels() -> None:
     settings = NotifySettings(hourly_limit=3)
     assert settings.premarket_hourly_limit == 3

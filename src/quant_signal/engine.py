@@ -63,6 +63,7 @@ class Engine:
             group_top_n=settings.momentum_group_top_n,
             asset_type=settings.asset_type,
             default_group_top_n=settings.momentum_default_group_top_n,
+            leverage_factor=settings.leverage_factor,
         )
         trend = settings.trend_gate
         self.trend_gate_cfg = (

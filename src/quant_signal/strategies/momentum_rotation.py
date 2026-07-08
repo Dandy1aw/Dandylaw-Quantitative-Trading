@@ -27,6 +27,7 @@ class MomentumRotation(Strategy):
         group_top_n: dict[str, int] | None = None,
         asset_type: dict[str, str] | None = None,
         default_group_top_n: dict[str, int] | None = None,
+        leverage_factor: dict[str, float] | None = None,
     ) -> None:
         self.universe = universe
         self.lookback_days = lookback_days
@@ -43,6 +44,10 @@ class MomentumRotation(Strategy):
         # 默认组仍是整体用 top_n（向后兼容原有行为）。
         self.asset_type = asset_type or {}
         self.default_group_top_n = default_group_top_n or {}
+        # P1 风险等价折算：ticker -> 杠杆倍数(如 2x 日内杠杆 ETF 为 2.0)。
+        # 建议权重 = (等权 ÷ 倍数) 整体归一——同一份权重承担的风险与 1x 标的对齐。
+        # 倍数是产品构造事实(说明书)，非拟合参数；回测见 research/backtest_lev_adjust.py。
+        self.leverage_factor = leverage_factor or {}
 
     def _compute(
         self, bars: pd.DataFrame
@@ -128,7 +133,10 @@ class MomentumRotation(Strategy):
         selected.sort(key=lambda x: x[1], reverse=True)
 
         last_ts = last_bar_ts.to_pydatetime()
-        weight = round(1.0 / len(selected), 4) if selected else None
+        # 等权基础上做杠杆折算(无杠杆配置时 raw 全相等，退化为原等权行为)
+        raw = {t: 1.0 / self.leverage_factor.get(t, 1.0) for t, _, _, _ in selected}
+        total = sum(raw.values())
+        weights = {t: round(v / total, 4) for t, v in raw.items()} if total else {}
         return [
             Signal(
                 ticker=t,
@@ -137,7 +145,7 @@ class MomentumRotation(Strategy):
                 reason=f"{self.lookback_days}日动量 {mom:+.1%}，{label}第{gi}",
                 strategy_id=self.strategy_id,
                 ts=last_ts,
-                suggested_weight=weight,
+                suggested_weight=weights.get(t),
                 extra={"momentum_60d": mom, "rank": gi},
             )
             for t, mom, label, gi in selected

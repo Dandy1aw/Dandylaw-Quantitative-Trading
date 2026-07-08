@@ -10,9 +10,9 @@ tickers:                       # 标的注册表：动量池、资产类型、�
   GLD: {asset_type: ETF, currency: USD}
   SMH: {asset_type: ETF, currency: USD}
   DRAM: {asset_type: ETF, currency: USD}
-  RAM: {asset_type: ETF, currency: USD}
-  SNXX: {asset_type: ETF, currency: USD}
-  MUU: {asset_type: ETF, currency: USD}
+  RAM: {asset_type: ETF, currency: USD, leverage: 2}    # 2x DRAM
+  SNXX: {asset_type: ETF, currency: USD, leverage: 2}   # 2x SNDK
+  MUU: {asset_type: ETF, currency: USD, leverage: 2}    # 2x MU
   AAPL: {asset_type: STOCK, currency: USD}
   MSFT: {asset_type: STOCK, currency: USD}
   GOOGL: {asset_type: STOCK, currency: USD}
