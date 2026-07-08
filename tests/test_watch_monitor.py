@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from quant_signal.strategies.base import Direction, dedup_key
-from quant_signal.watch_monitor import check_deviations
+from quant_signal.watch_monitor import check_deviations, check_target_hits
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
 BANDS = [0.02, 0.05, 0.10, 0.20]
@@ -60,6 +60,24 @@ def test_same_band_same_dedup_key() -> None:
     a = check_deviations({"NVDA": 100.0}, {"NVDA": 103.0}, now=NOW, bands=BANDS)[0]  # +3%
     b = check_deviations({"NVDA": 100.0}, {"NVDA": 104.0}, now=NOW, bands=BANDS)[0]  # +4% 仍2%档
     assert dedup_key(a) == dedup_key(b)
+
+
+def test_target_hit_when_live_reaches_target() -> None:
+    signals = check_target_hits({"MU": 95.0}, {"MU": 94.8}, now=NOW)
+    assert len(signals) == 1
+    s = signals[0]
+    assert s.strategy_id == "target_hit" and s.direction is Direction.BUY
+    assert "95.00" in s.reason and s.price == 94.8
+
+
+def test_target_hit_not_fired_above_tolerance() -> None:
+    assert check_target_hits({"MU": 95.0}, {"MU": 96.0}, now=NOW) == []
+    assert check_target_hits({"MU": 95.0}, {}, now=NOW) == []          # 无实时价跳过
+
+
+def test_target_hit_within_tolerance_band() -> None:
+    # 容差 0.2%: 95×1.002=95.19, 现价 95.1 视为到价
+    assert len(check_target_hits({"MU": 95.0}, {"MU": 95.1}, now=NOW)) == 1
 
 
 def test_bands_direction_independent() -> None:

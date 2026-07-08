@@ -232,6 +232,8 @@ class Engine:
                 extra["entry_high"] = round(entry_high, 2)
                 if overheated:
                     extra["overheat"] = True
+                # 策略没给 target_buy 的(动量轮动)，目标买入价=回踩带下沿
+                extra.setdefault("target_buy", round(entry_low, 2))
             output.append(
                 replace(signal, extra=extra)
                 if extra != (signal.extra or {})

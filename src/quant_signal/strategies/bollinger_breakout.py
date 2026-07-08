@@ -48,7 +48,8 @@ class BollingerBreakout(Strategy):
                         reason=f"突破布林上轨 {upper:.2f}（{self.period}日,{self.num_std:.0f}倍标准差）",
                         strategy_id=self.strategy_id,
                         ts=ts,
-                        extra=extra,
+                        # 目标买入价=上轨确认位; SELL 不带 target_buy
+                        extra={**extra, "target_buy": upper},
                     )
                 )
             elif price < lower:

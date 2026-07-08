@@ -46,7 +46,9 @@ class Breakout20d(Strategy):
                         ),
                         strategy_id=self.strategy_id,
                         ts=tb.index[-1].to_pydatetime(),
-                        extra={"prior_high": prior_high, "volume_ratio": vol / avg_vol},
+                        # target_buy=突破位：追高不如等回踩颈线确认
+                        extra={"prior_high": prior_high, "volume_ratio": vol / avg_vol,
+                               "target_buy": prior_high},
                     )
                 )
         return signals

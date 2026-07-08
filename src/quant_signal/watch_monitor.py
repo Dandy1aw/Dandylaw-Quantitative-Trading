@@ -10,6 +10,35 @@ from datetime import datetime
 from quant_signal.strategies.base import Direction, Signal
 
 STRATEGY_ID = "price_deviation"
+TARGET_HIT_STRATEGY_ID = "target_hit"
+
+
+def check_target_hits(
+    targets: dict[str, float],
+    live_prices: dict[str, float],
+    now: datetime,
+    tolerance: float = 0.002,
+) -> list[Signal]:
+    """到价提醒：近几日 BUY 信号的目标买入价被实时价触及(≤目标×(1+容差))即提醒。
+    去重靠默认键(ticker|buy|target_hit)+4h窗口，同一目标不会反复轰炸。"""
+    signals: list[Signal] = []
+    for ticker, target in targets.items():
+        live = live_prices.get(ticker)
+        if live is None or target <= 0:
+            continue
+        if live <= target * (1.0 + tolerance):
+            signals.append(
+                Signal(
+                    ticker=ticker,
+                    direction=Direction.BUY,
+                    price=live,
+                    reason=f"到价提醒：目标买入价 {target:.2f}，现价 {live:.2f} 已进入买区",
+                    strategy_id=TARGET_HIT_STRATEGY_ID,
+                    ts=now,
+                    extra={"target_buy": target},
+                )
+            )
+    return signals
 
 
 def check_deviations(

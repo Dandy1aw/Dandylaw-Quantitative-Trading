@@ -50,7 +50,7 @@ class RsiReversion(Strategy):
                         reason=f"RSI({self.period})={rsi:.1f}，超卖(<{self.oversold:.0f})，均值回归看涨",
                         strategy_id=self.strategy_id,
                         ts=ts,
-                        extra={"rsi": rsi},
+                        extra={"rsi": rsi, "target_buy": price},  # 超卖即买点,目标价=触发价
                     )
                 )
             elif rsi > self.overbought:

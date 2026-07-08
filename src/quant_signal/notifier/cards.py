@@ -185,7 +185,7 @@ def _market_card(
             continue
         lines = [
             f"**【{_STRATEGY_LABEL[sid]}】**",
-            "| 标的 | 方向 | 参考价 | 现价 | 建议买入带 | 止盈目标 | 止损价 | 原因 |",
+            "| 标的 | 方向 | 参考价 | 现价 | 目标买入价 | 止盈目标 | 止损价 | 原因 |",
             "|---|---|---|---|---|---|---|---|",
         ]
         for s in ssigs:
@@ -200,9 +200,9 @@ def _market_card(
                 sl_str = f"{float(sl):.2f}" + (" ⚠破位" if float(sl) >= s.price else "")
             else:
                 sl_str = "-"
-            entry_low, entry_high = extra.get("entry_low"), extra.get("entry_high")
-            if isinstance(entry_low, (int, float)) and isinstance(entry_high, (int, float)):
-                band_str = f"{float(entry_low):.2f}~{float(entry_high):.2f}"
+            target = extra.get("target_buy")
+            if isinstance(target, (int, float)):
+                band_str = f"{float(target):.2f}"
                 if extra.get("overheat"):
                     band_str += " ⚠过热"
             else:

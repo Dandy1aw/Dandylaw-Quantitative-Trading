@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from quant_signal.notifier.base import Card, CardKind
 
 # 告警型策略：信号是"提醒"不是"下单意图"，不入虚拟盘
-_NON_TRADING = {"price_deviation"}
+_NON_TRADING = {"price_deviation", "target_hit"}
 
 _LABELS = {
     "momentum_rotation": "动量轮动",

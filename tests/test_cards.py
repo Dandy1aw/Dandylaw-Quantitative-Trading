@@ -105,12 +105,12 @@ def test_stop_loss_breach_marked_when_above_price() -> None:
     assert "62.73 ⚠破位" in us.body_md
 
 
-def test_entry_band_shown_with_overheat_mark() -> None:
+def test_target_buy_shown_with_overheat_mark() -> None:
     signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
-    signals[0].extra.update({"entry_low": 93.5, "entry_high": 100.0, "overheat": True})  # type: ignore[union-attr]
+    signals[0].extra.update({"target_buy": 93.5, "overheat": True})  # type: ignore[union-attr]
     us = _card_by(premarket_cards(signals, INTL, {"MU": None}), "美股组")
-    assert "建议买入带" in us.body_md
-    assert "93.50~100.00" in us.body_md and "⚠过热" in us.body_md
+    assert "目标买入价" in us.body_md
+    assert "93.50" in us.body_md and "⚠过热" in us.body_md
 
 
 def test_earnings_surprise_context_in_reason() -> None:

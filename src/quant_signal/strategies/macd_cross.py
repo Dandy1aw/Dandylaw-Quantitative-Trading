@@ -55,7 +55,8 @@ class MacdCross(Strategy):
                         reason=f"MACD金叉({self.fast}/{self.slow}/{self.signal_period})",
                         strategy_id=self.strategy_id,
                         ts=ts,
-                        extra=extra,
+                        # 金叉确认日收盘即目标买入价; SELL 不带 target_buy
+                        extra={**extra, "target_buy": price},
                     )
                 )
             elif diff_yesterday >= 0 > diff_today:
