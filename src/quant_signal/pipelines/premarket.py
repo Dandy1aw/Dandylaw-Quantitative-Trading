@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 import structlog
 
+from quant_signal.concentration import cluster_weight_warning, correlation_clusters
 from quant_signal.notifier.cards import momentum_ranking_card, premarket_cards
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.trend_gate import TrendInfo, apply_trend_gate
@@ -100,6 +101,14 @@ def run(engine: Engine, now: datetime) -> None:
         for signal in result.to_push:
             engine.ledger.insert(signal, pushed=delivered, now=now)
     engine.ledger.set_holdings(engine.momentum.strategy_id, target_tickers)
+    # P1 展示层：目标持仓的高相关簇合计权重过半时，在榜单卡追加集中度警示
+    weights = {
+        s.ticker: s.suggested_weight
+        for s in targets
+        if s.suggested_weight is not None
+    }
+    close_wide = bars["close"].unstack("ticker").sort_index()
+    clusters = correlation_clusters(close_wide, list(weights))
     engine.notifier.send(
         momentum_ranking_card(
             ranking,
@@ -108,6 +117,7 @@ def run(engine: Engine, now: datetime) -> None:
             insufficient={
                 info.ticker for info in trend_infos if info.state == "INSUFFICIENT"
             },
+            footer_md=cluster_weight_warning(clusters, weights),
         )
     )
     log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))

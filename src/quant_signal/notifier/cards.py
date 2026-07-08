@@ -42,6 +42,7 @@ def momentum_ranking_card(
     held: set[str],
     trend_flat: set[str] | None = None,
     insufficient: set[str] | None = None,
+    footer_md: str | None = None,
 ) -> Card:
     """Render a display-only whole-universe momentum ranking.
 
@@ -86,6 +87,8 @@ def momentum_ranking_card(
         "|---|---|---|",
         *rows(warning),
     ]
+    if footer_md:
+        parts += ["", footer_md]
     return report_card("📊 动量全池榜单", "\n".join(parts))
 
 
