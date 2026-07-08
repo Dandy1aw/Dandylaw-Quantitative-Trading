@@ -211,6 +211,10 @@ def _market_card(
             hold = extra.get("holding_return")
             if isinstance(hold, (int, float)):
                 reason = f"{reason}，持有期 {float(hold):+.1%}"
+            earnings_days = extra.get("earnings_in_days")
+            if isinstance(earnings_days, int):
+                label = "今日财报" if earnings_days == 0 else f"{earnings_days}天后财报"
+                reason = f"{reason}，⚠{label}"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
                 f" {live_str} | {band_str} | {tp_str} | {sl_str} | {reason} |"

@@ -9,6 +9,7 @@ import structlog
 
 from quant_signal.config import Settings
 from quant_signal.datafeed.base import DataSource
+from quant_signal.datafeed.earnings import EarningsSource
 from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
@@ -49,7 +50,10 @@ class Engine:
         ledger: SignalLedger,
         notifier: Notifier,
         enrichers: list[object] | None = None,
+        earnings_source: EarningsSource | None = None,
     ) -> None:
+        # 财报日历为可选注入：不注入(如测试)则完全跳过财报标注，零网络依赖
+        self.earnings_source = earnings_source
         self.settings = settings
         self.store = store
         self.source = source

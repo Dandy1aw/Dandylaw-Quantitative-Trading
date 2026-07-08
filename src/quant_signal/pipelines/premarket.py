@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 import math
 from typing import TYPE_CHECKING
@@ -16,6 +17,31 @@ if TYPE_CHECKING:
     from quant_signal.engine import Engine
 
 log = structlog.get_logger()
+
+
+def _annotate_earnings(
+    engine: Engine, signals: list[Signal], now: datetime
+) -> list[Signal]:
+    """P4：BUY 信号 7 天内有财报 → extra 标注 earnings_in_days(提示单日跳空风险)。
+    引擎未注入 earnings_source(如测试)时原样返回，零网络依赖。"""
+    if engine.earnings_source is None or not signals:
+        return signals
+    intl = set(engine.settings.international_tickers)
+    buy_tickers = sorted(
+        {s.ticker for s in signals if s.direction == Direction.BUY and s.ticker not in intl}
+    )
+    if not buy_tickers:
+        return signals
+    dates = engine.earnings_source.next_dates(buy_tickers)
+    out: list[Signal] = []
+    for s in signals:
+        earnings = dates.get(s.ticker)
+        days = (earnings - now.date()).days if earnings else None
+        if s.direction == Direction.BUY and days is not None and 0 <= days <= 7:
+            out.append(replace(s, extra={**(s.extra or {}), "earnings_in_days": days}))
+        else:
+            out.append(s)
+    return out
 
 
 def _latest_finite_close(bars: pd.DataFrame, ticker: str) -> float | None:
@@ -103,14 +129,15 @@ def run(engine: Engine, now: datetime) -> None:
     for signal in result.suppressed + result.overflow:
         engine.ledger.insert(signal, pushed=False, now=now)
 
-    if result.to_push:
-        live_prices = engine._fetch_live_prices({signal.ticker for signal in result.to_push})
+    to_push = _annotate_earnings(engine, result.to_push, now)
+    if to_push:
+        live_prices = engine._fetch_live_prices({signal.ticker for signal in to_push})
         cards = premarket_cards(
-            result.to_push, engine.settings.international_tickers, live_prices
+            to_push, engine.settings.international_tickers, live_prices
         )
         delivery_results = [engine.notifier.send(card) for card in cards]
         delivered = bool(cards) and all(delivery_results)
-        for signal in result.to_push:
+        for signal in to_push:
             engine.ledger.insert(signal, pushed=delivered, now=now)
     engine.ledger.set_holdings(engine.momentum.strategy_id, target_tickers)
     # P1 展示层：目标持仓的高相关簇合计权重过半时，在榜单卡追加集中度警示

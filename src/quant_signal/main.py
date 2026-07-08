@@ -22,7 +22,12 @@ def main() -> None:
     store = BarStore(settings.db_path / "bars.duckdb")
     ledger = SignalLedger(settings.db_path / "signals.db")
     notifier = get_notifier(settings)
-    engine = Engine(settings, store, get_source(settings), ledger, notifier)
+    from quant_signal.datafeed.earnings import YFinanceEarnings
+
+    engine = Engine(
+        settings, store, get_source(settings), ledger, notifier,
+        earnings_source=YFinanceEarnings(),
+    )
     sched = build_scheduler(engine, ledger, store, notifier)
     sched.start()
     log.info(

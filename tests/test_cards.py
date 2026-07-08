@@ -113,6 +113,13 @@ def test_entry_band_shown_with_overheat_mark() -> None:
     assert "93.50~100.00" in us.body_md and "⚠过热" in us.body_md
 
 
+def test_earnings_soon_marked_in_reason() -> None:
+    signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
+    signals[0].extra["earnings_in_days"] = 3  # type: ignore[index]
+    us = _card_by(premarket_cards(signals, INTL, {"MU": None}), "美股组")
+    assert "⚠3天后财报" in us.body_md
+
+
 def test_sell_row_shows_holding_return() -> None:
     signals = [_sig("MU", Direction.SELL, "momentum_rotation", price=120.0, momentum=0.0)]
     signals[0].extra["holding_return"] = 0.234  # type: ignore[index]
