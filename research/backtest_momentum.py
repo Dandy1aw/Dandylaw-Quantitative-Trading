@@ -45,7 +45,12 @@ def run_backtest(
     min_dollar_volume: float,
     fx_rates: dict[str, float],
     universe: list[str] | None = None,
+    lookbacks: list[int] | None = None,
+    group_top_n: dict[str, int] | None = None,
+    default_group_top_n: dict[str, int] | None = None,
 ) -> dict[str, float]:
+    """group_top_n/default_group_top_n 传 None 沿用 settings(生产口径)；
+    显式传 {} 表示关闭分组、全局统一 top_n——跨池对照必须用 {} 保证口径一致。"""
     settings = load_settings()
     # 默认用 settings.universe，但调用方可以显式传入不同的标的池（比如探索性
     # 回测里根本不在正式 universe 里的标的）——否则 self.universe 和 bars 的
@@ -57,9 +62,14 @@ def run_backtest(
         min_dollar_volume=min_dollar_volume,
         ticker_currency=settings.international_tickers,
         fx_rates=fx_rates,
-        group_top_n=settings.momentum_group_top_n,
+        group_top_n=settings.momentum_group_top_n if group_top_n is None else group_top_n,
         asset_type=settings.asset_type,
-        default_group_top_n=settings.momentum_default_group_top_n,
+        default_group_top_n=(
+            settings.momentum_default_group_top_n
+            if default_group_top_n is None
+            else default_group_top_n
+        ),
+        lookbacks=lookbacks,
     )
     close = bars["close"].unstack("ticker").sort_index()
     month_ends = close.groupby(close.index.tz_localize(None).to_period("M")).tail(1).index

@@ -93,9 +93,12 @@ def main() -> None:
             "|---|---|---|---|---|",
         ]
         for name, m in (
-            ("对照池(纳指100近似, top5)", run_backtest(wb, 60, 5, 50e6, {}, universe=ctrl)),
-            ("自选池(同配置 top5)", run_backtest(wb, 60, 5, 50e6, {},
-                                               universe=list(settings.universe))),
+            ("对照池(纳指100近似, top5)", run_backtest(
+                wb, 60, 5, 50e6, {}, universe=ctrl,
+                group_top_n={}, default_group_top_n={})),
+            ("自选池(同配置 top5)", run_backtest(
+                wb, 60, 5, 50e6, {}, universe=list(settings.universe),
+                group_top_n={}, default_group_top_n={})),
             ("SPY 买入持有", buy_hold(bars, "SPY", start)),
             ("QQQ 买入持有", buy_hold(bars, "QQQ", start)),
         ):
