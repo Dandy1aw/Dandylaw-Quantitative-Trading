@@ -113,6 +113,13 @@ def test_entry_band_shown_with_overheat_mark() -> None:
     assert "93.50~100.00" in us.body_md and "⚠过热" in us.body_md
 
 
+def test_quality_flag_marked_in_reason() -> None:
+    signals = [_sig("BADCO", Direction.BUY, "momentum_rotation", price=10.0, rank=1)]
+    signals[0].extra["quality_flag"] = "ROE为负/高负债"  # type: ignore[index]
+    us = _card_by(premarket_cards(signals, INTL, {"BADCO": None}), "美股组")
+    assert "⚠质量差(ROE为负/高负债)" in us.body_md
+
+
 def test_earnings_soon_marked_in_reason() -> None:
     signals = [_sig("MU", Direction.BUY, "momentum_rotation", price=100.0, rank=1)]
     signals[0].extra["earnings_in_days"] = 3  # type: ignore[index]

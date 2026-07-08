@@ -24,7 +24,7 @@ def _annotate_earnings(
 ) -> list[Signal]:
     """P4：BUY 信号 7 天内有财报 → extra 标注 earnings_in_days(提示单日跳空风险)。
     引擎未注入 earnings_source(如测试)时原样返回，零网络依赖。"""
-    if engine.earnings_source is None or not signals:
+    if (engine.earnings_source is None and engine.fundamentals_source is None) or not signals:
         return signals
     intl = set(engine.settings.international_tickers)
     buy_tickers = sorted(
@@ -32,15 +32,28 @@ def _annotate_earnings(
     )
     if not buy_tickers:
         return signals
-    dates = engine.earnings_source.next_dates(buy_tickers)
+    dates = (
+        engine.earnings_source.next_dates(buy_tickers)
+        if engine.earnings_source is not None
+        else {}
+    )
+    quality = (
+        engine.fundamentals_source.quality_flags(buy_tickers)
+        if engine.fundamentals_source is not None
+        else {}
+    )
     out: list[Signal] = []
     for s in signals:
-        earnings = dates.get(s.ticker)
-        days = (earnings - now.date()).days if earnings else None
-        if s.direction == Direction.BUY and days is not None and 0 <= days <= 7:
-            out.append(replace(s, extra={**(s.extra or {}), "earnings_in_days": days}))
-        else:
-            out.append(s)
+        extra = dict(s.extra or {})
+        if s.direction == Direction.BUY:
+            earnings = dates.get(s.ticker)
+            days = (earnings - now.date()).days if earnings else None
+            if days is not None and 0 <= days <= 7:
+                extra["earnings_in_days"] = days
+            flag = quality.get(s.ticker)
+            if flag:
+                extra["quality_flag"] = flag
+        out.append(replace(s, extra=extra) if extra != (s.extra or {}) else s)
     return out
 
 

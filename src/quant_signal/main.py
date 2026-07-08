@@ -23,10 +23,12 @@ def main() -> None:
     ledger = SignalLedger(settings.db_path / "signals.db")
     notifier = get_notifier(settings)
     from quant_signal.datafeed.earnings import YFinanceEarnings
+    from quant_signal.datafeed.fundamentals import YFinanceFundamentals
 
     engine = Engine(
         settings, store, get_source(settings), ledger, notifier,
         earnings_source=YFinanceEarnings(),
+        fundamentals_source=YFinanceFundamentals(),
     )
     sched = build_scheduler(engine, ledger, store, notifier)
     sched.start()

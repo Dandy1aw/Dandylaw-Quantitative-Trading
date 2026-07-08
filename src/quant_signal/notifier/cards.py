@@ -215,6 +215,9 @@ def _market_card(
             if isinstance(earnings_days, int):
                 label = "今日财报" if earnings_days == 0 else f"{earnings_days}天后财报"
                 reason = f"{reason}，⚠{label}"
+            quality = extra.get("quality_flag")
+            if isinstance(quality, str) and quality:
+                reason = f"{reason}，⚠质量差({quality})"
             lines.append(
                 f"| {s.ticker} | {s.direction.value.upper()} | {s.price:.2f} |"
                 f" {live_str} | {band_str} | {tp_str} | {sl_str} | {reason} |"
