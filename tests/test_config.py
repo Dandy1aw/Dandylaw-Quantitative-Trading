@@ -28,7 +28,10 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.index_universe.enabled is True
     assert s.index_universe.indices == ["sp500", "nasdaq100"]
     assert s.execution_plan.enabled is True
-    assert s.execution_plan.account_provider == "alpaca_paper"
+    assert s.execution_plan.account_provider == "screenshot"
+    assert s.execution_plan.capital_limit_usd == 6000
+    assert s.execution_plan.max_financing_ratio == 0.20
+    assert s.execution_plan.cash_reserve == 0
     assert s.legacy_price_deviation.enabled is False
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
@@ -170,6 +173,9 @@ def test_index_universe_requires_nonempty_unique_indices(indices: list[str]) -> 
         ("max_new_positions_per_day", 0),
         ("quote_max_age_seconds", 59),
         ("account_max_age_seconds", 601),
+        ("capital_limit_usd", 0),
+        ("max_financing_ratio", 0.21),
+        ("screenshot_max_age_hours", 0),
     ],
 )
 def test_execution_plan_rejects_invalid_risk_limits(field: str, value: object) -> None:

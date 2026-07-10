@@ -114,12 +114,15 @@ index_universe:
 
 execution_plan:
   enabled: true
-  account_provider: alpaca_paper
+  account_provider: screenshot
+  capital_limit_usd: 6000
+  max_financing_ratio: 0.20
+  screenshot_max_age_hours: 72
   risk_per_trade: 0.005
   max_daily_new_risk: 0.01
   max_position_weight: 0.12
   max_cluster_weight: 0.35
-  cash_reserve: 0.20
+  cash_reserve: 0.0
   max_new_positions_per_day: 2
   min_stop_distance: 0.02
   max_stop_distance: 0.20
