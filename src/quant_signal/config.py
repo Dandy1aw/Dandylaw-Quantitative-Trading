@@ -98,7 +98,7 @@ class IndexUniverseSettings(BaseModel):
 class ExecutionPlanSettings(BaseModel):
     enabled: bool = False
     account_provider: Literal["alpaca_paper", "screenshot", "none"] = "alpaca_paper"
-    capital_limit_usd: float = Field(default=6000, gt=0)
+    capital_limit_usd: float = Field(default=6000, gt=0, le=6000)
     max_financing_ratio: float = Field(default=0.20, ge=0, le=0.20)
     screenshot_max_age_hours: int = Field(default=72, ge=1, le=168)
     risk_per_trade: float = Field(default=0.005, gt=0, le=0.05)

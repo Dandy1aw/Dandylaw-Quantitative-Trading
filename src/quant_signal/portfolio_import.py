@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 _CENT = Decimal("0.01")
 _ACCOUNT_TOLERANCE = Decimal("1.00")
 _WEIGHT_TOLERANCE_PCT = Decimal("0.50")
+_HARD_CAPITAL_LIMIT = Decimal("6000")
+_HARD_FINANCING_RATIO = Decimal("0.20")
 
 
 class ImportStatus(str, Enum):
@@ -131,6 +133,10 @@ def validate_extraction(
     max_financing_ratio: Decimal,
     require_account_reconciliation: bool = True,
 ) -> ValidatedPortfolioImport:
+    if not Decimal("0") < capital_limit <= _HARD_CAPITAL_LIMIT:
+        raise ValueError("capital hard limit must be within (0, 6000]")
+    if not Decimal("0") <= max_financing_ratio <= _HARD_FINANCING_RATIO:
+        raise ValueError("financing hard limit must be within [0, 0.20]")
     errors: list[str] = []
     account = extraction.account
     symbols = [position.symbol for position in extraction.positions]
@@ -209,9 +215,9 @@ def validate_extraction(
 
 def image_digest(images: Sequence[Path]) -> str:
     digest = sha256()
-    for image in images:
-        digest.update(image.resolve().as_posix().encode("utf-8"))
-        digest.update(image.read_bytes())
+    content_digests = sorted(sha256(image.read_bytes()).digest() for image in images)
+    for content_digest in content_digests:
+        digest.update(content_digest)
     return digest.hexdigest()
 
 

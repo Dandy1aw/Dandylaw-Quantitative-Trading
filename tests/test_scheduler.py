@@ -79,6 +79,29 @@ def test_legacy_deviation_job_registered_only_when_enabled() -> None:
     assert "execution_watch" not in ids
 
 
+def test_action_card_only_suppresses_standalone_enrichment_push() -> None:
+    from conftest import make_test_settings
+    from quant_signal.config import NotifySettings
+
+    class Engine:
+        def __init__(self) -> None:
+            self.settings = make_test_settings(
+                notify=NotifySettings(action_card_only=True)
+            )
+            self.calls = 0
+
+        def run_enrichment(self, now: datetime) -> None:
+            self.calls += 1
+
+    engine = Engine()
+    sched = build_scheduler(engine=engine, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+
+    jobs["enrichment"].func()
+
+    assert engine.calls == 0
+
+
 def test_jobhealth_collects_missed_and_max_instances_events() -> None:
     from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 

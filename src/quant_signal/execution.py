@@ -65,7 +65,18 @@ def portfolio_budget_from_state(
     config: ExecutionPlanSettings,
 ) -> PortfolioBudget:
     snapshot = state.snapshot
-    capital_limit = snapshot.capital_limit or snapshot.equity
+    if snapshot.source == "screenshot":
+        capital_limit = min(
+            snapshot.capital_limit or snapshot.equity,
+            Decimal(str(config.capital_limit_usd)),
+        )
+        financing_ratio = min(
+            max(snapshot.max_financing_ratio, Decimal("0")),
+            Decimal(str(config.max_financing_ratio)),
+        )
+    else:
+        capital_limit = snapshot.capital_limit or snapshot.equity
+        financing_ratio = snapshot.max_financing_ratio
     exposure_by_symbol: dict[str, Decimal] = {}
     if state.observed_positions:
         exposure_by_symbol = {
@@ -95,7 +106,7 @@ def portfolio_budget_from_state(
         buying_power=snapshot.buying_power,
         current_exposure=current_exposure,
         capital_limit=capital_limit,
-        max_financing_ratio=snapshot.max_financing_ratio,
+        max_financing_ratio=financing_ratio,
         exposure_by_symbol=exposure_by_symbol,
         cluster_by_symbol=cluster_by_symbol,
         cluster_exposure=cluster_exposure,
@@ -324,7 +335,18 @@ def build_plan(
             base, state=PlanState.BLOCKED, block_reason="STALE_ACCOUNT"
         )
 
-    capital_limit = account.capital_limit or account.equity
+    if account.source == "screenshot":
+        capital_limit = min(
+            account.capital_limit or account.equity,
+            Decimal(str(config.capital_limit_usd)),
+        )
+        financing_ratio = min(
+            max(account.max_financing_ratio, Decimal("0")),
+            Decimal(str(config.max_financing_ratio)),
+        )
+    else:
+        capital_limit = account.capital_limit or account.equity
+        financing_ratio = account.max_financing_ratio
     effective_equity = min(account.equity, capital_limit)
     equity = float(effective_equity)
     cash = float(account.cash)
@@ -374,8 +396,9 @@ def build_plan(
     )
     if account.source == "screenshot" or account.capital_limit is not None:
         current_exposure = float(account.market_value or 0)
-        max_financing = float(capital_limit * account.max_financing_ratio)
-        remaining_gross = float(account.max_gross_exposure) - current_exposure
+        max_financing = float(capital_limit * financing_ratio)
+        max_gross_exposure = capital_limit * (Decimal("1") + financing_ratio)
+        remaining_gross = float(max_gross_exposure) - current_exposure
         available_funds = min(
             float(account.buying_power),
             cash + max_financing,

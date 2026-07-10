@@ -17,11 +17,13 @@ from quant_signal.portfolio_import import (
     ImportStatus,
     PortfolioExtraction,
     apply_validated_import,
+    image_digest,
     validate_extraction,
 )
 from quant_signal.execution import PlanCandidate, PlanState, build_plan
 from quant_signal.account import AccountSnapshot
 from quant_signal.config import ExecutionPlanSettings
+from quant_signal.notifier.base import Card, CardKind
 
 NOW = datetime(2026, 7, 11, 1, 55, tzinfo=timezone(timedelta(hours=8)))
 
@@ -96,6 +98,28 @@ def test_invalid_account_reconciliation_is_rejected() -> None:
     assert "ACCOUNT_RECONCILIATION_FAILED" in result.validation_errors
 
 
+@pytest.mark.parametrize(
+    ("capital_limit", "financing_ratio"),
+    [
+        (Decimal("6000.01"), Decimal("0.20")),
+        (Decimal("6000"), Decimal("0.2001")),
+        (Decimal("0"), Decimal("0.20")),
+        (Decimal("6000"), Decimal("-0.01")),
+    ],
+)
+def test_import_cannot_raise_hard_capital_or_financing_limits(
+    capital_limit: Decimal, financing_ratio: Decimal
+) -> None:
+    with pytest.raises(ValueError, match="hard limit"):
+        validate_extraction(
+            screenshot_extraction(),
+            image_sha256="9" * 64,
+            uploaded_at=NOW,
+            capital_limit=capital_limit,
+            max_financing_ratio=financing_ratio,
+        )
+
+
 def test_duplicate_image_is_idempotent_and_partial_does_not_replace_complete_positions(
     tmp_path: Path,
 ) -> None:
@@ -139,6 +163,16 @@ def test_duplicate_image_is_idempotent_and_partial_does_not_replace_complete_pos
     assert [row["symbol"] for row in exact_active] == ["MU"]
     risk_rows = ledger.active_observed_positions(exact_only=False)
     assert {row["symbol"] for row in risk_rows} == {"DRAM", "MU", "RAM", "SMH", "SNXX"}
+
+
+def test_image_digest_depends_on_content_not_attachment_path(tmp_path: Path) -> None:
+    first = tmp_path / "upload-a" / "holding.jpg"
+    second = tmp_path / "upload-b" / "renamed.jpg"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_bytes(b"same screenshot bytes")
+    second.write_bytes(b"same screenshot bytes")
+    assert image_digest([first]) == image_digest([second])
 
 
 def test_codex_extractor_uses_image_schema_ephemeral_and_output_file(tmp_path: Path) -> None:
@@ -215,6 +249,14 @@ def test_applying_new_account_invalidates_old_paper_plans(tmp_path: Path) -> Non
     ledger.upsert_execution_plan(
         build_plan(candidate, old_account, (), (), ExecutionPlanSettings(), NOW)
     )
+    active_plan = ledger.active_execution_plans()[0]
+    ledger.queue_plan_event(
+        active_plan.plan_id,
+        active_plan.plan_version,
+        "ACTIONABLE",
+        Card(CardKind.SIGNAL, "old PAPER event", "buy 19"),
+        now=NOW,
+    )
     result = validate_extraction(
         screenshot_extraction(),
         image_sha256="f" * 64,
@@ -225,3 +267,4 @@ def test_applying_new_account_invalidates_old_paper_plans(tmp_path: Path) -> Non
 
     assert apply_validated_import(ledger, result, now=NOW) is True
     assert ledger.active_execution_plans() == []
+    assert ledger.due_plan_events(NOW) == []

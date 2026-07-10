@@ -250,6 +250,9 @@ def build_scheduler(
         engine.run_watch_deviation(datetime.now(timezone.utc))
 
     def enrichment() -> None:
+        if engine.settings.notify.action_card_only:
+            log.info("skip.action_card_only", job="enrichment")
+            return
         now_et = _now_et()
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="enrichment")

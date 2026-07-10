@@ -49,19 +49,24 @@ class ScreenshotAccountProvider:
             )
             for position in risk_rows
         )
-        positions: tuple[BrokerPosition, ...] = ()
-        if not partial:
-            exact_rows = self._ledger.active_observed_positions(exact_only=True)
-            positions = tuple(
-                BrokerPosition(
-                    symbol=str(position["symbol"]),
-                    qty=Decimal(str(position["qty"])),
-                    side="long",
-                    avg_entry_price=Decimal(str(position["avg_entry_price"])),
-                    market_value=Decimal(str(position["market_value"])),
-                )
-                for position in exact_rows
+        exact_rows = self._ledger.active_observed_positions(exact_only=True)
+        fresh_exact_rows = [
+            position
+            for position in exact_rows
+            if now.astimezone(timezone.utc)
+            - datetime.fromisoformat(str(position["observed_at"])).astimezone(timezone.utc)
+            <= self._max_age
+        ]
+        positions = tuple(
+            BrokerPosition(
+                symbol=str(position["symbol"]),
+                qty=Decimal(str(position["qty"])),
+                side="long",
+                avg_entry_price=Decimal(str(position["avg_entry_price"])),
+                market_value=Decimal(str(position["market_value"])),
             )
+            for position in fresh_exact_rows
+        )
         snapshot = AccountSnapshot(
             account_id=f"screenshot:{str(row['import_id'])[:12]}",
             equity=Decimal(str(row["equity"])),

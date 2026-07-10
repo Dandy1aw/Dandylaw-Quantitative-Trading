@@ -714,6 +714,13 @@ class SignalLedger:
                     account_at=now,
                 )
             )
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET status = 'CANCELLED', last_error = ?"
+                " WHERE status = 'PENDING'",
+                (reason,),
+            )
+            self._con.commit()
         return len(plans)
 
     def record_plan_event(

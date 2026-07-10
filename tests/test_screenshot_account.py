@@ -114,3 +114,50 @@ def test_engine_wires_screenshot_provider_without_alpaca_credentials(tmp_path: P
     )
 
     assert isinstance(engine.account_provider, ScreenshotAccountProvider)
+
+
+def test_partial_snapshot_keeps_last_exact_position_quantities(tmp_path: Path) -> None:
+    ledger = SignalLedger(tmp_path / "signals.db")
+    exact = PortfolioExtraction(
+        account=ExtractedAccount(
+            equity="5995.52",
+            market_value="991.06",
+            cash="5004.46",
+            buying_power="5004.46",
+            currency="USD",
+            reported_position_count=1,
+            observed_at=NOW - timedelta(hours=1),
+        ),
+        positions=(
+            ExtractedPosition(
+                symbol="MU",
+                qty="1",
+                avg_entry_price="824.24",
+                current_price="991.06",
+                market_value="991.06",
+                weight_pct="16.53",
+                pnl="166.82",
+                pnl_pct="20.23",
+            ),
+        ),
+    )
+    ledger.save_portfolio_import(
+        validate_extraction(
+            exact,
+            image_sha256="1" * 64,
+            uploaded_at=NOW - timedelta(hours=1),
+            capital_limit=Decimal("6000"),
+            max_financing_ratio=Decimal("0.20"),
+        )
+    )
+    seed_partial(ledger, uploaded_at=NOW)
+
+    state = ScreenshotAccountProvider(
+        ledger, max_age=timedelta(hours=72)
+    ).snapshot(NOW)
+
+    assert state.positions_partial is True
+    assert len(state.positions) == 1
+    assert state.positions[0].symbol == "MU"
+    assert state.positions[0].qty == Decimal("1")
+    assert {row.symbol for row in state.observed_positions} == {"DRAM", "MU", "RAM", "SMH", "SNXX"}
