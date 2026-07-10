@@ -65,6 +65,53 @@ class AIBriefingSettings(BaseModel):
     max_chars: int = 6000
 
 
+class IndexUniverseSettings(BaseModel):
+    enabled: bool = False
+    indices: list[Literal["sp500", "nasdaq100"]] = Field(
+        default_factory=lambda: ["sp500", "nasdaq100"]
+    )
+    cache_path: str = "data/index_universe.json"
+    refresh_days: int = Field(default=7, ge=1, le=30)
+    max_stale_days: int = Field(default=14, ge=1, le=60)
+    scan_top_n: int = Field(default=20, ge=5, le=50)
+    execution_top_n: int = Field(default=5, ge=1, le=10)
+    min_coverage: float = Field(default=0.98, ge=0.8, le=1.0)
+    min_dollar_volume: float = Field(default=50_000_000, gt=0)
+
+    @model_validator(mode="after")
+    def validate_windows_and_pool_sizes(self) -> Self:
+        if self.max_stale_days < self.refresh_days:
+            raise ValueError("max_stale_days must be greater than or equal to refresh_days")
+        if self.execution_top_n > self.scan_top_n:
+            raise ValueError("execution_top_n must not exceed scan_top_n")
+        return self
+
+
+class ExecutionPlanSettings(BaseModel):
+    enabled: bool = False
+    account_provider: Literal["alpaca_paper", "none"] = "alpaca_paper"
+    risk_per_trade: float = Field(default=0.005, gt=0, le=0.05)
+    max_daily_new_risk: float = Field(default=0.01, gt=0, le=0.10)
+    max_position_weight: float = Field(default=0.12, gt=0, le=0.50)
+    max_cluster_weight: float = Field(default=0.35, gt=0, le=1.0)
+    cash_reserve: float = Field(default=0.20, ge=0, lt=1.0)
+    max_new_positions_per_day: int = Field(default=2, ge=1, le=10)
+    min_stop_distance: float = Field(default=0.02, gt=0, lt=1.0)
+    max_stop_distance: float = Field(default=0.20, gt=0, lt=1.0)
+    quote_max_age_seconds: int = Field(default=420, ge=60, le=1800)
+    account_max_age_seconds: int = Field(default=60, ge=10, le=600)
+
+    @model_validator(mode="after")
+    def validate_stop_distances(self) -> Self:
+        if self.max_stop_distance <= self.min_stop_distance:
+            raise ValueError("max_stop_distance must be greater than min_stop_distance")
+        return self
+
+
+class LegacyPriceDeviationSettings(BaseModel):
+    enabled: bool = False
+
+
 class TickerSettings(BaseModel):
     asset_type: Literal["ETF", "STOCK"]
     currency: str = "USD"
@@ -89,6 +136,9 @@ class Settings(BaseModel):
     enrichment: EnrichmentSettings = EnrichmentSettings()
     ai_briefing: AIBriefingSettings = AIBriefingSettings()
     trend_gate: TrendGateSettings = TrendGateSettings()
+    index_universe: IndexUniverseSettings = IndexUniverseSettings()
+    execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
+    legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
     alpaca_secret: str = ""

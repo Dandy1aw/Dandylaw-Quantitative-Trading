@@ -100,3 +100,31 @@ ai_briefing:                     # 盘前早报后调用 AI CLI 输出观点卡�
   command: codex                  # provider=claude_code_cli 时改为 claude
   timeout_seconds: 90
   max_chars: 6000
+
+index_universe:
+  enabled: true
+  indices: [sp500, nasdaq100]
+  cache_path: data/index_universe.json
+  refresh_days: 7
+  max_stale_days: 14
+  scan_top_n: 20
+  execution_top_n: 5
+  min_coverage: 0.98
+  min_dollar_volume: 50000000
+
+execution_plan:
+  enabled: true
+  account_provider: alpaca_paper
+  risk_per_trade: 0.005
+  max_daily_new_risk: 0.01
+  max_position_weight: 0.12
+  max_cluster_weight: 0.35
+  cash_reserve: 0.20
+  max_new_positions_per_day: 2
+  min_stop_distance: 0.02
+  max_stop_distance: 0.20
+  quote_max_age_seconds: 420
+  account_max_age_seconds: 60
+
+legacy_price_deviation:
+  enabled: false

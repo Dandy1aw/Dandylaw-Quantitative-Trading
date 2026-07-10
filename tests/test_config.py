@@ -1,6 +1,13 @@
 from pydantic import ValidationError
 
-from quant_signal.config import EnrichmentSettings, NotifySettings, Settings, load_settings
+from quant_signal.config import (
+    EnrichmentSettings,
+    ExecutionPlanSettings,
+    IndexUniverseSettings,
+    NotifySettings,
+    Settings,
+    load_settings,
+)
 
 import pytest
 
@@ -18,6 +25,13 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.trend_gate.enabled is True
     assert s.trend_gate.use_mom is False
     assert s.trend_gate.defensive == ["BIL", "TLT", "GLD"]
+    assert s.index_universe.enabled is True
+    assert s.index_universe.indices == ["sp500", "nasdaq100"]
+    assert s.execution_plan.enabled is True
+    assert s.execution_plan.account_provider == "alpaca_paper"
+    assert s.legacy_price_deviation.enabled is False
+    assert set(s.universe) == set(s.tickers)
+    assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,3 +108,69 @@ def test_legacy_hourly_limit_populates_all_notification_channels() -> None:
     assert settings.premarket_hourly_limit == 3
     assert settings.intraday_hourly_limit == 3
     assert settings.deviation_hourly_limit == 3
+
+
+def test_index_universe_does_not_expand_core_strategy_universe() -> None:
+    settings = Settings(
+        universe=["AAA", "BBB"],
+        watchlist=["AAA"],
+        strategies={"momentum_rotation": {}, "breakout_20d": {}},
+        asset_type={"AAA": "STOCK", "BBB": "STOCK"},
+        index_universe={
+            "enabled": True,
+            "indices": ["sp500", "nasdaq100"],
+        },
+    )
+
+    assert settings.universe == ["AAA", "BBB"]
+    assert settings.watchlist == ["AAA"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("refresh_days", 0),
+        ("max_stale_days", 61),
+        ("scan_top_n", 4),
+        ("execution_top_n", 11),
+        ("min_coverage", 0.79),
+        ("min_dollar_volume", 0),
+    ],
+)
+def test_index_universe_rejects_out_of_bounds_values(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        IndexUniverseSettings(**{field: value})
+
+
+def test_index_universe_requires_execution_pool_within_scan_pool() -> None:
+    with pytest.raises(ValidationError, match="execution_top_n"):
+        IndexUniverseSettings(scan_top_n=5, execution_top_n=6)
+
+
+def test_index_universe_requires_stale_window_to_cover_refresh_window() -> None:
+    with pytest.raises(ValidationError, match="max_stale_days"):
+        IndexUniverseSettings(refresh_days=15, max_stale_days=14)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("risk_per_trade", 0),
+        ("risk_per_trade", 0.051),
+        ("max_daily_new_risk", 0.101),
+        ("max_position_weight", 0.51),
+        ("max_cluster_weight", 1.01),
+        ("cash_reserve", 1.0),
+        ("max_new_positions_per_day", 0),
+        ("quote_max_age_seconds", 59),
+        ("account_max_age_seconds", 601),
+    ],
+)
+def test_execution_plan_rejects_invalid_risk_limits(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        ExecutionPlanSettings(**{field: value})
+
+
+def test_execution_plan_requires_stop_distance_order() -> None:
+    with pytest.raises(ValidationError, match="max_stop_distance"):
+        ExecutionPlanSettings(min_stop_distance=0.20, max_stop_distance=0.20)
