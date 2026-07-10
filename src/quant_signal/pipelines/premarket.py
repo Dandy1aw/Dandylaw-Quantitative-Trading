@@ -155,6 +155,7 @@ def _maybe_send_ai_briefing(
 
 
 def run(engine: Engine, now: datetime) -> None:
+    action_card_only = engine.settings.notify.action_card_only
     bars = engine._refresh_daily(now)
     engine._refresh_fx_rates()
     ranking = engine.momentum.rank(bars)
@@ -243,8 +244,12 @@ def run(engine: Engine, now: datetime) -> None:
         analysis_cards.extend(
             {"title": card.title, "body": card.body_md} for card in cards
         )
-        delivery_results = [engine.notifier.send(card) for card in cards]
-        delivered = bool(cards) and all(delivery_results)
+        delivery_results = (
+            [engine.notifier.send(card) for card in cards]
+            if not action_card_only
+            else []
+        )
+        delivered = bool(cards) and bool(delivery_results) and all(delivery_results)
         for signal in to_push:
             engine.ledger.insert(signal, pushed=delivered, now=now)
     engine.ledger.set_holdings(engine.momentum.strategy_id, target_tickers)
@@ -276,15 +281,17 @@ def run(engine: Engine, now: datetime) -> None:
         },
         footer_md=concentration_note,
     )
-    engine.notifier.send(ranking_card)
+    if not action_card_only:
+        engine.notifier.send(ranking_card)
     analysis_cards.append({"title": ranking_card.title, "body": ranking_card.body_md})
-    _maybe_send_ai_briefing(
-        engine,
-        now,
-        to_push,
-        ranking,
-        target_tickers,
-        [concentration_note] if concentration_note else [],
-        analysis_cards,
-    )
+    if not action_card_only:
+        _maybe_send_ai_briefing(
+            engine,
+            now,
+            to_push,
+            ranking,
+            target_tickers,
+            [concentration_note] if concentration_note else [],
+            analysis_cards,
+        )
     log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))

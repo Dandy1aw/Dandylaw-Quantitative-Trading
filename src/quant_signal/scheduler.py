@@ -250,6 +250,9 @@ def build_scheduler(
         engine.run_watch_deviation(datetime.now(timezone.utc))
 
     def enrichment() -> None:
+        if engine.settings.notify.action_card_only:
+            log.info("skip.action_card_only", job="enrichment")
+            return
         now_et = _now_et()
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="enrichment")
@@ -360,7 +363,7 @@ def build_scheduler(
         # 美股盘中每5分钟评估计划状态迁移(入场窗口约束在状态机内部)
         sched.add_job(
             runtime.wrap("execution_watch", execution_watch),
-            CronTrigger(hour="9-15", minute="*/5", timezone=ET),
+            CronTrigger(hour="9-15", minute="1-56/5", timezone=ET),
             id="execution_watch",
             misfire_grace_time=240,
         )

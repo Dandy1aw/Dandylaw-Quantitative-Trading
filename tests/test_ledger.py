@@ -16,6 +16,7 @@ from quant_signal.account import (
 )
 from quant_signal.execution import ExecutionPlan, PlanState
 from quant_signal.ledger import SignalLedger
+from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.strategies.base import Direction, Signal, dedup_key
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -483,3 +484,32 @@ def test_plan_events_reject_duplicate_successful_delivery(
     assert ledger.record_plan_event("p1", 2, "ACTIONABLE", now=NOW) is True
     assert ledger.record_plan_event("p1", 1, "EXPIRED", now=NOW) is True
     assert ledger.event_was_delivered("p1", 1, "INVALIDATED") is False
+
+
+def test_plan_event_outbox_retries_until_delivery(ledger: SignalLedger) -> None:
+    card = Card(
+        kind=CardKind.SIGNAL,
+        title="AAPL ACTIONABLE",
+        body_md="buy 1",
+        sections=(CardSection("buy 1"),),
+    )
+    assert ledger.queue_plan_event("p1", 1, "ACTIONABLE", card, now=NOW) is True
+    assert ledger.queue_plan_event("p1", 1, "ACTIONABLE", card, now=NOW) is False
+    due = ledger.due_plan_events(NOW)
+    assert len(due) == 1 and due[0]["card"] == card
+    event_key = str(due[0]["event_key"])
+    assert ledger.event_was_delivered("p1", 1, "ACTIONABLE") is False
+
+    ledger.mark_plan_event_failed(
+        event_key,
+        "temporary webhook error",
+        now=NOW,
+        retry_at=NOW + timedelta(minutes=1),
+    )
+    assert ledger.due_plan_events(NOW + timedelta(seconds=30)) == []
+    retried = ledger.due_plan_events(NOW + timedelta(minutes=1))
+    assert retried[0]["attempts"] == 1
+
+    ledger.mark_plan_event_sent(event_key, now=NOW + timedelta(minutes=1))
+    assert ledger.event_was_delivered("p1", 1, "ACTIONABLE") is True
+    assert ledger.due_plan_events(NOW + timedelta(minutes=2)) == []

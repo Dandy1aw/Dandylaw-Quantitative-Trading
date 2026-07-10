@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_signal.config import AIBriefingSettings, EnrichmentSettings
+from quant_signal.config import AIBriefingSettings, EnrichmentSettings, NotifySettings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine, _intraday_snapshot
 from quant_signal.pipelines import premarket as premarket_pipeline
@@ -86,6 +86,22 @@ def test_premarket_generates_rotation_and_report(env, daily_bars) -> None:  # ty
     assert any("美股组" in t for t in titles)            # 合成标的均为美股，出美股组卡
     assert "📊 动量全池榜单" in titles
     assert all("盘前早报" in t or "【重要】" in t or "动量全池榜单" in t for t in titles)
+
+
+def test_action_card_only_premarket_calculates_without_duplicate_pushes(
+    env, daily_bars
+) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    settings = settings.model_copy(
+        update={"notify": NotifySettings(action_card_only=True)}
+    )
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
+    run_at = daily_bars.index.get_level_values("ts").max() + timedelta(hours=32)
+
+    engine.run_premarket(run_at)
+
+    assert notifier.cards == []
+    assert ledger.get_strategy_targets("momentum_rotation")
 
 
 def test_premarket_sends_ai_briefing_card_when_cli_returns_text(

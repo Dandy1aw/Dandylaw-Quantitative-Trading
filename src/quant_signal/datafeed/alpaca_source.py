@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Literal, Union
+import time
+from typing import Callable, Literal, Protocol, Union, cast
 
 import httpx
 import pandas as pd
@@ -10,16 +11,59 @@ _QueryValue = Union[str, int, float, bool, None]
 
 _BASE = "https://data.alpaca.markets/v2/stocks/bars"
 _COLMAP = {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
+_TRANSIENT_ERRORS = (
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+)
+
+
+class _HTTPClient(Protocol):
+    def get(self, url: str, **kwargs: object) -> httpx.Response: ...
 
 
 class AlpacaSource:
     # 免费 IEX feed 只覆盖部分市场成交量，不适合横截面流动性/量比排名。
     partial_market_volume = True
 
-    def __init__(self, key: str, secret: str) -> None:
+    def __init__(
+        self,
+        key: str,
+        secret: str,
+        *,
+        client: _HTTPClient | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        retry_delays: tuple[float, ...] = (0.5, 1.5),
+    ) -> None:
         if not key or not secret:
             raise ValueError("ALPACA_KEY/ALPACA_SECRET 未配置，请填写 config/.env")
         self._headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+        self._client = client or cast(
+            _HTTPClient,
+            httpx.Client(
+                timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
+                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            ),
+        )
+        self._sleep = sleep
+        self._retry_delays = retry_delays
+
+    def _get(self, url: str, params: dict[str, _QueryValue]) -> httpx.Response:
+        for attempt in range(len(self._retry_delays) + 1):
+            try:
+                response = self._client.get(
+                    url,
+                    params=params,
+                    headers=self._headers,
+                )
+                response.raise_for_status()
+                return response
+            except _TRANSIENT_ERRORS:
+                if attempt >= len(self._retry_delays):
+                    raise
+                self._sleep(self._retry_delays[attempt])
+        raise AssertionError("unreachable")
 
     def _fetch(
         self,
@@ -42,8 +86,7 @@ class AlpacaSource:
         if end:
             params["end"] = end
         while True:
-            resp = httpx.get(_BASE, params=params, headers=self._headers, timeout=30.0)
-            resp.raise_for_status()
+            resp = self._get(_BASE, params)
             body = resp.json()
             for ticker, bars in (body.get("bars") or {}).items():
                 if not bars:

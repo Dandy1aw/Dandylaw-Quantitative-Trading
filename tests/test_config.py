@@ -21,6 +21,7 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.ai_briefing.command == "codex"
     assert s.strategies["momentum_rotation"]["top_n"] == 3
     assert s.notify.dedup_hours == 4
+    assert s.notify.action_card_only is True
     # 趋势闸门：阶段B回测选出的最优配置(仅200线+防御，关绝对动量)
     assert s.trend_gate.enabled is True
     assert s.trend_gate.use_mom is False
@@ -28,7 +29,10 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.index_universe.enabled is True
     assert s.index_universe.indices == ["sp500", "nasdaq100"]
     assert s.execution_plan.enabled is True
-    assert s.execution_plan.account_provider == "alpaca_paper"
+    assert s.execution_plan.account_provider == "screenshot"
+    assert s.execution_plan.capital_limit_usd == 6000
+    assert s.execution_plan.max_financing_ratio == 0.20
+    assert s.execution_plan.cash_reserve == 0
     assert s.legacy_price_deviation.enabled is False
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
@@ -170,6 +174,9 @@ def test_index_universe_requires_nonempty_unique_indices(indices: list[str]) -> 
         ("max_new_positions_per_day", 0),
         ("quote_max_age_seconds", 59),
         ("account_max_age_seconds", 601),
+        ("capital_limit_usd", 0),
+        ("max_financing_ratio", 0.21),
+        ("screenshot_max_age_hours", 0),
     ],
 )
 def test_execution_plan_rejects_invalid_risk_limits(field: str, value: object) -> None:
@@ -180,3 +187,13 @@ def test_execution_plan_rejects_invalid_risk_limits(field: str, value: object) -
 def test_execution_plan_requires_stop_distance_order() -> None:
     with pytest.raises(ValidationError, match="max_stop_distance"):
         ExecutionPlanSettings(min_stop_distance=0.20, max_stop_distance=0.20)
+
+
+def test_execution_plan_risk_clusters_are_unique_and_normalized() -> None:
+    settings = ExecutionPlanSettings(
+        risk_clusters={"semiconductor_memory": ["MU", "SMH", "SNXX"]}
+    )
+    assert settings.risk_clusters["semiconductor_memory"] == ["MU", "SMH", "SNXX"]
+
+    with pytest.raises(ValidationError, match="risk_clusters"):
+        ExecutionPlanSettings(risk_clusters={"a": ["MU"], "b": ["MU"]})

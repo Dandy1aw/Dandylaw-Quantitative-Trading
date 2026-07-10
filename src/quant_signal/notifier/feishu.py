@@ -14,9 +14,18 @@ _HEADER_COLOR = {CardKind.SIGNAL: "blue", CardKind.REPORT: "turquoise", CardKind
 
 
 def _to_feishu_payload(card: Card) -> dict[str, object]:
-    elements: list[dict[str, object]] = [
-        {"tag": "div", "text": {"tag": "lark_md", "content": card.body_md}}
-    ]
+    contents = (
+        [section.content_md for section in card.sections]
+        if card.sections
+        else [card.body_md]
+    )
+    elements: list[dict[str, object]] = []
+    for index, content in enumerate(contents):
+        elements.append(
+            {"tag": "div", "text": {"tag": "lark_md", "content": content}}
+        )
+        if index < len(contents) - 1:
+            elements.append({"tag": "hr"})
     if card.url:
         elements.append(
             {

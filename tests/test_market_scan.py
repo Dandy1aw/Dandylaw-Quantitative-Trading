@@ -6,7 +6,7 @@ import pandas as pd
 
 from conftest import make_test_settings
 
-from quant_signal.config import IndexUniverseSettings
+from quant_signal.config import IndexUniverseSettings, NotifySettings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine
 from quant_signal.index_universe import merge_members
@@ -86,9 +86,34 @@ def test_market_scan_pushes_top1_and_records_signal(tmp_path: Path) -> None:
     assert any("全市场扫描" in t for t in titles)
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "HOT" in body and "目标买入价" in body
+    assert "|---" not in body
     rows = ledger.signals_on(NOW.date())
     scan_rows = [r for r in rows if r["strategy_id"] == "market_scan"]
     assert len(scan_rows) == 1 and scan_rows[0]["ticker"] == "HOT"
+
+
+def test_action_card_only_stores_scan_without_standalone_push(tmp_path: Path) -> None:
+    settings = make_test_settings(
+        watchlist=[],
+        index_universe=IndexUniverseSettings(enabled=False),
+        notify=NotifySettings(action_card_only=True),
+    )
+    bars = _bars({"HOT": 0.01, "MEH": 0.0, "COLD": -0.005})
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    engine = Engine(
+        settings,
+        BarStore(tmp_path / "b.duckdb"),
+        FakeScanSource(bars),
+        ledger,
+        notifier,
+    )
+
+    engine.run_market_scan(NOW)
+
+    assert notifier.cards == []
+    rows = [row for row in ledger.signals_on(NOW.date()) if row["strategy_id"] == "market_scan"]
+    assert len(rows) == 1 and rows[0]["pushed"] == 0
 
 
 def test_market_scan_skips_source_without_asset_list(tmp_path: Path) -> None:

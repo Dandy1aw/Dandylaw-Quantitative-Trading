@@ -1,22 +1,29 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from quant_signal.account import AccountState
 from quant_signal.execution import (
     TERMINAL_STATES,
     ExecutionPlan,
+    PlanState,
     plan_from_dict,
     plan_to_dict,
 )
+from quant_signal.notifier.base import Card, card_from_dict, card_to_dict
 from quant_signal.strategies.base import Signal, dedup_key
 
-_SCHEMA_VERSION = 2
+if TYPE_CHECKING:
+    from quant_signal.portfolio_import import ValidatedPortfolioImport
+
+_SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -119,6 +126,69 @@ CREATE TABLE IF NOT EXISTS plan_events (
     created_at TEXT NOT NULL,
     PRIMARY KEY (plan_id, plan_version, event_type)
 );
+CREATE TABLE IF NOT EXISTS portfolio_imports (
+    import_id TEXT PRIMARY KEY,
+    image_sha256 TEXT NOT NULL UNIQUE,
+    source TEXT NOT NULL,
+    model TEXT NOT NULL,
+    uploaded_at TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    account_valid INTEGER NOT NULL,
+    positions_complete INTEGER NOT NULL,
+    account_active INTEGER NOT NULL DEFAULT 0,
+    positions_active INTEGER NOT NULL DEFAULT 0,
+    reported_position_count INTEGER NOT NULL,
+    visible_position_count INTEGER NOT NULL,
+    validation_errors_json TEXT NOT NULL,
+    raw_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_portfolio_imports_active
+    ON portfolio_imports(account_active, positions_active, uploaded_at DESC);
+CREATE TABLE IF NOT EXISTS observed_account_snapshots (
+    import_id TEXT PRIMARY KEY,
+    equity TEXT NOT NULL,
+    market_value TEXT NOT NULL,
+    cash TEXT NOT NULL,
+    buying_power TEXT NOT NULL,
+    frozen_cash TEXT NOT NULL,
+    processing_cash TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    capital_limit TEXT NOT NULL,
+    max_financing_ratio TEXT NOT NULL,
+    FOREIGN KEY(import_id) REFERENCES portfolio_imports(import_id)
+);
+CREATE TABLE IF NOT EXISTS observed_positions (
+    import_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    qty TEXT,
+    avg_entry_price TEXT,
+    current_price TEXT,
+    market_value TEXT,
+    estimated_market_value TEXT,
+    pnl TEXT,
+    pnl_pct TEXT,
+    weight_pct TEXT,
+    precision TEXT NOT NULL,
+    PRIMARY KEY(import_id, symbol),
+    FOREIGN KEY(import_id) REFERENCES portfolio_imports(import_id)
+);
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    event_key TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT NOT NULL,
+    last_error TEXT,
+    sent_at TEXT,
+    UNIQUE(plan_id, plan_version, event_type)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
+    ON notification_outbox(status, next_retry_at);
 """
 
 
@@ -471,6 +541,128 @@ class SignalLedger:
             rows = self._con.execute(query + " ORDER BY order_id", params).fetchall()
         return [dict(r) for r in rows]
 
+    def save_portfolio_import(self, record: "ValidatedPortfolioImport") -> bool:
+        """Persist one idempotent screenshot result and atomically activate valid layers."""
+        account = record.extraction.account
+        raw_json = record.extraction.model_dump_json()
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO portfolio_imports"
+                    " (import_id, image_sha256, source, model, uploaded_at, observed_at,"
+                    " status, account_valid, positions_complete, account_active,"
+                    " positions_active, reported_position_count, visible_position_count,"
+                    " validation_errors_json, raw_json)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)",
+                    (
+                        record.import_id,
+                        record.image_sha256,
+                        record.source,
+                        record.model,
+                        record.uploaded_at.astimezone(timezone.utc).isoformat(),
+                        record.observed_at.astimezone(timezone.utc).isoformat(),
+                        record.status.value,
+                        int(record.account_valid),
+                        int(record.positions_complete),
+                        account.reported_position_count,
+                        len(record.positions),
+                        json.dumps(record.validation_errors, ensure_ascii=False),
+                        raw_json,
+                    ),
+                )
+                if record.account_valid:
+                    self._con.execute(
+                        "INSERT INTO observed_account_snapshots"
+                        " (import_id, equity, market_value, cash, buying_power, frozen_cash,"
+                        " processing_cash, currency, capital_limit, max_financing_ratio)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            record.import_id,
+                            str(account.equity),
+                            str(account.market_value),
+                            str(account.cash),
+                            str(account.buying_power),
+                            str(account.frozen_cash),
+                            str(account.processing_cash),
+                            account.currency,
+                            str(record.capital_limit),
+                            str(record.max_financing_ratio),
+                        ),
+                    )
+                    self._con.executemany(
+                        "INSERT INTO observed_positions"
+                        " (import_id, symbol, qty, avg_entry_price, current_price,"
+                        " market_value, estimated_market_value, pnl, pnl_pct, weight_pct,"
+                        " precision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            (
+                                record.import_id,
+                                row.symbol,
+                                str(row.qty) if row.qty is not None else None,
+                                str(row.avg_entry_price)
+                                if row.avg_entry_price is not None
+                                else None,
+                                str(row.current_price)
+                                if row.current_price is not None
+                                else None,
+                                str(row.market_value)
+                                if row.market_value is not None
+                                else None,
+                                str(row.estimated_market_value)
+                                if row.estimated_market_value is not None
+                                else None,
+                                str(row.pnl) if row.pnl is not None else None,
+                                str(row.pnl_pct) if row.pnl_pct is not None else None,
+                                str(row.weight_pct) if row.weight_pct is not None else None,
+                                row.precision,
+                            )
+                            for row in record.positions
+                        ],
+                    )
+                    self._con.execute("UPDATE portfolio_imports SET account_active = 0")
+                    self._con.execute(
+                        "UPDATE portfolio_imports SET account_active = 1 WHERE import_id = ?",
+                        (record.import_id,),
+                    )
+                    if record.positions_complete:
+                        self._con.execute("UPDATE portfolio_imports SET positions_active = 0")
+                        self._con.execute(
+                            "UPDATE portfolio_imports SET positions_active = 1"
+                            " WHERE import_id = ?",
+                            (record.import_id,),
+                        )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def latest_observed_account(self) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT a.*, i.import_id, i.uploaded_at, i.observed_at, i.status,"
+                " i.positions_complete, i.reported_position_count,"
+                " i.visible_position_count FROM portfolio_imports AS i"
+                " JOIN observed_account_snapshots AS a ON a.import_id = i.import_id"
+                " WHERE i.account_active = 1 LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def active_observed_positions(
+        self, *, exact_only: bool = False
+    ) -> list[dict[str, object]]:
+        flag = "positions_active" if exact_only else "account_active"
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT p.*, i.observed_at FROM observed_positions AS p"
+                " JOIN portfolio_imports AS i ON i.import_id = p.import_id"
+                f" WHERE i.{flag} = 1 ORDER BY p.symbol"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_execution_plan(self, plan: ExecutionPlan) -> None:
         payload = json.dumps(plan_to_dict(plan), ensure_ascii=False, sort_keys=True)
         with self._lock:
@@ -509,6 +701,28 @@ class SignalLedger:
             rows = self._con.execute(query, params).fetchall()
         return [plan_from_dict(json.loads(r["payload_json"])) for r in rows]
 
+    def invalidate_active_plans(self, reason: str, *, now: datetime) -> int:
+        plans = self.active_execution_plans()
+        for plan in plans:
+            self.upsert_execution_plan(
+                dataclasses.replace(
+                    plan,
+                    state=PlanState.INVALIDATED,
+                    block_reason=reason,
+                    suggested_qty=None,
+                    suggested_notional=None,
+                    account_at=now,
+                )
+            )
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET status = 'CANCELLED', last_error = ?"
+                " WHERE status = 'PENDING'",
+                (reason,),
+            )
+            self._con.commit()
+        return len(plans)
+
     def record_plan_event(
         self, plan_id: str, plan_version: int, event_type: str, *, now: datetime
     ) -> bool:
@@ -531,10 +745,97 @@ class SignalLedger:
                 self._con.rollback()
                 return False
 
+    def queue_plan_event(
+        self,
+        plan_id: str,
+        plan_version: int,
+        event_type: str,
+        card: Card,
+        *,
+        now: datetime,
+    ) -> bool:
+        event_key = f"{plan_id}:{plan_version}:{event_type}"
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        payload = json.dumps(card_to_dict(card), ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO notification_outbox"
+                    " (event_key, plan_id, plan_version, event_type, status, payload_json,"
+                    " created_at, attempts, next_retry_at)"
+                    " VALUES (?, ?, ?, ?, 'PENDING', ?, ?, 0, ?)",
+                    (
+                        event_key,
+                        plan_id,
+                        plan_version,
+                        event_type,
+                        payload,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+
+    def due_plan_events(self, now: datetime) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM notification_outbox"
+                " WHERE status = 'PENDING' AND next_retry_at <= ?"
+                " ORDER BY created_at, event_key",
+                (now.astimezone(timezone.utc).isoformat(),),
+            ).fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            item["card"] = card_from_dict(json.loads(str(item.pop("payload_json"))))
+            output.append(item)
+        return output
+
+    def mark_plan_event_failed(
+        self,
+        event_key: str,
+        error: str,
+        *,
+        now: datetime,
+        retry_at: datetime,
+    ) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET attempts = attempts + 1,"
+                " last_error = ?, next_retry_at = ?"
+                " WHERE event_key = ? AND status = 'PENDING'",
+                (
+                    error[:1000],
+                    retry_at.astimezone(timezone.utc).isoformat(),
+                    event_key,
+                ),
+            )
+            self._con.commit()
+
+    def mark_plan_event_sent(self, event_key: str, *, now: datetime) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET status = 'SENT', sent_at = ?,"
+                " last_error = NULL WHERE event_key = ? AND status = 'PENDING'",
+                (now.astimezone(timezone.utc).isoformat(), event_key),
+            )
+            self._con.commit()
+
     def event_was_delivered(
         self, plan_id: str, plan_version: int, event_type: str
     ) -> bool:
         with self._lock:
+            outbox_row = self._con.execute(
+                "SELECT status FROM notification_outbox WHERE plan_id = ?"
+                " AND plan_version = ? AND event_type = ?",
+                (plan_id, plan_version, event_type),
+            ).fetchone()
+            if outbox_row is not None:
+                return str(outbox_row["status"]) == "SENT"
             row = self._con.execute(
                 "SELECT 1 FROM plan_events WHERE plan_id = ? AND plan_version = ?"
                 " AND event_type = ?",

@@ -21,6 +21,7 @@ class NotifySettings(BaseModel):
     premarket_hourly_limit: int = 10
     intraday_hourly_limit: int = 10
     deviation_hourly_limit: int = 10
+    action_card_only: bool = False
 
     @model_validator(mode="after")
     def expand_legacy_hourly_limit(self) -> Self:
@@ -96,12 +97,16 @@ class IndexUniverseSettings(BaseModel):
 
 class ExecutionPlanSettings(BaseModel):
     enabled: bool = False
-    account_provider: Literal["alpaca_paper", "none"] = "alpaca_paper"
+    account_provider: Literal["alpaca_paper", "screenshot", "none"] = "alpaca_paper"
+    capital_limit_usd: float = Field(default=6000, gt=0, le=6000)
+    max_financing_ratio: float = Field(default=0.20, ge=0, le=0.20)
+    screenshot_max_age_hours: int = Field(default=72, ge=1, le=168)
     risk_per_trade: float = Field(default=0.005, gt=0, le=0.05)
     max_daily_new_risk: float = Field(default=0.01, gt=0, le=0.10)
     max_position_weight: float = Field(default=0.12, gt=0, le=0.50)
     max_cluster_weight: float = Field(default=0.35, gt=0, le=1.0)
     cash_reserve: float = Field(default=0.20, ge=0, lt=1.0)
+    risk_clusters: dict[str, list[str]] = Field(default_factory=dict)
     max_new_positions_per_day: int = Field(default=2, ge=1, le=10)
     min_stop_distance: float = Field(default=0.02, gt=0, lt=1.0)
     max_stop_distance: float = Field(default=0.20, gt=0, lt=1.0)
@@ -112,6 +117,21 @@ class ExecutionPlanSettings(BaseModel):
     def validate_stop_distances(self) -> Self:
         if self.max_stop_distance <= self.min_stop_distance:
             raise ValueError("max_stop_distance must be greater than min_stop_distance")
+        normalized: dict[str, list[str]] = {}
+        owners: dict[str, str] = {}
+        for cluster, symbols in self.risk_clusters.items():
+            clean = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
+            if len(clean) != len(set(clean)):
+                raise ValueError(f"risk_clusters contains duplicates in {cluster}")
+            for symbol in clean:
+                previous = owners.get(symbol)
+                if previous is not None:
+                    raise ValueError(
+                        f"risk_clusters symbol {symbol} belongs to both {previous} and {cluster}"
+                    )
+                owners[symbol] = cluster
+            normalized[cluster] = clean
+        self.risk_clusters = normalized
         return self
 
 

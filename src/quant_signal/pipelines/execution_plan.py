@@ -28,9 +28,9 @@ from quant_signal.execution import (
     apply_transition,
     build_plan,
     plan_to_dict,
+    portfolio_budget_from_state,
 )
 from quant_signal.notifier.cards import (
-    build_ai_briefing_card,
     execution_plan_card,
     plan_event_card,
 )
@@ -66,11 +66,19 @@ class _RawCandidate:
     score: float | None
     sources: tuple[str, ...]
     memberships: tuple[str, ...]
+    currency: str = "USD"
     forced_block: str | None = None
 
 
 def _has_prices(extra: Mapping[str, object]) -> bool:
     return all(isinstance(extra.get(key), (int, float)) for key in _PRICE_KEYS)
+
+
+def _currency(engine: Engine, ticker: str) -> str:
+    metadata = engine.settings.tickers.get(ticker)
+    if metadata is not None:
+        return metadata.currency
+    return engine.settings.international_tickers.get(ticker, "USD")
 
 
 def _index_candidates(engine: Engine, now: datetime) -> list[_RawCandidate]:
@@ -105,6 +113,7 @@ def _index_candidates(engine: Engine, now: datetime) -> list[_RawCandidate]:
                 )
                 if isinstance(memberships, list)
                 else (),
+                currency=_currency(engine, str(row["ticker"])),
                 forced_block=forced_block,
             )
         )
@@ -147,6 +156,7 @@ def _core_signals(engine: Engine, day: date) -> tuple[list[_RawCandidate], set[s
                 score=None,
                 sources=(str(row["strategy_id"]),),
                 memberships=(),
+                currency=_currency(engine, ticker),
             )
         )
     return buys, sells
@@ -170,6 +180,7 @@ def _merge(first: _RawCandidate, second: _RawCandidate) -> _RawCandidate:
         score=first.score if first.score is not None else second.score,
         sources=tuple(dict.fromkeys(first.sources + second.sources)),
         memberships=first.memberships or second.memberships,
+        currency=first.currency,
         forced_block=first.forced_block
         or second.forced_block
         or ("BLOCKED_CONFLICT" if conflict else None),
@@ -205,25 +216,58 @@ def _force_block(plan: ExecutionPlan, reason: str) -> ExecutionPlan:
     )
 
 
-def _maybe_send_ai_explanation(
-    engine: Engine, now: datetime, plans: list[ExecutionPlan]
-) -> None:
+def _ai_explanation(
+    engine: Engine,
+    now: datetime,
+    plans: list[ExecutionPlan],
+    account_state: AccountState | None,
+) -> str | None:
     cfg = engine.settings.ai_briefing
     if not cfg.enabled or not plans:
-        return
+        return None
+    account_label = (
+        account_state.snapshot.source.upper() if account_state is not None else "UNAVAILABLE"
+    )
+    holdings = (
+        sorted(
+            {position.symbol for position in account_state.positions}
+            | {position.symbol for position in account_state.observed_positions}
+        )
+        if account_state is not None
+        else []
+    )
+    ranking = [
+        {
+            "ticker": str(row["ticker"]),
+            "rank": int(str(row["rank"])),
+            "score": float(str(row["score"])),
+            "price": float(str(row["price"])),
+        }
+        for row in engine.ledger.latest_scan_candidates()[:5]
+    ]
+    notes: list[str] = []
+    if account_state is not None:
+        notes.append(
+            f"账户来源={account_state.snapshot.source};权益={account_state.snapshot.equity};"
+            f"资金上限={account_state.snapshot.capital_limit or account_state.snapshot.equity};"
+            f"持仓明细={'PARTIAL' if account_state.positions_partial else 'COMPLETE'}"
+        )
     context = AIBriefingContext(
         as_of=now.isoformat(),
+        output_mode="action_card",
+        holdings=holdings,
+        ranking=ranking,
+        notes=notes,
         execution_plans=[
-            {**plan_to_dict(plan), "account_label": "PAPER"} for plan in plans
+            {**plan_to_dict(plan), "account_label": account_label} for plan in plans
         ],
     )
     try:
         body = run_ai_briefing(cfg, context)
     except Exception as error:  # noqa: BLE001
         log.warning("execution_brief.ai_failed", error=str(error))
-        return
-    if body:
-        engine.notifier.send(build_ai_briefing_card(body))
+        return None
+    return body.strip()[:300] if body else None
 
 
 def run_daily(engine: Engine, now: datetime) -> None:
@@ -254,6 +298,7 @@ def run_daily(engine: Engine, now: datetime) -> None:
             source_strategies=raw.sources,
             memberships=raw.memberships,
             quote_at=now,
+            currency=raw.currency,
         )
         plan = build_plan(
             candidate,
@@ -262,18 +307,26 @@ def run_daily(engine: Engine, now: datetime) -> None:
             account_state.open_orders if account_state is not None else (),
             cfg,
             now,
+            observed_positions=(
+                account_state.observed_positions if account_state is not None else ()
+            ),
         )
         if raw.forced_block is not None:
             plan = _force_block(plan, raw.forced_block)
         plans.append(plan)
     if account_state is not None:
         plans = apply_portfolio_limits(
-            plans, account_state.snapshot.equity, cfg
+            plans,
+            account_state.snapshot.equity,
+            cfg,
+            budget=portfolio_budget_from_state(account_state, cfg),
         )
     for plan in plans:
         engine.ledger.upsert_execution_plan(plan)
-    engine.notifier.send(execution_plan_card(account_state, plans, now))
-    _maybe_send_ai_explanation(engine, now, plans)
+    ai_summary = _ai_explanation(engine, now, plans, account_state)
+    engine.notifier.send(
+        execution_plan_card(account_state, plans, now, ai_summary=ai_summary)
+    )
     log.info(
         "execution_brief.done",
         plans=len(plans),
@@ -304,10 +357,28 @@ def _complete_bars(bars: pd.DataFrame, now: datetime) -> pd.DataFrame:
     return bars[bars.index.get_level_values("ts") <= cutoff]
 
 
+def _deliver_plan_events(engine: Engine, now: datetime) -> int:
+    delivered = 0
+    for event in engine.ledger.due_plan_events(now):
+        card = event["card"]
+        if engine.notifier.send(card):  # type: ignore[arg-type]
+            engine.ledger.mark_plan_event_sent(str(event["event_key"]), now=now)
+            delivered += 1
+        else:
+            engine.ledger.mark_plan_event_failed(
+                str(event["event_key"]),
+                "notifier returned false",
+                now=now,
+                retry_at=now + timedelta(minutes=1),
+            )
+    return delivered
+
+
 def run_watch(engine: Engine, now: datetime) -> None:
     cfg = engine.settings.execution_plan
     if not cfg.enabled:
         return
+    events = _deliver_plan_events(engine, now)
     plans = engine.ledger.active_execution_plans()
     if not plans:
         return
@@ -316,7 +387,7 @@ def run_watch(engine: Engine, now: datetime) -> None:
         bars = engine.source.fetch_intraday_bars(tickers, lookback_days=1)
     except Exception as error:  # noqa: BLE001
         log.warning("execution_watch.bars_failed", error=str(error))
-        return
+        raise
 
     position_qty: dict[str, float] = {}
     open_buy_tickers: set[str] = set()
@@ -334,7 +405,6 @@ def run_watch(engine: Engine, now: datetime) -> None:
         except Exception as error:  # noqa: BLE001
             log.warning("execution_watch.account_failed", error=str(error))
 
-    events = 0
     for plan in plans:
         try:
             sub = bars.xs(plan.ticker, level="ticker").sort_index()
@@ -362,15 +432,17 @@ def run_watch(engine: Engine, now: datetime) -> None:
             transition = advance_plan(plan, observation, cfg)
         except PlanTransitionError:
             continue
-        if transition.state is not plan.state:
-            engine.ledger.upsert_execution_plan(apply_transition(plan, transition))
-        if transition.event is not None and engine.ledger.record_plan_event(
-            plan.plan_id, plan.plan_version, transition.event, now=now
-        ):
-            engine.notifier.send(
+        if transition.event is not None:
+            engine.ledger.queue_plan_event(
+                plan.plan_id,
+                plan.plan_version,
+                transition.event,
                 plan_event_card(
                     plan, transition.event, price=observation.price, at=now
-                )
+                ),
+                now=now,
             )
-            events += 1
+        if transition.state is not plan.state:
+            engine.ledger.upsert_execution_plan(apply_transition(plan, transition))
+    events += _deliver_plan_events(engine, now)
     log.info("execution_watch.done", plans=len(plans), events=events)

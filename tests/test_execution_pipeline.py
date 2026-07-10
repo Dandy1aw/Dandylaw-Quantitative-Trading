@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from conftest import make_test_settings
 
@@ -13,8 +14,14 @@ from quant_signal.account import (
     AccountState,
     BrokerOrder,
     BrokerPosition,
+    ObservedPosition,
 )
-from quant_signal.config import ExecutionPlanSettings, IndexUniverseSettings
+from quant_signal.config import (
+    AIBriefingSettings,
+    ExecutionPlanSettings,
+    IndexUniverseSettings,
+    NotifySettings,
+)
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine
 from quant_signal.execution import PlanCandidate, PlanState, build_plan
@@ -26,12 +33,13 @@ MARKET_AS_OF = date(2026, 7, 9)
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, success: bool = True) -> None:
         self.cards: list[object] = []
+        self.success = success
 
     def send(self, card: object) -> bool:
         self.cards.append(card)
-        return True
+        return self.success
 
 
 class FakeAccountProvider:
@@ -65,6 +73,50 @@ def paper_account(
         positions=positions,
         open_orders=open_orders,
         recent_orders=recent_orders,
+    )
+
+
+def screenshot_account() -> AccountState:
+    observed = tuple(
+        ObservedPosition(
+            symbol=symbol,
+            qty=None,
+            avg_entry_price=None,
+            current_price=None,
+            market_value=None,
+            estimated_market_value=Decimal(value),
+            pnl=None,
+            pnl_pct=None,
+            weight_pct=None,
+            precision="ESTIMATED",
+        )
+        for symbol, value in {
+            "DRAM": "887.34",
+            "MU": "991.06",
+            "RAM": "363.93",
+            "SMH": "1226.68",
+            "SNXX": "774.62",
+        }.items()
+    )
+    return AccountState(
+        snapshot=AccountSnapshot(
+            account_id="screenshot:abc",
+            equity=Decimal("5995.52"),
+            cash=Decimal("1751.13"),
+            buying_power=Decimal("3474.15"),
+            currency="USD",
+            retrieved_at=BRIEF_NOW,
+            source="screenshot",
+            market_value=Decimal("4244.15"),
+            capital_limit=Decimal("6000"),
+            max_financing_ratio=Decimal("0.20"),
+        ),
+        positions=(),
+        open_orders=(),
+        recent_orders=(),
+        observed_positions=observed,
+        positions_partial=True,
+        reported_position_count=6,
     )
 
 
@@ -142,6 +194,11 @@ class FakeIntradaySource(_EmptySource):
     def fetch_intraday_bars(self, tickers, lookback_days=5):  # type: ignore[no-untyped-def]
         mask = self._bars.index.get_level_values("ticker").isin(tickers)
         return self._bars[mask]
+
+
+class FailingIntradaySource(_EmptySource):
+    def fetch_intraday_bars(self, tickers, lookback_days=5):  # type: ignore[no-untyped-def]
+        raise TimeoutError("market data unavailable")
 
 
 def seed_candidates(ledger: SignalLedger, extra: dict[str, object]) -> None:
@@ -238,14 +295,14 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     body = card.body_md  # type: ignore[attr-defined]
     assert "PAPER" in card.title or "PAPER" in body  # type: ignore[attr-defined]
     # 账户区
-    assert "100000" in body and "50000" in body
+    assert "$100,000.00" in body and "$50,000.00" in body
     assert "MSFT" in body  # 持仓
     assert "NVDA" in body  # 未成交订单
     assert "o-0" in body or "400" in body  # 最近成交
     # 计划区: 限价/股数/金额/止损/止盈/有效期
     assert "102" in body and "95" in body and "115" in body
     assert "71" in body  # risk_qty=floor(500/7)
-    assert "7242" in body  # notional
+    assert "$7,242.00" in body  # notional
     assert "15:45" in body  # 有效期
     # 账户时间
     assert BRIEF_NOW.astimezone().strftime("%H:%M") in body or "08:15" in body or "账户时间" in body
@@ -269,8 +326,8 @@ def test_daily_brief_without_account_shows_no_quantity(tmp_path: Path) -> None:
     assert len(notifier.cards) == 1
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "NO_ACCOUNT" in body or "账户数据不足" in body
-    # 观察价位仍在
-    assert "102" in body
+    # 无账户时只汇总阻断原因，不伪造数量
+    assert "NO_ACCOUNT" in body
     # 计划落库为 BLOCKED, 不产生可执行数量
     assert ledger.active_execution_plans() == []
 
@@ -332,6 +389,126 @@ def test_daily_brief_disabled_flag_is_noop(tmp_path: Path) -> None:
     assert ledger.active_execution_plans() == []
 
 
+def test_daily_brief_sizes_unheld_aapl_from_screenshot_account(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        risk_clusters={
+            "semiconductor_memory": ["DRAM", "MU", "RAM", "SMH", "SNXX", "AMD"]
+        },
+    )
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+    )
+    seed_candidates(
+        ledger,
+        scan_extra(
+            entry_low=307.26,
+            entry_high=316.22,
+            stop_loss=290.49,
+            take_profit=341.68,
+        ),
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    active = ledger.active_execution_plans()
+    assert len(active) == 1
+    assert active[0].ticker == "AAPL"
+    assert active[0].suggested_qty == 1
+    assert active[0].suggested_notional == 316.22
+
+
+def test_daily_brief_blocks_existing_semiconductor_cluster_addition(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        risk_clusters={
+            "semiconductor_memory": ["DRAM", "MU", "RAM", "SMH", "SNXX", "AMD"]
+        },
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+    )
+    ledger.replace_scan_candidates(
+        BRIEF_NOW.date(),
+        [{"ticker": "AMD", "rank": 1, "score": 0.9, "price": 103.0, "extra": scan_extra()}],
+        as_of=MARKET_AS_OF,
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert ledger.active_execution_plans() == []
+    assert "CLUSTER_WEIGHT_EXCEEDED" in notifier.cards[0].body_md  # type: ignore[attr-defined]
+
+
+def test_daily_brief_propagates_currency_and_blocks_non_usd_quantity(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(enabled=True, cash_reserve=0)
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+        universe=["000660.KS"],
+        international_tickers={"000660.KS": "KRW"},
+    )
+    ledger.replace_scan_candidates(
+        BRIEF_NOW.date(),
+        [{"ticker": "000660.KS", "rank": 1, "score": 0.9, "price": 103.0, "extra": scan_extra()}],
+        as_of=MARKET_AS_OF,
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert ledger.active_execution_plans() == []
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "UNSUPPORTED_MARKET" in body
+    assert "KRW" in body
+
+
+def test_daily_brief_embeds_one_short_ai_summary_in_same_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_ai(settings, context):  # type: ignore[no-untyped-def]
+        seen["mode"] = context.output_mode
+        seen["label"] = context.execution_plans[0]["account_label"]
+        seen["holdings"] = context.holdings
+        seen["ranking"] = context.ranking
+        return "观" * 500
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.execution_plan.run_ai_briefing", fake_ai
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=ExecutionPlanSettings(
+            enabled=True, account_provider="screenshot", cash_reserve=0
+        ),
+        ai_briefing=AIBriefingSettings(enabled=True),
+        notify=NotifySettings(action_card_only=True),
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert len(notifier.cards) == 1
+    assert seen["mode"] == "action_card"
+    assert seen["label"] == "SCREENSHOT"
+    assert set(seen["holdings"]) == {"DRAM", "MU", "RAM", "SMH", "SNXX"}
+    assert seen["ranking"][0]["ticker"] == "AAPL"
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "AI简评" in body
+    assert "观" * 301 not in body
+
+
 # ---------------------------------------------------------------- intraday watch
 
 
@@ -362,7 +539,7 @@ def test_watch_confirmed_entry_emits_actionable_once(tmp_path: Path) -> None:
     assert len(notifier.cards) == 1
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "ACTIONABLE" in body or "ACTIONABLE" in notifier.cards[0].title  # type: ignore[attr-defined]
-    assert "PAPER" in notifier.cards[0].title or "PAPER" in body  # type: ignore[attr-defined]
+    assert "PAPER" not in notifier.cards[0].title and "PAPER" not in body  # type: ignore[attr-defined]
 
     active = ledger.active_execution_plans()
     assert len(active) == 1
@@ -371,6 +548,53 @@ def test_watch_confirmed_entry_emits_actionable_once(tmp_path: Path) -> None:
     # 同样的观测再跑一次: 状态不变, 不再推送
     engine.run_execution_watch(WATCH_NOW + timedelta(minutes=5))
     assert len(notifier.cards) == 1
+
+
+def test_watch_retries_failed_notification_from_outbox(tmp_path: Path) -> None:
+    bars = _intraday_frame("AAPL", [103.0, 101.5, 101.0], WATCH_NOW)
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FakeIntradaySource(bars),
+    )
+    notifier.success = False
+    seed_active_plan(ledger, state=PlanState.IN_ENTRY_ZONE)
+
+    engine.run_execution_watch(WATCH_NOW)
+
+    assert len(notifier.cards) == 1
+    assert ledger.event_was_delivered(
+        ledger.active_execution_plans()[0].plan_id, 1, "ACTIONABLE"
+    ) is False
+
+    notifier.success = True
+    engine.run_execution_watch(WATCH_NOW + timedelta(minutes=5))
+
+    assert len(notifier.cards) == 2
+    assert ledger.event_was_delivered(
+        ledger.active_execution_plans()[0].plan_id, 1, "ACTIONABLE"
+    ) is True
+
+
+def test_watch_queues_event_before_plan_state_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bars = _intraday_frame("AAPL", [103.0, 101.5, 101.0], WATCH_NOW)
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FakeIntradaySource(bars),
+    )
+    seed_active_plan(ledger, state=PlanState.IN_ENTRY_ZONE)
+
+    def fail_update(plan: object) -> None:
+        raise RuntimeError("simulated state write failure")
+
+    monkeypatch.setattr(ledger, "upsert_execution_plan", fail_update)
+    with pytest.raises(RuntimeError, match="state write failure"):
+        engine.run_execution_watch(WATCH_NOW)
+
+    assert len(ledger.due_plan_events(WATCH_NOW)) == 1
 
 
 def test_watch_stop_breach_invalidates_and_notifies(tmp_path: Path) -> None:
@@ -398,3 +622,15 @@ def test_watch_without_active_plans_is_noop(tmp_path: Path) -> None:
     engine.run_execution_watch(WATCH_NOW)
 
     assert notifier.cards == []
+
+
+def test_watch_market_data_failure_propagates_to_job_health(tmp_path: Path) -> None:
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FailingIntradaySource(),
+    )
+    seed_active_plan(ledger, state=PlanState.ARMED)
+
+    with pytest.raises(TimeoutError, match="market data unavailable"):
+        engine.run_execution_watch(WATCH_NOW)

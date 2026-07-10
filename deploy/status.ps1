@@ -7,6 +7,9 @@ if ($task) {
     $info = $task | Get-ScheduledTaskInfo
     Write-Host ("计划任务: {0}  上次运行: {1}  上次结果: 0x{2:X}" -f `
         $task.State, $info.LastRunTime, $info.LastTaskResult) -ForegroundColor Cyan
+    $triggerTypes = @($task.Triggers | ForEach-Object { $_.CimClass.CimClassName }) -join ', '
+    Write-Host ("身份: LogonType={0}  RunLevel={1}  Triggers={2}" -f `
+        $task.Principal.LogonType, $task.Principal.RunLevel, $triggerTypes) -ForegroundColor Cyan
 } else {
     Write-Host "计划任务 'quant-signal' 未注册。" -ForegroundColor Yellow
 }

@@ -4,9 +4,9 @@ import httpx
 import pytest
 
 from conftest import make_test_settings
-from quant_signal.notifier.base import ConsoleNotifier, CardKind
+from quant_signal.notifier.base import Card, CardKind, CardSection, ConsoleNotifier
 from quant_signal.notifier.cards import alert_card, signal_card
-from quant_signal.notifier.feishu import FeishuNotifier, get_notifier
+from quant_signal.notifier.feishu import FeishuNotifier, _to_feishu_payload, get_notifier
 from quant_signal.strategies.base import Direction, Signal
 
 
@@ -67,3 +67,16 @@ def test_get_notifier_falls_back_to_console(monkeypatch: pytest.MonkeyPatch) -> 
     # 显式置空：load_dotenv 不覆盖已存在的环境变量，避免受本机 .env 已填 webhook 影响。
     monkeypatch.setenv("FEISHU_WEBHOOK", "")
     assert isinstance(get_notifier(make_test_settings(feishu_webhook="")), ConsoleNotifier)
+
+
+def test_feishu_renders_structured_sections_as_separate_divs() -> None:
+    card = Card(
+        kind=CardKind.REPORT,
+        title="行动卡",
+        body_md="账户\n计划",
+        sections=(CardSection("账户"), CardSection("计划")),
+    )
+    payload = _to_feishu_payload(card)
+    elements = payload["card"]["elements"]  # type: ignore[index]
+    divs = [element for element in elements if element["tag"] == "div"]  # type: ignore[index]
+    assert [div["text"]["content"] for div in divs] == ["账户", "计划"]  # type: ignore[index]

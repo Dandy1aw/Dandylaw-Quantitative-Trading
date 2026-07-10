@@ -247,12 +247,12 @@ def test_execution_plan_card_shows_paper_label_and_block_reasons() -> None:
     body = card.body_md
     assert "AAPL" in body and "MSFT" in body
     assert "102" in body and "95" in body and "115" in body
-    assert "71" in body and "7242" in body
+    assert "71" in body and "$7,242.00" in body
     assert "STALE_ACCOUNT" in body
     assert "账户数据不足" in body  # account=None 时的提示
 
 
-def test_plan_event_card_is_paper_labelled() -> None:
+def test_plan_event_card_is_account_source_neutral() -> None:
     from datetime import date, datetime, timezone
 
     from quant_signal.execution import ExecutionPlan, PlanState
@@ -291,7 +291,8 @@ def test_plan_event_card_is_paper_labelled() -> None:
 
     card = plan_event_card(plan, "ACTIONABLE", price=101.0, at=now)
 
-    assert "PAPER" in card.title
+    assert "PAPER" not in card.title and "PAPER" not in card.body_md
+    assert "观察模式" in card.body_md
     assert "ACTIONABLE" in card.title or "ACTIONABLE" in card.body_md
     assert "102" in card.body_md and "95" in card.body_md
     assert "71" in card.body_md

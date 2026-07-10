@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Sequence
 from zoneinfo import ZoneInfo
 
-from quant_signal.notifier.base import Card, CardKind
+from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.strategies.base import Direction, Signal
 
 if TYPE_CHECKING:
@@ -45,6 +47,7 @@ def alert_card(title: str, body_md: str) -> Card:
 
 
 _PAPER_FOOTER = "> PAPER 模拟账户建议，仅供观察，不构成投资建议；本系统不自动下单。"
+_ADVISORY_FOOTER = "> 观察模式，不自动下单。仅供观察，不构成投资建议。"
 
 
 def _fmt_qty(value: object) -> str:
@@ -59,63 +62,171 @@ def execution_plan_card(
     account: "AccountState | None",
     plans: "Sequence[ExecutionPlan]",
     now: datetime,
+    *,
+    ai_summary: str | None = None,
 ) -> Card:
-    lines: list[str] = []
-    if account is not None:
+    def money(value: Decimal | float | int | None) -> str:
+        return "-" if value is None else f"${float(value):,.2f}"
+
+    source_label = "PAPER"
+    held: set[str] = set()
+    sections: list[CardSection] = []
+    if account is None:
+        sections.append(CardSection("**账户**\n⚠ 账户数据不足，未计算股数；仅展示观察价位。"))
+    else:
         snap = account.snapshot
+        source_label = "截图账户" if snap.source == "screenshot" else "PAPER"
+        held = {position.symbol for position in account.positions} | {
+            position.symbol for position in account.observed_positions
+        }
         account_time = snap.retrieved_at.astimezone(_SGT).strftime("%Y-%m-%d %H:%M")
-        lines += [
-            f"**账户时间**: {account_time} (SGT)",
-            f"**权益** {snap.equity} {snap.currency} · **现金** {snap.cash} ·"
-            f" **购买力** {snap.buying_power}",
+        limit = snap.capital_limit or snap.equity
+        financing = limit * snap.max_financing_ratio
+        market_value = snap.market_value
+        if market_value is None:
+            market_value = sum(
+                (position.market_value for position in account.positions), Decimal("0")
+            )
+        weight = float(market_value / snap.equity) if snap.equity else 0.0
+        count = account.reported_position_count
+        if count is None:
+            count = len(held)
+        lines = [
+            "**账户**",
+            f"净值 {money(snap.equity)}｜资金上限 {money(limit)}",
+            f"现金 {money(snap.cash)}｜持仓 {count}｜当前仓位 {weight:.1%}",
+            f"融资上限 {money(financing)}｜总敞口≤{money(snap.max_gross_exposure)}",
+            f"数据来源：{source_label} · {account_time} SGT",
         ]
         if account.positions:
-            lines += ["", "**持仓**", "| 标的 | 数量 | 成本 | 市值 |", "|---|---|---|---|"]
-            lines += [
-                f"| {p.symbol} | {p.qty} | {p.avg_entry_price} | {p.market_value} |"
-                for p in account.positions
-            ]
-        if account.open_orders:
-            lines += ["", "**未成交订单**"]
-            lines += [
-                f"- {o.symbol} {o.side.upper()} {o.qty} @ {o.limit_price or '市价'}"
-                f" ({o.status})"
-                for o in account.open_orders
-            ]
-        if account.recent_orders:
-            lines += ["", "**最近成交**"]
-            lines += [
-                f"- {o.order_id}: {o.symbol} {o.side.upper()} {o.filled_qty}"
-                f" @ {o.filled_avg_price or '-'}"
-                for o in account.recent_orders[:5]
-            ]
-    else:
-        lines.append("⚠ **账户数据不足，未计算股数**（仅展示观察价位）")
-
-    if plans:
-        lines += [
-            "",
-            "**执行计划**",
-            "| 标的 | 状态 | 买入区 | 限价 | 建议股数 | 金额 | 止损 | 止盈 | 有效期 | 备注 |",
-            "|---|---|---|---|---|---|---|---|---|---|",
-        ]
-        for plan in plans:
-            expiry = plan.expires_at.astimezone(_ET).strftime("%m-%d %H:%M ET")
-            note = plan.block_reason or "+".join(plan.source_strategies)
-            lines.append(
-                f"| {plan.ticker} | {plan.state.value} |"
-                f" {plan.entry_low:.2f}-{plan.entry_high:.2f} |"
-                f" {plan.limit_price:.2f} | {_fmt_qty(plan.suggested_qty)} |"
-                f" {_fmt_price(plan.suggested_notional)} | {plan.stop_loss:.2f} |"
-                f" {plan.take_profit:.2f} | {expiry} | {note} |"
+            position_text = "；".join(
+                f"{position.symbol} {position.qty}股/市值{money(position.market_value)}"
+                for position in account.positions[:3]
             )
-    else:
-        lines += ["", "今日无执行候选。"]
-    lines += ["", _PAPER_FOOTER]
+            lines.append(f"持仓摘要：{position_text}")
+        if account.open_orders:
+            order_text = "；".join(
+                f"{order.symbol} {order.side.upper()} {order.qty} @ {order.limit_price or '市价'}"
+                for order in account.open_orders[:3]
+            )
+            lines.append(f"未成交：{order_text}")
+        if account.recent_orders:
+            recent_text = "；".join(
+                f"{order.order_id} {order.symbol} {order.side.upper()} {order.filled_qty} @ {order.filled_avg_price or '-'}"
+                for order in account.recent_orders[:3]
+            )
+            lines.append(f"最近成交：{recent_text}")
+        sections.append(CardSection("\n".join(lines)))
+
+    actionable = [plan for plan in plans if plan.state.value != "BLOCKED"]
+    blocked = [plan for plan in plans if plan.state.value == "BLOCKED"]
+    primary = actionable[:3]
+    alternates = actionable[3:5]
+    sections.append(
+        CardSection(
+            "**今日结论**\n"
+            f"可执行/等待 {len(actionable)}｜暂不交易 {len(blocked)}\n"
+            "未满足完整5分钟K确认时，不买、不追价。"
+        )
+    )
+
+    state_names = {
+        "CANDIDATE": "等待触发",
+        "ARMED": "等待回落",
+        "IN_ENTRY_ZONE": "进入观察区",
+        "ACTIONABLE": "条件已确认",
+        "AWAITING_FILL": "等待成交确认",
+    }
+
+    def plan_block(item: "ExecutionPlan") -> str:
+        expiry = item.expires_at.astimezone(_ET).strftime("%H:%M ET")
+        ownership = "已有持仓" if item.ticker in held else "未持仓新买候选"
+        qty = f"最多 {item.suggested_qty} 股" if item.suggested_qty is not None else "数量不可用"
+        return (
+            f"**{item.ticker} · {ownership} · {state_names.get(item.state.value, item.state.value)}**\n"
+            f"条件：09:45 ET 后进入 {item.currency} {item.entry_low:.2f}–{item.entry_high:.2f}，"
+            "且完整5分钟K确认趋势有效\n"
+            f"限价：不高于 {item.currency} {item.limit_price:.2f}｜{qty}｜约 {money(item.suggested_notional)}\n"
+            f"风控：止损 {item.stop_loss:.2f}｜止盈 {item.take_profit:.2f}｜有效至 {expiry}"
+        )
+
+    if primary:
+        sections.append(CardSection("**今天可做**\n\n" + "\n\n".join(plan_block(item) for item in primary)))
+    if alternates:
+        sections.append(CardSection("**次选观察**\n" + "\n".join(
+            f"{item.ticker} · {item.currency} {item.entry_low:.2f}–{item.entry_high:.2f} · 最多 {_fmt_qty(item.suggested_qty)}股"
+            for item in alternates
+        )))
+
+    if account is not None:
+        holding_lines = ["**持仓风险**"]
+        if account.positions_partial:
+            holding_lines.append("⚠ 持仓明细不完整：当前只按市值敞口控风险，不输出卖出股数。")
+        weighted = sorted(
+            (
+                position
+                for position in account.observed_positions
+                if position.weight_pct is not None
+            ),
+            key=lambda position: position.weight_pct or Decimal("0"),
+            reverse=True,
+        )[:3]
+        for position in weighted:
+            holding_lines.append(
+                f"{position.symbol}：仓位 {float(position.weight_pct or 0):.2f}%"
+                + (
+                    f"｜持仓盈亏 {float(position.pnl_pct):+.2f}%"
+                    if position.pnl_pct is not None
+                    else ""
+                )
+            )
+        if len(holding_lines) > 1:
+            sections.append(CardSection("\n".join(holding_lines)))
+
+    if blocked:
+        reason_names = {
+            "MAX_NEW_POSITIONS": "新仓数量上限",
+            "STOP_TOO_TIGHT": "止损过窄",
+            "STALE_ACCOUNT": "账户过期",
+            "STALE_QUOTE": "行情过期",
+            "CLUSTER_WEIGHT_EXCEEDED": "主题集中度超限",
+            "UNSUPPORTED_MARKET": "不支持的市场/币种",
+            "POSITION_QTY_UNKNOWN": "持仓数量缺失",
+            "PORTFOLIO_BUDGET_EXHAUSTED": "资金预算已用完",
+            "DAILY_RISK_EXHAUSTED": "当日风险预算已用完",
+            "DATA_STALE": "数据过期",
+        }
+        grouped: dict[str, list["ExecutionPlan"]] = defaultdict(list)
+        for item in blocked:
+            grouped[item.block_reason or "UNKNOWN"].append(item)
+        counts = Counter(item.block_reason or "UNKNOWN" for item in blocked)
+        lines = ["**暂不交易**"]
+        for reason, count in counts.items():
+            tickers = "、".join(
+                f"{item.ticker}({item.currency})" for item in grouped[reason][:3]
+            )
+            lines.append(f"{reason_names.get(reason, reason)}（{reason}）{count}：{tickers}")
+        sections.append(CardSection("\n".join(lines)))
+
+    if ai_summary:
+        sections.append(CardSection("**AI简评**\n" + ai_summary.strip()[:300]))
+    footer = (
+        "> 截图账户/观察模式，不自动下单。仅供观察，不构成投资建议。"
+        if source_label == "截图账户"
+        else _PAPER_FOOTER
+    )
+    sections.append(CardSection(footer))
+    body = "\n\n".join(section.content_md for section in sections)
+    title = (
+        f"🧭 今日行动计划 · {now.astimezone(_ET):%m/%d}"
+        if source_label == "截图账户"
+        else f"🧭 PAPER 今日行动计划 · {now.astimezone(_ET):%m/%d}"
+    )
     return Card(
         kind=CardKind.REPORT,
-        title="🧭 PAPER 执行计划 · 盘前",
-        body_md="\n".join(lines),
+        title=title,
+        body_md=body,
+        sections=tuple(sections),
     )
 
 
@@ -132,11 +243,11 @@ def plan_event_card(
         f"**止损**: {plan.stop_loss:.2f} · **止盈**: {plan.take_profit:.2f}",
         f"**时间**: {sgt} (SGT)",
         "",
-        _PAPER_FOOTER,
+        _ADVISORY_FOOTER,
     ]
     return Card(
         kind=CardKind.SIGNAL,
-        title=f"⚡ PAPER 执行提醒 · {plan.ticker} {event}",
+        title=f"⚡ 执行提醒 · {plan.ticker} {event}",
         body_md="\n".join(lines),
         url=f"https://www.tradingview.com/chart/?symbol={plan.ticker}",
     )

@@ -44,7 +44,7 @@ def test_scheduler_registers_all_jobs() -> None:
     assert "watch_deviation" not in ids
 
 
-def test_execution_jobs_run_at_0815_and_every_5min_us_hours() -> None:
+def test_execution_jobs_run_at_0815_and_watch_is_staggered_one_minute() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     jobs = {job.id: job for job in sched.get_jobs()}
 
@@ -53,7 +53,7 @@ def test_execution_jobs_run_at_0815_and_every_5min_us_hours() -> None:
     assert str(jobs["execution_brief"].trigger.timezone) == "America/New_York"
 
     watch = str(jobs["execution_watch"].trigger)
-    assert "hour='9-15'" in watch and "minute='*/5'" in watch
+    assert "hour='9-15'" in watch and "minute='1-56/5'" in watch
     assert str(jobs["execution_watch"].trigger.timezone) == "America/New_York"
     assert jobs["execution_watch"].misfire_grace_time == 240
 
@@ -77,6 +77,29 @@ def test_legacy_deviation_job_registered_only_when_enabled() -> None:
     assert "watch_deviation" in ids
     assert "execution_brief" not in ids
     assert "execution_watch" not in ids
+
+
+def test_action_card_only_suppresses_standalone_enrichment_push() -> None:
+    from conftest import make_test_settings
+    from quant_signal.config import NotifySettings
+
+    class Engine:
+        def __init__(self) -> None:
+            self.settings = make_test_settings(
+                notify=NotifySettings(action_card_only=True)
+            )
+            self.calls = 0
+
+        def run_enrichment(self, now: datetime) -> None:
+            self.calls += 1
+
+    engine = Engine()
+    sched = build_scheduler(engine=engine, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+
+    jobs["enrichment"].func()
+
+    assert engine.calls == 0
 
 
 def test_jobhealth_collects_missed_and_max_instances_events() -> None:

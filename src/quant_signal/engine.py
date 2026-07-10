@@ -105,6 +105,19 @@ class Engine:
             account_provider = AlpacaPaperAccountProvider(
                 settings.alpaca_key, settings.alpaca_secret
             )
+        if (
+            account_provider is None
+            and settings.execution_plan.enabled
+            and settings.execution_plan.account_provider == "screenshot"
+        ):
+            from quant_signal.screenshot_account import ScreenshotAccountProvider
+
+            account_provider = ScreenshotAccountProvider(
+                ledger,
+                max_age=timedelta(
+                    hours=settings.execution_plan.screenshot_max_age_hours
+                ),
+            )
         self.account_provider = account_provider
         momentum = settings.strategies["momentum_rotation"]
         breakout = settings.strategies["breakout_20d"]

@@ -35,6 +35,15 @@ class AccountSnapshot:
     buying_power: Decimal
     currency: str
     retrieved_at: datetime
+    source: str = "alpaca_paper"
+    market_value: Decimal | None = None
+    capital_limit: Decimal | None = None
+    max_financing_ratio: Decimal = Decimal("0")
+
+    @property
+    def max_gross_exposure(self) -> Decimal:
+        limit = self.capital_limit or self.equity
+        return limit * (Decimal("1") + self.max_financing_ratio)
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,24 @@ class BrokerPosition:
     side: str
     avg_entry_price: Decimal
     market_value: Decimal
+
+
+@dataclass(frozen=True)
+class ObservedPosition:
+    symbol: str
+    qty: Decimal | None
+    avg_entry_price: Decimal | None
+    current_price: Decimal | None
+    market_value: Decimal | None
+    estimated_market_value: Decimal | None
+    pnl: Decimal | None
+    pnl_pct: Decimal | None
+    weight_pct: Decimal | None
+    precision: str
+
+    @property
+    def exposure_value(self) -> Decimal:
+        return self.market_value or self.estimated_market_value or Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -65,6 +92,9 @@ class AccountState:
     positions: tuple[BrokerPosition, ...]
     open_orders: tuple[BrokerOrder, ...]
     recent_orders: tuple[BrokerOrder, ...]
+    observed_positions: tuple[ObservedPosition, ...] = ()
+    positions_partial: bool = False
+    reported_position_count: int | None = None
 
 
 class AccountProvider(Protocol):

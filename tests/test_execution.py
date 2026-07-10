@@ -3,10 +3,11 @@ from decimal import Decimal
 
 import pytest
 
-from quant_signal.account import AccountSnapshot, BrokerOrder, BrokerPosition
+from quant_signal.account import AccountSnapshot, BrokerOrder, BrokerPosition, ObservedPosition
 from quant_signal.config import ExecutionPlanSettings
 from quant_signal.execution import (
     ExecutionPlan,
+    PortfolioBudget,
     PlanCandidate,
     PlanObservation,
     PlanState,
@@ -77,6 +78,21 @@ def position(symbol: str, qty: str, value: str) -> BrokerPosition:
     )
 
 
+def observed_position(symbol: str, value: str, *, qty: str | None = None) -> ObservedPosition:
+    return ObservedPosition(
+        symbol=symbol,
+        qty=Decimal(qty) if qty is not None else None,
+        avg_entry_price=None,
+        current_price=None,
+        market_value=None,
+        estimated_market_value=Decimal(value),
+        pnl=None,
+        pnl_pct=None,
+        weight_pct=None,
+        precision="ESTIMATED",
+    )
+
+
 # ---------------------------------------------------------------- sizing
 
 
@@ -143,6 +159,89 @@ def test_candidate_without_target_weight_uses_risk_and_cap() -> None:
     )
     assert plan.gap_qty is None
     assert plan.suggested_qty == min(plan.risk_qty, plan.cash_qty, plan.cap_qty)
+
+
+def test_screenshot_account_sizes_aapl_from_6000_limit_and_twenty_percent_financing() -> None:
+    config = ExecutionPlanSettings(
+        cash_reserve=0,
+        capital_limit_usd=6000,
+        max_financing_ratio=0.20,
+    )
+    real = account(
+        account_id="screenshot:abc",
+        equity=Decimal("5995.52"),
+        cash=Decimal("1751.13"),
+        buying_power=Decimal("3474.15"),
+        source="screenshot",
+        market_value=Decimal("4244.15"),
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+
+    plan = build_plan(
+        candidate(
+            ticker="AAPL",
+            entry_low=307.26,
+            entry_high=316.22,
+            stop_loss=290.49,
+            take_profit=341.68,
+            target_weight=None,
+        ),
+        real,
+        (),
+        (),
+        config,
+        NOW,
+    )
+
+    assert plan.state is PlanState.CANDIDATE
+    assert plan.risk_qty == 1
+    assert plan.cash_qty == 9
+    assert plan.cap_qty == 2
+    assert plan.suggested_qty == 1
+    assert plan.suggested_notional == pytest.approx(316.22)
+
+
+def test_screenshot_account_uses_screenshot_staleness_window() -> None:
+    config = ExecutionPlanSettings(
+        screenshot_max_age_hours=72,
+        cash_reserve=0,
+    )
+    real = account(
+        retrieved_at=NOW - timedelta(hours=2),
+        source="screenshot",
+        capital_limit=Decimal("6000"),
+    )
+    plan = build_plan(candidate(), real, (), (), config, NOW)
+    assert plan.state is PlanState.CANDIDATE
+
+
+def test_non_usd_candidate_is_blocked_before_quantity_math() -> None:
+    plan = build_plan(
+        candidate(ticker="000660.KS", currency="KRW"),
+        account(),
+        (),
+        (),
+        CONFIG,
+        NOW,
+    )
+    assert plan.state is PlanState.BLOCKED
+    assert plan.block_reason == "UNSUPPORTED_MARKET"
+    assert plan.suggested_qty is None
+
+
+def test_unknown_existing_position_blocks_duplicate_buy() -> None:
+    plan = build_plan(
+        candidate(ticker="MU", target_weight=None),
+        account(source="screenshot", capital_limit=Decimal("6000")),
+        (),
+        (),
+        ExecutionPlanSettings(cash_reserve=0),
+        NOW,
+        observed_positions=(observed_position("MU", "991.06"),),
+    )
+    assert plan.state is PlanState.BLOCKED
+    assert plan.block_reason == "POSITION_QTY_UNKNOWN"
 
 
 def test_zero_quantity_blocks_plan() -> None:
@@ -239,6 +338,57 @@ def test_portfolio_limits_cap_new_positions_and_daily_risk() -> None:
     assert limited[0].state is PlanState.CANDIDATE
     assert limited[1].state is PlanState.BLOCKED
     assert limited[1].block_reason == "MAX_NEW_POSITIONS"
+
+
+def test_portfolio_limits_consume_notional_across_candidates() -> None:
+    config = ExecutionPlanSettings(
+        risk_per_trade=0.05,
+        max_daily_new_risk=0.10,
+        max_position_weight=0.50,
+        max_new_positions_per_day=3,
+        cash_reserve=0,
+    )
+    real = account(equity=Decimal("6000"), cash=Decimal("1000"), buying_power=Decimal("1000"))
+    plans = [
+        build_plan(candidate(ticker=ticker, target_weight=None), real, (), (), config, NOW)
+        for ticker in ("AAPL", "MSFT")
+    ]
+    budget = PortfolioBudget(
+        equity=Decimal("6000"),
+        cash=Decimal("1000"),
+        buying_power=Decimal("1000"),
+        current_exposure=Decimal("5000"),
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0"),
+    )
+    limited = apply_portfolio_limits(plans, real.equity, config, budget=budget)
+
+    assert sum(plan.suggested_notional or 0 for plan in limited) <= 1000
+    assert limited[0].suggested_qty == 9
+    assert limited[1].state is PlanState.BLOCKED
+    assert limited[1].block_reason == "PORTFOLIO_BUDGET_EXHAUSTED"
+
+
+def test_cluster_exposure_blocks_correlated_new_position() -> None:
+    config = ExecutionPlanSettings(
+        max_cluster_weight=0.35,
+        cash_reserve=0,
+    )
+    plan = build_plan(candidate(ticker="AMD", target_weight=None), account(), (), (), config, NOW)
+    budget = PortfolioBudget(
+        equity=Decimal("5995.52"),
+        cash=Decimal("1751.13"),
+        buying_power=Decimal("3474.15"),
+        current_exposure=Decimal("4244.15"),
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+        cluster_by_symbol={"AMD": "semiconductor_memory"},
+        cluster_exposure={"semiconductor_memory": Decimal("4244.15")},
+    )
+
+    limited = apply_portfolio_limits([plan], Decimal("5995.52"), config, budget=budget)
+    assert limited[0].state is PlanState.BLOCKED
+    assert limited[0].block_reason == "CLUSTER_WEIGHT_EXCEEDED"
 
 
 def test_portfolio_limits_block_when_daily_risk_exhausted() -> None:
