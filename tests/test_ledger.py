@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import json
 import math
 
 import pytest
@@ -149,3 +150,91 @@ def test_signal_rejects_non_finite_price() -> None:
             strategy_id="momentum_rotation",
             ts=NOW,
         )
+
+
+def test_scan_candidates_replace_and_round_trip(ledger: SignalLedger) -> None:
+    scan_date = date(2026, 7, 9)
+    ledger.replace_scan_candidates(
+        scan_date,
+        [
+            {
+                "ticker": "MSFT",
+                "rank": 2,
+                "score": 0.31,
+                "price": 510.0,
+                "extra": {"memberships": ["nasdaq100", "sp500"]},
+            },
+            {
+                "ticker": "AAPL",
+                "rank": 1,
+                "score": 0.42,
+                "price": 220.0,
+                "extra": {"entry_low": 215.0, "entry_high": 220.0},
+            },
+        ],
+        as_of=date(2026, 7, 8),
+    )
+
+    rows = ledger.latest_scan_candidates(scan_date)
+
+    assert [row["ticker"] for row in rows] == ["AAPL", "MSFT"]
+    assert rows[0]["scan_date"] == "2026-07-09"
+    assert rows[0]["as_of"] == "2026-07-08"
+    assert rows[0]["extra"] == {"entry_low": 215.0, "entry_high": 220.0}
+    assert json.loads(str(rows[1]["extra_json"])) == {
+        "memberships": ["nasdaq100", "sp500"]
+    }
+
+
+def test_scan_candidates_same_day_replace_removes_old_rows(
+    ledger: SignalLedger,
+) -> None:
+    scan_date = date(2026, 7, 9)
+    ledger.replace_scan_candidates(
+        scan_date,
+        [{"ticker": "OLD", "rank": 1, "score": 0.1, "price": 10.0}],
+        as_of=scan_date,
+    )
+    ledger.replace_scan_candidates(
+        scan_date,
+        [{"ticker": "NEW", "rank": 1, "score": 0.2, "price": 20.0}],
+        as_of=scan_date,
+    )
+
+    assert [row["ticker"] for row in ledger.latest_scan_candidates(scan_date)] == [
+        "NEW"
+    ]
+
+
+def test_latest_scan_candidates_uses_most_recent_scan_date(
+    ledger: SignalLedger,
+) -> None:
+    ledger.replace_scan_candidates(
+        date(2026, 7, 8),
+        [{"ticker": "OLD", "rank": 1, "score": 0.1, "price": 10.0}],
+        as_of=date(2026, 7, 7),
+    )
+    ledger.replace_scan_candidates(
+        date(2026, 7, 9),
+        [{"ticker": "NEW", "rank": 1, "score": 0.2, "price": 20.0}],
+        as_of=date(2026, 7, 8),
+    )
+
+    assert [row["ticker"] for row in ledger.latest_scan_candidates()] == ["NEW"]
+    assert [
+        row["ticker"]
+        for row in ledger.latest_scan_candidates(date(2026, 7, 8))
+    ] == ["OLD"]
+
+
+def test_scan_candidate_schema_is_additive_to_existing_signals(
+    ledger: SignalLedger,
+) -> None:
+    ledger.insert(sig("SPY"), pushed=True, now=NOW)
+    ledger.replace_scan_candidates(
+        NOW.date(),
+        [{"ticker": "AAPL", "rank": 1, "score": 0.5, "price": 220.0}],
+        as_of=NOW.date(),
+    )
+
+    assert [row["ticker"] for row in ledger.signals_on(NOW.date())] == ["SPY"]

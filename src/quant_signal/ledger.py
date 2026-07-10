@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -29,6 +30,18 @@ CREATE TABLE IF NOT EXISTS holdings (
     ticker TEXT NOT NULL,
     PRIMARY KEY (strategy_id, ticker)
 );
+CREATE TABLE IF NOT EXISTS scan_candidates (
+    scan_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    score REAL NOT NULL,
+    price REAL NOT NULL,
+    extra_json TEXT,
+    as_of TEXT NOT NULL,
+    PRIMARY KEY (scan_date, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_scan_candidates_latest
+    ON scan_candidates(scan_date DESC, rank ASC);
 """
 
 
@@ -158,3 +171,71 @@ class SignalLedger:
                 [(strategy_id, t) for t in tickers],
             )
             self._con.commit()
+
+    def replace_scan_candidates(
+        self,
+        scan_date: date,
+        candidates: Sequence[Mapping[str, object]],
+        *,
+        as_of: date | datetime,
+    ) -> None:
+        as_of_text = as_of.isoformat()
+        values: list[tuple[object, ...]] = []
+        for candidate in candidates:
+            raw_extra = candidate.get("extra_json", candidate.get("extra"))
+            if isinstance(raw_extra, str):
+                json.loads(raw_extra)
+                extra_json = raw_extra
+            elif raw_extra is None:
+                extra_json = None
+            else:
+                extra_json = json.dumps(raw_extra, ensure_ascii=False, sort_keys=True)
+            values.append(
+                (
+                    scan_date.isoformat(),
+                    str(candidate["ticker"]),
+                    int(str(candidate["rank"])),
+                    float(str(candidate["score"])),
+                    float(str(candidate["price"])),
+                    extra_json,
+                    as_of_text,
+                )
+            )
+        with self._lock:
+            self._con.execute(
+                "DELETE FROM scan_candidates WHERE scan_date = ?",
+                (scan_date.isoformat(),),
+            )
+            self._con.executemany(
+                "INSERT INTO scan_candidates "
+                "(scan_date, ticker, rank, score, price, extra_json, as_of) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
+            self._con.commit()
+
+    def latest_scan_candidates(
+        self, scan_date: date | None = None
+    ) -> list[dict[str, object]]:
+        with self._lock:
+            if scan_date is None:
+                row = self._con.execute(
+                    "SELECT max(scan_date) AS scan_date FROM scan_candidates"
+                ).fetchone()
+                selected = str(row["scan_date"]) if row and row["scan_date"] else None
+            else:
+                selected = scan_date.isoformat()
+            if selected is None:
+                return []
+            rows = self._con.execute(
+                "SELECT scan_date, ticker, rank, score, price, extra_json, as_of "
+                "FROM scan_candidates WHERE scan_date = ? ORDER BY rank, ticker",
+                (selected,),
+            ).fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            raw_extra = item.get("extra_json")
+            item["extra"] = json.loads(str(raw_extra)) if raw_extra else {}
+            output.append(item)
+        return output
