@@ -86,13 +86,12 @@ def _card_body(top: list[ScanResult], extra_note: str) -> str:
         f"5日量比 {first.volume_ratio:.1f}x",
         extra_note,
         "",
-        "| 排名 | 标的 | 综合分 | 60日动量 | 距20日高 | 量比 | 现价 |",
-        "|---|---|---|---|---|---|---|",
+        "**观察榜 Top5**",
     ]
-    for i, r in enumerate(top, start=1):
+    for i, r in enumerate(top[:5], start=1):
         lines.append(
-            f"| {i} | {r.ticker} | {r.score:+.2f} | {r.momentum_60d:+.1%} |"
-            f" {r.high20_proximity:.0%} | {r.volume_ratio:.1f}x | {r.price:.2f} |"
+            f"{i}. **{r.ticker}** · 分数 {r.score:+.2f} · 动量 {r.momentum_60d:+.1%} ·"
+            f" 近高 {r.high20_proximity:.0%} · 量比 {r.volume_ratio:.1f}x · {r.price:.2f}"
         )
     lines += [
         "",
@@ -288,15 +287,17 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
     engine.ledger.replace_scan_candidates(
         now.date(), candidate_rows, as_of=market_as_of
     )
-    delivered = engine.notifier.send(
-        report_card(
-            "指数发现池 · 今日候选",
-            _card_body(
-                top,
-                f"- 行情日 {market_as_of.isoformat()} · 覆盖率 {validation.coverage:.1%}",
-            ),
+    delivered = False
+    if not engine.settings.notify.action_card_only:
+        delivered = engine.notifier.send(
+            report_card(
+                "指数发现池 · 今日候选",
+                _card_body(
+                    top,
+                    f"- 行情日 {market_as_of.isoformat()} · 覆盖率 {validation.coverage:.1%}",
+                ),
+            )
         )
-    )
     first = top[0]
     engine.ledger.insert(
         Signal(
@@ -370,7 +371,11 @@ def _run_legacy_scan(engine: Engine, now: datetime) -> None:
         notes.append(f"止损参考 {stop:.2f}")
     note = "- " + " · ".join(notes) if notes else ""
 
-    delivered = engine.notifier.send(report_card("🔎 全市场扫描 · 今日Top1", _card_body(top, note)))
+    delivered = False
+    if not engine.settings.notify.action_card_only:
+        delivered = engine.notifier.send(
+            report_card("🔎 全市场扫描 · 今日Top1", _card_body(top, note))
+        )
     engine.ledger.insert(
         Signal(
             ticker=first.ticker,

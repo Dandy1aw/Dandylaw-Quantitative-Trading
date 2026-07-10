@@ -21,6 +21,7 @@ class NotifySettings(BaseModel):
     premarket_hourly_limit: int = 10
     intraday_hourly_limit: int = 10
     deviation_hourly_limit: int = 10
+    action_card_only: bool = False
 
     @model_validator(mode="after")
     def expand_legacy_hourly_limit(self) -> Self:

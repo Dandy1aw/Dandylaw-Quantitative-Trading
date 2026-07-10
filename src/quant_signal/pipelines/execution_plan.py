@@ -31,7 +31,6 @@ from quant_signal.execution import (
     portfolio_budget_from_state,
 )
 from quant_signal.notifier.cards import (
-    build_ai_briefing_card,
     execution_plan_card,
     plan_event_card,
 )
@@ -217,25 +216,31 @@ def _force_block(plan: ExecutionPlan, reason: str) -> ExecutionPlan:
     )
 
 
-def _maybe_send_ai_explanation(
-    engine: Engine, now: datetime, plans: list[ExecutionPlan]
-) -> None:
+def _ai_explanation(
+    engine: Engine,
+    now: datetime,
+    plans: list[ExecutionPlan],
+    account_state: AccountState | None,
+) -> str | None:
     cfg = engine.settings.ai_briefing
     if not cfg.enabled or not plans:
-        return
+        return None
+    account_label = (
+        account_state.snapshot.source.upper() if account_state is not None else "UNAVAILABLE"
+    )
     context = AIBriefingContext(
         as_of=now.isoformat(),
+        output_mode="action_card",
         execution_plans=[
-            {**plan_to_dict(plan), "account_label": "PAPER"} for plan in plans
+            {**plan_to_dict(plan), "account_label": account_label} for plan in plans
         ],
     )
     try:
         body = run_ai_briefing(cfg, context)
     except Exception as error:  # noqa: BLE001
         log.warning("execution_brief.ai_failed", error=str(error))
-        return
-    if body:
-        engine.notifier.send(build_ai_briefing_card(body))
+        return None
+    return body.strip()[:300] if body else None
 
 
 def run_daily(engine: Engine, now: datetime) -> None:
@@ -291,8 +296,10 @@ def run_daily(engine: Engine, now: datetime) -> None:
         )
     for plan in plans:
         engine.ledger.upsert_execution_plan(plan)
-    engine.notifier.send(execution_plan_card(account_state, plans, now))
-    _maybe_send_ai_explanation(engine, now, plans)
+    ai_summary = _ai_explanation(engine, now, plans, account_state)
+    engine.notifier.send(
+        execution_plan_card(account_state, plans, now, ai_summary=ai_summary)
+    )
     log.info(
         "execution_brief.done",
         plans=len(plans),

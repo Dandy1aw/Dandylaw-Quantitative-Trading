@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ class AIBriefingContext(BaseModel):
     notes: list[str] = Field(default_factory=list)
     analysis_cards: list[dict[str, str]] = Field(default_factory=list)
     execution_plans: list[dict[str, object]] = Field(default_factory=list)
+    output_mode: Literal["full", "action_card"] = "full"
 
 
 def _is_secret_like(value: str) -> bool:
@@ -65,7 +66,15 @@ def _sanitize(value: Any) -> Any:
 def build_ai_briefing_prompt(
     context: AIBriefingContext, max_chars: int = 6000
 ) -> str:
-    instructions = (
+    if context.output_mode == "action_card":
+        instructions = (
+            "你是量化交易系统的行动卡分析员。只分析本 prompt 输入，不运行命令、不读文件、不联网。"
+            "结构化执行计划中的价格、数量、止损和止盈不可改写或补算。"
+            "只输出主线、最大风险、今日倾向三点，总计最多300个中文字符；不要表格、不要复述全部标的。"
+            "必须保留：仅供观察，不构成投资建议。\n\n输入数据：\n"
+        )
+    else:
+        instructions = (
         "你是量化交易系统的盘前早报交易计划分析员。请先阅读 analysis_cards 里的"
         "盘前早报和动量榜单正文，再结合 signals/ranking/holdings 输出中文观点。"
         "不要运行命令，不要读取文件，不要联网检索；只分析本 prompt 输入的数据。"
@@ -80,7 +89,7 @@ def build_ai_briefing_prompt(
         "并明确标注“按参考价估算/数据不足”。SELL 信号应重点给出卖出/减仓价位和回补观察条件。\n"
         "必须保留这句话：仅供观察，不构成投资建议。\n\n"
         "输入数据：\n"
-    )
+        )
     execution_rules = (
         "执行计划硬约束：execution_plans 中的 limit_price、suggested_qty、"
         "suggested_notional、stop_loss、take_profit 是确定性规则计算的结构化数据，"

@@ -19,11 +19,17 @@ class CardKind(str, Enum):
 
 
 @dataclass(frozen=True)
+class CardSection:
+    content_md: str
+
+
+@dataclass(frozen=True)
 class Card:
     kind: CardKind
     title: str
     body_md: str
     url: str | None = None
+    sections: tuple[CardSection, ...] = ()
 
 
 class Notifier(Protocol):
@@ -47,6 +53,7 @@ class ConsoleNotifier:
                 "title": card.title,
                 "body_md": card.body_md,
                 "url": card.url,
+                "sections": [section.content_md for section in card.sections],
             }
             with self._jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")

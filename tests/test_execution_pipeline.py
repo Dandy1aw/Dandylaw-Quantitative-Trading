@@ -16,7 +16,12 @@ from quant_signal.account import (
     BrokerPosition,
     ObservedPosition,
 )
-from quant_signal.config import ExecutionPlanSettings, IndexUniverseSettings
+from quant_signal.config import (
+    AIBriefingSettings,
+    ExecutionPlanSettings,
+    IndexUniverseSettings,
+    NotifySettings,
+)
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine
 from quant_signal.execution import PlanCandidate, PlanState, build_plan
@@ -289,14 +294,14 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     body = card.body_md  # type: ignore[attr-defined]
     assert "PAPER" in card.title or "PAPER" in body  # type: ignore[attr-defined]
     # 账户区
-    assert "100000" in body and "50000" in body
+    assert "$100,000.00" in body and "$50,000.00" in body
     assert "MSFT" in body  # 持仓
     assert "NVDA" in body  # 未成交订单
     assert "o-0" in body or "400" in body  # 最近成交
     # 计划区: 限价/股数/金额/止损/止盈/有效期
     assert "102" in body and "95" in body and "115" in body
     assert "71" in body  # risk_qty=floor(500/7)
-    assert "7242" in body  # notional
+    assert "$7,242.00" in body  # notional
     assert "15:45" in body  # 有效期
     # 账户时间
     assert BRIEF_NOW.astimezone().strftime("%H:%M") in body or "08:15" in body or "账户时间" in body
@@ -320,8 +325,8 @@ def test_daily_brief_without_account_shows_no_quantity(tmp_path: Path) -> None:
     assert len(notifier.cards) == 1
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "NO_ACCOUNT" in body or "账户数据不足" in body
-    # 观察价位仍在
-    assert "102" in body
+    # 无账户时只汇总阻断原因，不伪造数量
+    assert "NO_ACCOUNT" in body
     # 计划落库为 BLOCKED, 不产生可执行数量
     assert ledger.active_execution_plans() == []
 
@@ -463,6 +468,39 @@ def test_daily_brief_propagates_currency_and_blocks_non_usd_quantity(tmp_path: P
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "UNSUPPORTED_MARKET" in body
     assert "KRW" in body
+
+
+def test_daily_brief_embeds_one_short_ai_summary_in_same_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_ai(settings, context):  # type: ignore[no-untyped-def]
+        seen["mode"] = context.output_mode
+        seen["label"] = context.execution_plans[0]["account_label"]
+        return "观" * 500
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.execution_plan.run_ai_briefing", fake_ai
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=ExecutionPlanSettings(
+            enabled=True, account_provider="screenshot", cash_reserve=0
+        ),
+        ai_briefing=AIBriefingSettings(enabled=True),
+        notify=NotifySettings(action_card_only=True),
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert len(notifier.cards) == 1
+    assert seen == {"mode": "action_card", "label": "SCREENSHOT"}
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "AI简评" in body
+    assert "观" * 301 not in body
 
 
 # ---------------------------------------------------------------- intraday watch

@@ -283,3 +283,14 @@ def test_prompt_without_execution_plans_omits_execution_rules() -> None:
     context = AIBriefingContext(as_of="2026-07-10T12:15:00+00:00")
     prompt = build_ai_briefing_prompt(context)
     assert "execution_plans" not in prompt
+
+
+def test_action_card_ai_prompt_requires_three_short_points() -> None:
+    context = AIBriefingContext(
+        as_of="2026-07-10T12:15:00+00:00",
+        output_mode="action_card",
+        execution_plans=[{"ticker": "AAPL", "suggested_qty": 1}],
+    )
+    prompt = build_ai_briefing_prompt(context)
+    assert "最多300个中文字符" in prompt
+    assert "主线、最大风险、今日倾向" in prompt

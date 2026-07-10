@@ -247,7 +247,7 @@ def test_execution_plan_card_shows_paper_label_and_block_reasons() -> None:
     body = card.body_md
     assert "AAPL" in body and "MSFT" in body
     assert "102" in body and "95" in body and "115" in body
-    assert "71" in body and "7242" in body
+    assert "71" in body and "$7,242.00" in body
     assert "STALE_ACCOUNT" in body
     assert "账户数据不足" in body  # account=None 时的提示
 
