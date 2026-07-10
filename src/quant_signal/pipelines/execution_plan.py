@@ -330,10 +330,28 @@ def _complete_bars(bars: pd.DataFrame, now: datetime) -> pd.DataFrame:
     return bars[bars.index.get_level_values("ts") <= cutoff]
 
 
+def _deliver_plan_events(engine: Engine, now: datetime) -> int:
+    delivered = 0
+    for event in engine.ledger.due_plan_events(now):
+        card = event["card"]
+        if engine.notifier.send(card):  # type: ignore[arg-type]
+            engine.ledger.mark_plan_event_sent(str(event["event_key"]), now=now)
+            delivered += 1
+        else:
+            engine.ledger.mark_plan_event_failed(
+                str(event["event_key"]),
+                "notifier returned false",
+                now=now,
+                retry_at=now + timedelta(minutes=1),
+            )
+    return delivered
+
+
 def run_watch(engine: Engine, now: datetime) -> None:
     cfg = engine.settings.execution_plan
     if not cfg.enabled:
         return
+    events = _deliver_plan_events(engine, now)
     plans = engine.ledger.active_execution_plans()
     if not plans:
         return
@@ -360,7 +378,6 @@ def run_watch(engine: Engine, now: datetime) -> None:
         except Exception as error:  # noqa: BLE001
             log.warning("execution_watch.account_failed", error=str(error))
 
-    events = 0
     for plan in plans:
         try:
             sub = bars.xs(plan.ticker, level="ticker").sort_index()
@@ -390,13 +407,15 @@ def run_watch(engine: Engine, now: datetime) -> None:
             continue
         if transition.state is not plan.state:
             engine.ledger.upsert_execution_plan(apply_transition(plan, transition))
-        if transition.event is not None and engine.ledger.record_plan_event(
-            plan.plan_id, plan.plan_version, transition.event, now=now
-        ):
-            engine.notifier.send(
+        if transition.event is not None:
+            engine.ledger.queue_plan_event(
+                plan.plan_id,
+                plan.plan_version,
+                transition.event,
                 plan_event_card(
                     plan, transition.event, price=observation.price, at=now
-                )
+                ),
+                now=now,
             )
-            events += 1
+    events += _deliver_plan_events(engine, now)
     log.info("execution_watch.done", plans=len(plans), events=events)

@@ -15,12 +15,13 @@ from quant_signal.execution import (
     plan_from_dict,
     plan_to_dict,
 )
+from quant_signal.notifier.base import Card, card_from_dict, card_to_dict
 from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -170,6 +171,22 @@ CREATE TABLE IF NOT EXISTS observed_positions (
     PRIMARY KEY(import_id, symbol),
     FOREIGN KEY(import_id) REFERENCES portfolio_imports(import_id)
 );
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    event_key TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT NOT NULL,
+    last_error TEXT,
+    sent_at TEXT,
+    UNIQUE(plan_id, plan_version, event_type)
+);
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
+    ON notification_outbox(status, next_retry_at);
 """
 
 
@@ -704,10 +721,97 @@ class SignalLedger:
                 self._con.rollback()
                 return False
 
+    def queue_plan_event(
+        self,
+        plan_id: str,
+        plan_version: int,
+        event_type: str,
+        card: Card,
+        *,
+        now: datetime,
+    ) -> bool:
+        event_key = f"{plan_id}:{plan_version}:{event_type}"
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        payload = json.dumps(card_to_dict(card), ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO notification_outbox"
+                    " (event_key, plan_id, plan_version, event_type, status, payload_json,"
+                    " created_at, attempts, next_retry_at)"
+                    " VALUES (?, ?, ?, ?, 'PENDING', ?, ?, 0, ?)",
+                    (
+                        event_key,
+                        plan_id,
+                        plan_version,
+                        event_type,
+                        payload,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+
+    def due_plan_events(self, now: datetime) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM notification_outbox"
+                " WHERE status = 'PENDING' AND next_retry_at <= ?"
+                " ORDER BY created_at, event_key",
+                (now.astimezone(timezone.utc).isoformat(),),
+            ).fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            item["card"] = card_from_dict(json.loads(str(item.pop("payload_json"))))
+            output.append(item)
+        return output
+
+    def mark_plan_event_failed(
+        self,
+        event_key: str,
+        error: str,
+        *,
+        now: datetime,
+        retry_at: datetime,
+    ) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET attempts = attempts + 1,"
+                " last_error = ?, next_retry_at = ?"
+                " WHERE event_key = ? AND status = 'PENDING'",
+                (
+                    error[:1000],
+                    retry_at.astimezone(timezone.utc).isoformat(),
+                    event_key,
+                ),
+            )
+            self._con.commit()
+
+    def mark_plan_event_sent(self, event_key: str, *, now: datetime) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE notification_outbox SET status = 'SENT', sent_at = ?,"
+                " last_error = NULL WHERE event_key = ? AND status = 'PENDING'",
+                (now.astimezone(timezone.utc).isoformat(), event_key),
+            )
+            self._con.commit()
+
     def event_was_delivered(
         self, plan_id: str, plan_version: int, event_type: str
     ) -> bool:
         with self._lock:
+            outbox_row = self._con.execute(
+                "SELECT status FROM notification_outbox WHERE plan_id = ?"
+                " AND plan_version = ? AND event_type = ?",
+                (plan_id, plan_version, event_type),
+            ).fetchone()
+            if outbox_row is not None:
+                return str(outbox_row["status"]) == "SENT"
             row = self._con.execute(
                 "SELECT 1 FROM plan_events WHERE plan_id = ? AND plan_version = ?"
                 " AND event_type = ?",

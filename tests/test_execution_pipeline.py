@@ -33,12 +33,13 @@ MARKET_AS_OF = date(2026, 7, 9)
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, success: bool = True) -> None:
         self.cards: list[object] = []
+        self.success = success
 
     def send(self, card: object) -> bool:
         self.cards.append(card)
-        return True
+        return self.success
 
 
 class FakeAccountProvider:
@@ -542,6 +543,32 @@ def test_watch_confirmed_entry_emits_actionable_once(tmp_path: Path) -> None:
     # 同样的观测再跑一次: 状态不变, 不再推送
     engine.run_execution_watch(WATCH_NOW + timedelta(minutes=5))
     assert len(notifier.cards) == 1
+
+
+def test_watch_retries_failed_notification_from_outbox(tmp_path: Path) -> None:
+    bars = _intraday_frame("AAPL", [103.0, 101.5, 101.0], WATCH_NOW)
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FakeIntradaySource(bars),
+    )
+    notifier.success = False
+    seed_active_plan(ledger, state=PlanState.IN_ENTRY_ZONE)
+
+    engine.run_execution_watch(WATCH_NOW)
+
+    assert len(notifier.cards) == 1
+    assert ledger.event_was_delivered(
+        ledger.active_execution_plans()[0].plan_id, 1, "ACTIONABLE"
+    ) is False
+
+    notifier.success = True
+    engine.run_execution_watch(WATCH_NOW + timedelta(minutes=5))
+
+    assert len(notifier.cards) == 2
+    assert ledger.event_was_delivered(
+        ledger.active_execution_plans()[0].plan_id, 1, "ACTIONABLE"
+    ) is True
 
 
 def test_watch_stop_breach_invalidates_and_notifies(tmp_path: Path) -> None:

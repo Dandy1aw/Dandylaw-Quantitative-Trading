@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Mapping, Protocol
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -34,6 +34,27 @@ class Card:
 
 class Notifier(Protocol):
     def send(self, card: Card) -> bool: ...
+
+
+def card_to_dict(card: Card) -> dict[str, object]:
+    return {
+        "kind": card.kind.value,
+        "title": card.title,
+        "body_md": card.body_md,
+        "url": card.url,
+        "sections": [section.content_md for section in card.sections],
+    }
+
+
+def card_from_dict(payload: Mapping[str, Any]) -> Card:
+    raw_sections = payload.get("sections") or []
+    return Card(
+        kind=CardKind(str(payload["kind"])),
+        title=str(payload["title"]),
+        body_md=str(payload["body_md"]),
+        url=str(payload["url"]) if payload.get("url") else None,
+        sections=tuple(CardSection(str(content)) for content in raw_sections),
+    )
 
 
 class ConsoleNotifier:
