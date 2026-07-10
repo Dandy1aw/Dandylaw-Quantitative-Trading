@@ -196,6 +196,30 @@ def test_sp500_parser_requires_recognizable_equity_classification() -> None:
         )
 
 
+def test_sp500_identifier_sector_branch_rejects_non_equity_sectors() -> None:
+    rows = [
+        ["Fund Name:", "SPDR S&P 500 ETF Trust", None, None],
+        ["Holdings:", "As of 09-Jul-2026", None, None],
+        [None, None, None, None],
+        ["Name", "Ticker", "Identifier", "Sector"],
+        ["Apple Inc", "AAPL", "US0378331005", "Information Technology"],
+        ["Microsoft Corp", "MSFT", "US5949181045", "Information Technology"],
+        ["Settlement Position", "USD", "USD-ID", "Cash"],
+        ["Index Contract", "ESU6", "ES-ID", "Derivatives"],
+        ["Residual Bucket", "UNK", "UNK-ID", "Unknown"],
+    ]
+    output = BytesIO()
+    pd.DataFrame(rows).to_excel(
+        output, index=False, header=False, engine="openpyxl"
+    )
+
+    parsed = parse_sp500_workbook(
+        output.getvalue(), fallback_as_of=NOW.date()
+    )
+
+    assert parsed.members == frozenset({"AAPL", "MSFT"})
+
+
 @pytest.mark.parametrize(
     "members",
     [

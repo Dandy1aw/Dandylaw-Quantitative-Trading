@@ -32,6 +32,19 @@ _COUNT_RANGES: dict[str, tuple[int, int]] = {
 _ALIASES_TO_CANONICAL = {"BRK-B": "BRK.B", "BF-B": "BF.B"}
 _ALIASES_TO_YFINANCE = {"BRK.B": "BRK-B", "BF.B": "BF-B"}
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,4}(?:\.[A-Z])?$")
+_EQUITY_SECTORS = {
+    "communication services",
+    "consumer discretionary",
+    "consumer staples",
+    "energy",
+    "financials",
+    "health care",
+    "industrials",
+    "information technology",
+    "materials",
+    "real estate",
+    "utilities",
+}
 _HTTP_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "User-Agent": "Mozilla/5.0 quant-signal/index-universe",
@@ -351,6 +364,9 @@ def parse_sp500_workbook(
                 or pd.isna(sector)
                 or not str(sector).strip()
             ):
+                continue
+            normalized_sector = " ".join(str(sector).casefold().split())
+            if normalized_sector not in _EQUITY_SECTORS:
                 continue
         if name_column is not None:
             name = str(row.iloc[name_column]).lower()
