@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import math
-from typing import Sequence
+from typing import Sequence, cast
 from zoneinfo import ZoneInfo
 
 from quant_signal.account import AccountSnapshot, BrokerOrder, BrokerPosition
@@ -39,9 +39,10 @@ class PlanState(str, Enum):
     BLOCKED = "BLOCKED"
 
 
-_TERMINAL_STATES = frozenset(
+TERMINAL_STATES = frozenset(
     {PlanState.INVALIDATED, PlanState.EXPIRED, PlanState.CLOSED, PlanState.BLOCKED}
 )
+_TERMINAL_STATES = TERMINAL_STATES
 _PRE_ENTRY_STATES = frozenset(
     {
         PlanState.CANDIDATE,
@@ -428,3 +429,71 @@ def advance_plan(
 
 def apply_transition(plan: ExecutionPlan, transition: PlanTransition) -> ExecutionPlan:
     return dataclasses.replace(plan, state=transition.state)
+
+
+def plan_to_dict(plan: ExecutionPlan) -> dict[str, object]:
+    payload = dataclasses.asdict(plan)
+    payload["plan_date"] = plan.plan_date.isoformat()
+    payload["valid_from"] = plan.valid_from.isoformat()
+    payload["expires_at"] = plan.expires_at.isoformat()
+    payload["quote_at"] = plan.quote_at.isoformat()
+    payload["account_at"] = (
+        plan.account_at.isoformat() if plan.account_at is not None else None
+    )
+    payload["state"] = plan.state.value
+    payload["source_strategies"] = list(plan.source_strategies)
+    payload["memberships"] = list(plan.memberships)
+    return payload
+
+
+def plan_from_dict(payload: dict[str, object]) -> ExecutionPlan:
+    def _float(key: str) -> float:
+        return float(str(payload[key]))
+
+    def _opt_int(key: str) -> int | None:
+        value = payload.get(key)
+        return int(str(value)) if value is not None else None
+
+    account_at = payload.get("account_at")
+    target_weight = payload.get("target_weight")
+    score = payload.get("score")
+    suggested_notional = payload.get("suggested_notional")
+    return ExecutionPlan(
+        plan_id=str(payload["plan_id"]),
+        plan_version=int(str(payload["plan_version"])),
+        plan_date=date.fromisoformat(str(payload["plan_date"])),
+        ticker=str(payload["ticker"]),
+        currency=str(payload["currency"]),
+        source_strategies=tuple(
+            str(item) for item in cast("list[object]", payload["source_strategies"])
+        ),
+        memberships=tuple(
+            str(item) for item in cast("list[object]", payload["memberships"])
+        ),
+        score=float(str(score)) if score is not None else None,
+        entry_low=_float("entry_low"),
+        entry_high=_float("entry_high"),
+        limit_price=_float("limit_price"),
+        stop_loss=_float("stop_loss"),
+        take_profit=_float("take_profit"),
+        target_weight=float(str(target_weight)) if target_weight is not None else None,
+        gap_qty=_opt_int("gap_qty"),
+        risk_qty=_opt_int("risk_qty"),
+        cash_qty=_opt_int("cash_qty"),
+        cap_qty=_opt_int("cap_qty"),
+        suggested_qty=_opt_int("suggested_qty"),
+        suggested_notional=(
+            float(str(suggested_notional)) if suggested_notional is not None else None
+        ),
+        valid_from=datetime.fromisoformat(str(payload["valid_from"])),
+        expires_at=datetime.fromisoformat(str(payload["expires_at"])),
+        quote_at=datetime.fromisoformat(str(payload["quote_at"])),
+        account_at=(
+            datetime.fromisoformat(str(account_at)) if account_at is not None else None
+        ),
+        state=PlanState(str(payload["state"])),
+        block_reason=(
+            str(payload["block_reason"]) if payload.get("block_reason") is not None else None
+        ),
+        rule_version=str(payload["rule_version"]),
+    )

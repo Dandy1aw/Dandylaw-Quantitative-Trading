@@ -1,4 +1,6 @@
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 import json
 import math
@@ -6,6 +8,13 @@ import sqlite3
 
 import pytest
 
+from quant_signal.account import (
+    AccountSnapshot,
+    AccountState,
+    BrokerOrder,
+    BrokerPosition,
+)
+from quant_signal.execution import ExecutionPlan, PlanState
 from quant_signal.ledger import SignalLedger
 from quant_signal.strategies.base import Direction, Signal, dedup_key
 
@@ -282,3 +291,195 @@ def test_scan_candidate_replace_rolls_back_on_insert_failure(
     assert [row["ticker"] for row in ledger.latest_scan_candidates(scan_date)] == [
         "OLD"
     ]
+
+
+# ---------------------------------------------------------------- execution ledger
+
+
+def make_execution_plan(
+    ticker: str = "AAPL",
+    state: PlanState = PlanState.CANDIDATE,
+    plan_id: str = "plan-1",
+    plan_version: int = 1,
+) -> ExecutionPlan:
+    return ExecutionPlan(
+        plan_id=plan_id,
+        plan_version=plan_version,
+        plan_date=date(2026, 7, 10),
+        ticker=ticker,
+        currency="USD",
+        source_strategies=("index_scan",),
+        memberships=("sp500",),
+        score=0.8,
+        entry_low=100.0,
+        entry_high=102.0,
+        limit_price=102.0,
+        stop_loss=95.0,
+        take_profit=115.0,
+        target_weight=0.1,
+        gap_qty=98,
+        risk_qty=71,
+        cash_qty=294,
+        cap_qty=117,
+        suggested_qty=71,
+        suggested_notional=7242.0,
+        valid_from=NOW,
+        expires_at=NOW + timedelta(hours=6),
+        quote_at=NOW,
+        account_at=NOW,
+        state=state,
+        block_reason=None,
+        rule_version="exec-v1",
+    )
+
+
+def account_state(retrieved_at: datetime = NOW) -> AccountState:
+    snapshot = AccountSnapshot(
+        account_id="paper-1",
+        equity=Decimal("100000.25"),
+        cash=Decimal("40000.10"),
+        buying_power=Decimal("80000.20"),
+        currency="USD",
+        retrieved_at=retrieved_at,
+    )
+    position = BrokerPosition(
+        symbol="AAPL",
+        qty=Decimal("50"),
+        side="long",
+        avg_entry_price=Decimal("100.5"),
+        market_value=Decimal("5100"),
+    )
+    order = BrokerOrder(
+        order_id="order-1",
+        symbol="MSFT",
+        side="buy",
+        status="new",
+        qty=Decimal("5"),
+        limit_price=Decimal("430.25"),
+        submitted_at=retrieved_at,
+        filled_qty=Decimal("0"),
+        filled_avg_price=None,
+    )
+    return AccountState(
+        snapshot=snapshot,
+        positions=(position,),
+        open_orders=(order,),
+        recent_orders=(),
+    )
+
+
+def test_existing_database_upgrades_without_losing_signals(tmp_path: Path) -> None:
+    db_path = tmp_path / "signals.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE signals (id INTEGER PRIMARY KEY, ts TEXT NOT NULL,"
+        " ticker TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL,"
+        " strategy_id TEXT NOT NULL, reason TEXT, suggested_weight REAL,"
+        " pushed INTEGER DEFAULT 0, pushed_at TEXT, dedup_key TEXT, extra_json TEXT)"
+    )
+    con.execute("CREATE TABLE holdings (strategy_id TEXT NOT NULL, ticker TEXT NOT NULL, PRIMARY KEY (strategy_id, ticker))")
+    con.execute(
+        "INSERT INTO signals (ts, ticker, direction, price, strategy_id, pushed, pushed_at)"
+        " VALUES (?, 'SPY', 'BUY', 100.0, 'momentum_rotation', 1, ?)",
+        (NOW.isoformat(), NOW.isoformat()),
+    )
+    con.execute("INSERT INTO holdings (strategy_id, ticker) VALUES ('m', 'SPY')")
+    con.commit()
+    con.close()
+
+    ledger = SignalLedger(db_path)
+    assert [row["ticker"] for row in ledger.signals_on(NOW.date())] == ["SPY"]
+    assert ledger.get_holdings("m") == ["SPY"]
+    assert ledger.schema_version() >= 2
+    ledger.upsert_execution_plan(make_execution_plan())
+    assert len(ledger.active_execution_plans()) == 1
+
+
+def test_strategy_targets_are_separate_from_legacy_holdings(
+    ledger: SignalLedger,
+) -> None:
+    ledger.set_holdings("momentum_rotation", ["SPY"])
+    ledger.set_strategy_targets(
+        "momentum_rotation", {"QQQ": 0.5, "IWM": 0.25}, as_of=NOW
+    )
+
+    assert ledger.get_holdings("momentum_rotation") == ["SPY"]
+    assert ledger.get_strategy_targets("momentum_rotation") == {
+        "QQQ": 0.5,
+        "IWM": 0.25,
+    }
+
+    ledger.set_strategy_targets("momentum_rotation", {"QQQ": 1.0}, as_of=NOW)
+    assert ledger.get_strategy_targets("momentum_rotation") == {"QQQ": 1.0}
+    assert ledger.get_holdings("momentum_rotation") == ["SPY"]
+
+
+def test_replace_account_state_keeps_only_latest_positions_and_orders(
+    ledger: SignalLedger,
+) -> None:
+    ledger.replace_account_state(account_state())
+    later = account_state(retrieved_at=NOW + timedelta(minutes=5))
+    ledger.replace_account_state(later)
+
+    snapshot = ledger.latest_account_snapshot()
+    assert snapshot is not None
+    assert snapshot["equity"] == "100000.25"
+    assert snapshot["retrieved_at"] == (NOW + timedelta(minutes=5)).isoformat()
+
+    positions = ledger.broker_positions()
+    assert len(positions) == 1
+    assert positions[0]["symbol"] == "AAPL"
+    assert positions[0]["qty"] == "50"
+
+    orders = ledger.broker_orders()
+    assert len(orders) == 1
+    assert orders[0]["order_id"] == "order-1"
+
+
+def test_empty_ledger_has_no_account_snapshot(ledger: SignalLedger) -> None:
+    assert ledger.latest_account_snapshot() is None
+    assert ledger.broker_positions() == []
+    assert ledger.broker_orders() == []
+
+
+def test_execution_plan_upserts_by_id_and_version(ledger: SignalLedger) -> None:
+    plan = make_execution_plan()
+    ledger.upsert_execution_plan(plan)
+    ledger.upsert_execution_plan(replace(plan, state=PlanState.ARMED))
+
+    active = ledger.active_execution_plans()
+    assert len(active) == 1
+    assert active[0].state is PlanState.ARMED
+    assert active[0] == replace(plan, state=PlanState.ARMED)
+
+    ledger.upsert_execution_plan(replace(plan, plan_version=2))
+    assert len(ledger.active_execution_plans()) == 1
+    assert ledger.active_execution_plans()[0].plan_version == 2
+
+
+def test_active_execution_plans_exclude_terminal_states(
+    ledger: SignalLedger,
+) -> None:
+    ledger.upsert_execution_plan(make_execution_plan(plan_id="p1", ticker="AAPL"))
+    ledger.upsert_execution_plan(
+        make_execution_plan(plan_id="p2", ticker="MSFT", state=PlanState.EXPIRED)
+    )
+    ledger.upsert_execution_plan(
+        make_execution_plan(plan_id="p3", ticker="NVDA", state=PlanState.BLOCKED)
+    )
+
+    active = ledger.active_execution_plans()
+    assert [plan.ticker for plan in active] == ["AAPL"]
+
+
+def test_plan_events_reject_duplicate_successful_delivery(
+    ledger: SignalLedger,
+) -> None:
+    assert ledger.record_plan_event("p1", 1, "ACTIONABLE", now=NOW) is True
+    assert ledger.event_was_delivered("p1", 1, "ACTIONABLE") is True
+    assert ledger.record_plan_event("p1", 1, "ACTIONABLE", now=NOW) is False
+
+    # 不同版本或不同事件类型仍可推送
+    assert ledger.record_plan_event("p1", 2, "ACTIONABLE", now=NOW) is True
+    assert ledger.record_plan_event("p1", 1, "EXPIRED", now=NOW) is True
+    assert ledger.event_was_delivered("p1", 1, "INVALIDATED") is False

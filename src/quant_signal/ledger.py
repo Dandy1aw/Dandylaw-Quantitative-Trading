@@ -7,7 +7,16 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from quant_signal.account import AccountState
+from quant_signal.execution import (
+    TERMINAL_STATES,
+    ExecutionPlan,
+    plan_from_dict,
+    plan_to_dict,
+)
 from quant_signal.strategies.base import Signal, dedup_key
+
+_SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -48,6 +57,68 @@ CREATE TABLE IF NOT EXISTS scan_candidate_runs (
 );
 INSERT OR IGNORE INTO scan_candidate_runs (scan_date, as_of)
     SELECT scan_date, max(as_of) FROM scan_candidates GROUP BY scan_date;
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS strategy_targets (
+    strategy_id TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    target_weight REAL NOT NULL,
+    as_of TEXT NOT NULL,
+    PRIMARY KEY (strategy_id, ticker)
+);
+CREATE TABLE IF NOT EXISTS account_snapshots (
+    id INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    equity TEXT NOT NULL,          -- Decimal 以 TEXT 保存, 避免浮点损失
+    cash TEXT NOT NULL,
+    buying_power TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_account_snapshots_time
+    ON account_snapshots(retrieved_at DESC);
+CREATE TABLE IF NOT EXISTS broker_positions (
+    symbol TEXT PRIMARY KEY,
+    qty TEXT NOT NULL,
+    side TEXT NOT NULL,
+    avg_entry_price TEXT NOT NULL,
+    market_value TEXT NOT NULL,
+    retrieved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS broker_orders (
+    order_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    status TEXT NOT NULL,
+    qty TEXT,
+    limit_price TEXT,
+    submitted_at TEXT,
+    filled_qty TEXT NOT NULL,
+    filled_avg_price TEXT,
+    bucket TEXT NOT NULL,          -- open / recent
+    retrieved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS execution_plans (
+    plan_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    plan_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    state TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plan_id, plan_version)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_plans_date_state
+    ON execution_plans(plan_date, state);
+CREATE TABLE IF NOT EXISTS plan_events (
+    plan_id TEXT NOT NULL,
+    plan_version INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (plan_id, plan_version, event_type)
+);
 """
 
 
@@ -60,6 +131,20 @@ class SignalLedger:
         self._lock = threading.Lock()
         with self._lock:
             self._con.executescript(_SCHEMA)
+            self._con.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                " WHERE CAST(schema_meta.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+                (str(_SCHEMA_VERSION),),
+            )
+            self._con.commit()
+
+    def schema_version(self) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+        return int(row["value"]) if row else 0
 
     def insert(self, s: Signal, pushed: bool, now: datetime | None = None) -> int:
         pushed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -254,3 +339,205 @@ class SignalLedger:
             item["extra"] = json.loads(str(raw_extra)) if raw_extra else {}
             output.append(item)
         return output
+
+    # ------------------------------------------------------------ execution ledger
+
+    def set_strategy_targets(
+        self, strategy_id: str, targets: Mapping[str, float], *, as_of: datetime
+    ) -> None:
+        """策略目标组合(不代表成交), 与 legacy holdings 表分开存放。"""
+        as_of_text = as_of.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute(
+                    "DELETE FROM strategy_targets WHERE strategy_id = ?", (strategy_id,)
+                )
+                self._con.executemany(
+                    "INSERT INTO strategy_targets"
+                    " (strategy_id, ticker, target_weight, as_of) VALUES (?, ?, ?, ?)",
+                    [
+                        (strategy_id, ticker, float(weight), as_of_text)
+                        for ticker, weight in targets.items()
+                    ],
+                )
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def get_strategy_targets(self, strategy_id: str) -> dict[str, float]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT ticker, target_weight FROM strategy_targets"
+                " WHERE strategy_id = ?",
+                (strategy_id,),
+            ).fetchall()
+        return {r["ticker"]: float(r["target_weight"]) for r in rows}
+
+    def replace_account_state(self, state: AccountState) -> None:
+        """整体替换券商实际状态; 账户快照保留历史, 持仓/订单只保留最新一次同步。"""
+        retrieved_at = state.snapshot.retrieved_at.isoformat()
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO account_snapshots"
+                    " (account_id, equity, cash, buying_power, currency, retrieved_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        state.snapshot.account_id,
+                        str(state.snapshot.equity),
+                        str(state.snapshot.cash),
+                        str(state.snapshot.buying_power),
+                        state.snapshot.currency,
+                        retrieved_at,
+                    ),
+                )
+                self._con.execute("DELETE FROM broker_positions")
+                self._con.executemany(
+                    "INSERT INTO broker_positions"
+                    " (symbol, qty, side, avg_entry_price, market_value, retrieved_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            position.symbol,
+                            str(position.qty),
+                            position.side,
+                            str(position.avg_entry_price),
+                            str(position.market_value),
+                            retrieved_at,
+                        )
+                        for position in state.positions
+                    ],
+                )
+                self._con.execute("DELETE FROM broker_orders")
+                order_rows = [
+                    (order, "open") for order in state.open_orders
+                ] + [(order, "recent") for order in state.recent_orders]
+                self._con.executemany(
+                    "INSERT OR REPLACE INTO broker_orders"
+                    " (order_id, symbol, side, status, qty, limit_price, submitted_at,"
+                    " filled_qty, filled_avg_price, bucket, retrieved_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            order.order_id,
+                            order.symbol,
+                            order.side,
+                            order.status,
+                            str(order.qty) if order.qty is not None else None,
+                            str(order.limit_price)
+                            if order.limit_price is not None
+                            else None,
+                            order.submitted_at.isoformat()
+                            if order.submitted_at is not None
+                            else None,
+                            str(order.filled_qty),
+                            str(order.filled_avg_price)
+                            if order.filled_avg_price is not None
+                            else None,
+                            bucket,
+                            retrieved_at,
+                        )
+                        for order, bucket in order_rows
+                    ],
+                )
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def latest_account_snapshot(self) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM account_snapshots ORDER BY retrieved_at DESC, id DESC"
+                " LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def broker_positions(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM broker_positions ORDER BY symbol"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def broker_orders(self, bucket: str | None = None) -> list[dict[str, object]]:
+        query = "SELECT * FROM broker_orders"
+        params: tuple[object, ...] = ()
+        if bucket is not None:
+            query += " WHERE bucket = ?"
+            params = (bucket,)
+        with self._lock:
+            rows = self._con.execute(query + " ORDER BY order_id", params).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_execution_plan(self, plan: ExecutionPlan) -> None:
+        payload = json.dumps(plan_to_dict(plan), ensure_ascii=False, sort_keys=True)
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO execution_plans"
+                " (plan_id, plan_version, plan_date, ticker, state, payload_json,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    plan.plan_id,
+                    plan.plan_version,
+                    plan.plan_date.isoformat(),
+                    plan.ticker,
+                    plan.state.value,
+                    payload,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+
+    def active_execution_plans(self, plan_date: date | None = None) -> list[ExecutionPlan]:
+        """每个 plan_id 只取最高版本, 且排除终态。"""
+        terminal = tuple(state.value for state in TERMINAL_STATES)
+        placeholders = ",".join("?" for _ in terminal)
+        query = (
+            "SELECT payload_json FROM execution_plans AS ep"
+            " WHERE plan_version = (SELECT max(plan_version) FROM execution_plans"
+            "   WHERE plan_id = ep.plan_id)"
+            f" AND state NOT IN ({placeholders})"
+        )
+        params: list[object] = list(terminal)
+        if plan_date is not None:
+            query += " AND plan_date = ?"
+            params.append(plan_date.isoformat())
+        query += " ORDER BY plan_date, ticker"
+        with self._lock:
+            rows = self._con.execute(query, params).fetchall()
+        return [plan_from_dict(json.loads(r["payload_json"])) for r in rows]
+
+    def record_plan_event(
+        self, plan_id: str, plan_version: int, event_type: str, *, now: datetime
+    ) -> bool:
+        """同一 plan_id + plan_version + event_type 只允许成功记录一次(通知幂等)。"""
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO plan_events (plan_id, plan_version, event_type,"
+                    " created_at) VALUES (?, ?, ?, ?)",
+                    (
+                        plan_id,
+                        plan_version,
+                        event_type,
+                        now.astimezone(timezone.utc).isoformat(),
+                    ),
+                )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+
+    def event_was_delivered(
+        self, plan_id: str, plan_version: int, event_type: str
+    ) -> bool:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT 1 FROM plan_events WHERE plan_id = ? AND plan_version = ?"
+                " AND event_type = ?",
+                (plan_id, plan_version, event_type),
+            ).fetchone()
+        return row is not None
