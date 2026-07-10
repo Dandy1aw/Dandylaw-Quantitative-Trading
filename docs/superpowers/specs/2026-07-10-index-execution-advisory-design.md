@@ -52,7 +52,7 @@
 新增独立 `IndexUniverseProvider`，不挂在行情 `DataSource` 上。它负责：
 
 - 从 Nasdaq 官方完整成分页读取纳指100；
-- 从 S&P 官方成分页面读取标普500；
+- 从 S&P 官方成分页面或 State Street 官方 SPY 每日完整持仓读取标普500；
 - 合并重复证券并保留 `memberships`，例如同一股票可同时属于两个指数；
 - 保存 `as_of`、`fetched_at`、`source`、内容哈希和成员列表；
 - 原子写入最后一次成功快照；
