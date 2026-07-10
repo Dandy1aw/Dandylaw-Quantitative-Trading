@@ -13,9 +13,12 @@ from quant_signal.scheduler import (
 
 
 class _Event:
-    def __init__(self, job_id: str, exception: object | None) -> None:
+    def __init__(
+        self, job_id: str, exception: object | None, code: int | None = None
+    ) -> None:
         self.job_id = job_id
         self.exception = exception
+        self.code = code
 
 
 class FakeNotifier:
@@ -29,13 +32,63 @@ class FakeNotifier:
 
 
 def test_scheduler_registers_all_jobs() -> None:
+    """默认(生产)配置: 执行建议任务上线, 旧价格偏离任务下线。"""
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     ids = {j.id for j in sched.get_jobs()}
     assert ids == {
         "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
-        "rotation_asia_open", "rotation_asia_close", "watch_deviation", "enrichment",
+        "rotation_asia_open", "rotation_asia_close", "enrichment",
         "performance", "data_qa", "market_scan", "negative_overreaction",
+        "execution_brief", "execution_watch",
     }
+    assert "watch_deviation" not in ids
+
+
+def test_execution_jobs_run_at_0815_and_every_5min_us_hours() -> None:
+    sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
+    jobs = {job.id: job for job in sched.get_jobs()}
+
+    brief = str(jobs["execution_brief"].trigger)
+    assert "hour='8'" in brief and "minute='15'" in brief
+    assert str(jobs["execution_brief"].trigger.timezone) == "America/New_York"
+
+    watch = str(jobs["execution_watch"].trigger)
+    assert "hour='9-15'" in watch and "minute='*/5'" in watch
+    assert str(jobs["execution_watch"].trigger.timezone) == "America/New_York"
+    assert jobs["execution_watch"].misfire_grace_time == 240
+
+
+def test_legacy_deviation_job_registered_only_when_enabled() -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import (
+        ExecutionPlanSettings,
+        LegacyPriceDeviationSettings,
+    )
+
+    settings = make_test_settings(
+        legacy_price_deviation=LegacyPriceDeviationSettings(enabled=True),
+        execution_plan=ExecutionPlanSettings(enabled=False),
+    )
+    engine = SimpleNamespace(settings=settings)
+    sched = build_scheduler(engine=engine, ledger=None, store=None, notifier=FakeNotifier())
+    ids = {j.id for j in sched.get_jobs()}
+    assert "watch_deviation" in ids
+    assert "execution_brief" not in ids
+    assert "execution_watch" not in ids
+
+
+def test_jobhealth_collects_missed_and_max_instances_events() -> None:
+    from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
+
+    h = JobHealth()
+    h.listen(_Event("market_scan", None, code=EVENT_JOB_MISSED))
+    h.listen(_Event("execution_watch", None, code=EVENT_JOB_MAX_INSTANCES))
+    assert h.drain_errors() == [
+        ("market_scan", "missed"),
+        ("execution_watch", "max_instances"),
+    ]
 
 
 def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
@@ -45,7 +98,7 @@ def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
     assert jobs["rotation_asia_open"].misfire_grace_time == 3600
     assert jobs["rotation_asia_close"].misfire_grace_time == 3600
     assert jobs["intraday"].misfire_grace_time == 240
-    assert jobs["watch_deviation"].misfire_grace_time == 240
+    assert jobs["execution_brief"].misfire_grace_time == 3600
 
 
 def test_us_market_jobs_use_new_york_trigger_timezone() -> None:

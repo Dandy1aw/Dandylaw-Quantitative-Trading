@@ -8,6 +8,7 @@ from typing import Literal
 import pandas as pd
 import structlog
 
+from quant_signal.account import AccountProvider, AlpacaPaperAccountProvider
 from quant_signal.config import REPO_ROOT, Settings
 from quant_signal.datafeed.base import DataSource
 from quant_signal.datafeed.earnings import EarningsSource
@@ -21,6 +22,10 @@ from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.dedup import DedupResult, apply_dedup
 from quant_signal.pipelines.deviation import run as run_deviation_pipeline
 from quant_signal.pipelines.enrichment import run as run_enrichment_pipeline
+from quant_signal.pipelines.execution_plan import (
+    run_daily as run_execution_brief_pipeline,
+    run_watch as run_execution_watch_pipeline,
+)
 from quant_signal.pipelines.intraday import (
     intraday_snapshot as _intraday_snapshot,
     run as run_intraday_pipeline,
@@ -66,6 +71,7 @@ class Engine:
         news_source: "NewsSource | None" = None,
         news_store: "NewsStore | None" = None,
         index_universe_provider: IndexUniverseProvider | None = None,
+        account_provider: AccountProvider | None = None,
     ) -> None:
         # 财报日历/基本面为可选注入：不注入(如测试)则完全跳过标注，零网络依赖
         self.earnings_source = earnings_source
@@ -89,6 +95,17 @@ class Engine:
                 max_stale_days=settings.index_universe.max_stale_days,
             )
         self.index_universe_provider = index_universe_provider
+        if (
+            account_provider is None
+            and settings.execution_plan.enabled
+            and settings.execution_plan.account_provider == "alpaca_paper"
+            and settings.alpaca_key
+            and settings.alpaca_secret
+        ):
+            account_provider = AlpacaPaperAccountProvider(
+                settings.alpaca_key, settings.alpaca_secret
+            )
+        self.account_provider = account_provider
         momentum = settings.strategies["momentum_rotation"]
         breakout = settings.strategies["breakout_20d"]
         self.momentum = MomentumRotation(
@@ -310,3 +327,9 @@ class Engine:
 
     def run_negative_overreaction(self, now: datetime) -> None:
         run_negative_overreaction_pipeline(self, now)
+
+    def run_execution_brief(self, now: datetime) -> None:
+        run_execution_brief_pipeline(self, now)
+
+    def run_execution_watch(self, now: datetime) -> None:
+        run_execution_watch_pipeline(self, now)

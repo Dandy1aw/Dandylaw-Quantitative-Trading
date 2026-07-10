@@ -248,6 +248,16 @@ def run(engine: Engine, now: datetime) -> None:
         for signal in to_push:
             engine.ledger.insert(signal, pushed=delivered, now=now)
     engine.ledger.set_holdings(engine.momentum.strategy_id, target_tickers)
+    # 目标组合与券商实际持仓分离: strategy_targets 只是策略意图, 不代表成交
+    engine.ledger.set_strategy_targets(
+        engine.momentum.strategy_id,
+        {
+            signal.ticker: float(signal.suggested_weight)
+            for signal in targets
+            if signal.suggested_weight
+        },
+        as_of=now,
+    )
     # P1 展示层：目标持仓的高相关簇合计权重过半时，在榜单卡追加集中度警示
     weights = {
         s.ticker: s.suggested_weight

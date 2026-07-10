@@ -37,6 +37,7 @@ class AIBriefingContext(BaseModel):
     holdings: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     analysis_cards: list[dict[str, str]] = Field(default_factory=list)
+    execution_plans: list[dict[str, object]] = Field(default_factory=list)
 
 
 def _is_secret_like(value: str) -> bool:
@@ -80,6 +81,17 @@ def build_ai_briefing_prompt(
         "必须保留这句话：仅供观察，不构成投资建议。\n\n"
         "输入数据：\n"
     )
+    execution_rules = (
+        "执行计划硬约束：execution_plans 中的 limit_price、suggested_qty、"
+        "suggested_notional、stop_loss、take_profit 是确定性规则计算的结构化数据，"
+        "禁止改写、放大、缩小、推导或补算任何价格与数量；字段缺失或为 null 时只能写"
+        "“不可用”，不得估算；PAPER 是模拟账户，禁止把它描述为实盘账户，"
+        "也不得把计划描述为已成交或确定交易指令。\n"
+    )
+    if context.execution_plans:
+        instructions = instructions.replace(
+            "输入数据：\n", f"{execution_rules}输入数据：\n"
+        )
     compact_instructions = (
         "你是量化交易系统的盘前早报交易计划分析员。只分析本 prompt 输入，不运行命令、不读文件、不联网。"
         "signals 是交易价位的唯一权威来源，analysis_cards 只作叙事背景；必须保留币种和免责声明。"
@@ -98,16 +110,17 @@ def build_ai_briefing_prompt(
 
 
 def _bounded_context_payload(context: AIBriefingContext, budget: int) -> str:
-    base = _sanitize(
-        {
-            "as_of": context.as_of,
-            "notes": context.notes,
-            "holdings": context.holdings,
-            "signals": context.signals,
-            "ranking": context.ranking,
-            "analysis_cards": [],
-        }
-    )
+    raw_base: dict[str, object] = {
+        "as_of": context.as_of,
+        "notes": context.notes,
+        "holdings": context.holdings,
+        "signals": context.signals,
+        "ranking": context.ranking,
+        "analysis_cards": [],
+    }
+    if context.execution_plans:
+        raw_base["execution_plans"] = context.execution_plans
+    base = _sanitize(raw_base)
     cards = [
         {
             "title": card.get("title", ""),

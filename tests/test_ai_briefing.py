@@ -248,3 +248,38 @@ def test_ai_briefing_card_is_report() -> None:
     assert "AI" in card.title
     assert "今日偏观察" in card.body_md
     assert "仅供观察，不构成投资建议" in card.body_md
+
+
+def test_prompt_includes_execution_plan_guardrails() -> None:
+    context = AIBriefingContext(
+        as_of="2026-07-10T12:15:00+00:00",
+        execution_plans=[
+            {
+                "ticker": "AAPL",
+                "state": "CANDIDATE",
+                "limit_price": 102.0,
+                "suggested_qty": 71,
+                "suggested_notional": 7242.0,
+                "stop_loss": 95.0,
+                "take_profit": 115.0,
+                "account_label": "PAPER",
+            }
+        ],
+    )
+    prompt = build_ai_briefing_prompt(context)
+
+    # 结构化计划数据必须原样进入 prompt
+    assert "execution_plans" in prompt
+    assert "7242" in prompt
+    # 硬约束: 结构化价格/数量不可改写, 缺失只能写不可用, PAPER 不得称实盘
+    assert "limit_price" in prompt and "suggested_qty" in prompt
+    assert "禁止改写" in prompt or "不可改写" in prompt
+    assert "不可用" in prompt
+    assert "PAPER" in prompt
+    assert "实盘" in prompt
+
+
+def test_prompt_without_execution_plans_omits_execution_rules() -> None:
+    context = AIBriefingContext(as_of="2026-07-10T12:15:00+00:00")
+    prompt = build_ai_briefing_prompt(context)
+    assert "execution_plans" not in prompt

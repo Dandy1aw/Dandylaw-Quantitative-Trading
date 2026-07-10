@@ -191,3 +191,107 @@ def test_momentum_ranking_card_shows_top_bottom_and_risk_markers() -> None:
     assert "MID ⚠趋势FLAT" in card.body_md
     assert "TOP5 ⚠数据不足" in card.body_md
     assert "LOW1" in card.body_md and "LOW3" in card.body_md
+
+
+def test_execution_plan_card_shows_paper_label_and_block_reasons() -> None:
+    from datetime import date, datetime, timezone
+
+    from quant_signal.execution import ExecutionPlan, PlanState
+    from quant_signal.notifier.cards import execution_plan_card
+
+    now = datetime(2026, 7, 10, 12, 15, tzinfo=timezone.utc)
+    plan = ExecutionPlan(
+        plan_id="p1",
+        plan_version=1,
+        plan_date=date(2026, 7, 10),
+        ticker="AAPL",
+        currency="USD",
+        source_strategies=("index_scan",),
+        memberships=("sp500",),
+        score=0.9,
+        entry_low=100.0,
+        entry_high=102.0,
+        limit_price=102.0,
+        stop_loss=95.0,
+        take_profit=115.0,
+        target_weight=None,
+        gap_qty=None,
+        risk_qty=71,
+        cash_qty=294,
+        cap_qty=117,
+        suggested_qty=71,
+        suggested_notional=7242.0,
+        valid_from=now,
+        expires_at=datetime(2026, 7, 10, 19, 45, tzinfo=timezone.utc),
+        quote_at=now,
+        account_at=now,
+        state=PlanState.CANDIDATE,
+        block_reason=None,
+        rule_version="exec-v1",
+    )
+    blocked = ExecutionPlan(
+        **{
+            **{f: getattr(plan, f) for f in plan.__dataclass_fields__},
+            "plan_id": "p2",
+            "ticker": "MSFT",
+            "suggested_qty": None,
+            "suggested_notional": None,
+            "state": PlanState.BLOCKED,
+            "block_reason": "STALE_ACCOUNT",
+        }
+    )
+
+    card = execution_plan_card(None, [plan, blocked], now)
+
+    assert "PAPER" in card.title or "PAPER" in card.body_md
+    body = card.body_md
+    assert "AAPL" in body and "MSFT" in body
+    assert "102" in body and "95" in body and "115" in body
+    assert "71" in body and "7242" in body
+    assert "STALE_ACCOUNT" in body
+    assert "账户数据不足" in body  # account=None 时的提示
+
+
+def test_plan_event_card_is_paper_labelled() -> None:
+    from datetime import date, datetime, timezone
+
+    from quant_signal.execution import ExecutionPlan, PlanState
+    from quant_signal.notifier.cards import plan_event_card
+
+    now = datetime(2026, 7, 10, 14, 30, tzinfo=timezone.utc)
+    plan = ExecutionPlan(
+        plan_id="p1",
+        plan_version=1,
+        plan_date=date(2026, 7, 10),
+        ticker="AAPL",
+        currency="USD",
+        source_strategies=("index_scan",),
+        memberships=("sp500",),
+        score=0.9,
+        entry_low=100.0,
+        entry_high=102.0,
+        limit_price=102.0,
+        stop_loss=95.0,
+        take_profit=115.0,
+        target_weight=None,
+        gap_qty=None,
+        risk_qty=71,
+        cash_qty=294,
+        cap_qty=117,
+        suggested_qty=71,
+        suggested_notional=7242.0,
+        valid_from=now,
+        expires_at=datetime(2026, 7, 10, 19, 45, tzinfo=timezone.utc),
+        quote_at=now,
+        account_at=now,
+        state=PlanState.ACTIONABLE,
+        block_reason=None,
+        rule_version="exec-v1",
+    )
+
+    card = plan_event_card(plan, "ACTIONABLE", price=101.0, at=now)
+
+    assert "PAPER" in card.title
+    assert "ACTIONABLE" in card.title or "ACTIONABLE" in card.body_md
+    assert "102" in card.body_md and "95" in card.body_md
+    assert "71" in card.body_md

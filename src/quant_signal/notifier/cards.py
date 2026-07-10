@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import TYPE_CHECKING, Sequence
 from zoneinfo import ZoneInfo
 
 from quant_signal.notifier.base import Card, CardKind
 from quant_signal.strategies.base import Direction, Signal
 
+if TYPE_CHECKING:
+    from quant_signal.account import AccountState
+    from quant_signal.execution import ExecutionPlan
+
 _SGT = ZoneInfo("Asia/Singapore")
+_ET = ZoneInfo("America/New_York")
 _DIRECTION_EMOJI = {"buy": "📈", "sell": "📉", "reduce": "⚖️"}
 
 
@@ -35,6 +42,104 @@ def report_card(title: str, body_md: str) -> Card:
 
 def alert_card(title: str, body_md: str) -> Card:
     return Card(kind=CardKind.ALERT, title=f"🚨 {title}", body_md=body_md)
+
+
+_PAPER_FOOTER = "> PAPER 模拟账户建议，仅供观察，不构成投资建议；本系统不自动下单。"
+
+
+def _fmt_qty(value: object) -> str:
+    return str(value) if value is not None else "-"
+
+
+def _fmt_price(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else "-"
+
+
+def execution_plan_card(
+    account: "AccountState | None",
+    plans: "Sequence[ExecutionPlan]",
+    now: datetime,
+) -> Card:
+    lines: list[str] = []
+    if account is not None:
+        snap = account.snapshot
+        account_time = snap.retrieved_at.astimezone(_SGT).strftime("%Y-%m-%d %H:%M")
+        lines += [
+            f"**账户时间**: {account_time} (SGT)",
+            f"**权益** {snap.equity} {snap.currency} · **现金** {snap.cash} ·"
+            f" **购买力** {snap.buying_power}",
+        ]
+        if account.positions:
+            lines += ["", "**持仓**", "| 标的 | 数量 | 成本 | 市值 |", "|---|---|---|---|"]
+            lines += [
+                f"| {p.symbol} | {p.qty} | {p.avg_entry_price} | {p.market_value} |"
+                for p in account.positions
+            ]
+        if account.open_orders:
+            lines += ["", "**未成交订单**"]
+            lines += [
+                f"- {o.symbol} {o.side.upper()} {o.qty} @ {o.limit_price or '市价'}"
+                f" ({o.status})"
+                for o in account.open_orders
+            ]
+        if account.recent_orders:
+            lines += ["", "**最近成交**"]
+            lines += [
+                f"- {o.order_id}: {o.symbol} {o.side.upper()} {o.filled_qty}"
+                f" @ {o.filled_avg_price or '-'}"
+                for o in account.recent_orders[:5]
+            ]
+    else:
+        lines.append("⚠ **账户数据不足，未计算股数**（仅展示观察价位）")
+
+    if plans:
+        lines += [
+            "",
+            "**执行计划**",
+            "| 标的 | 状态 | 买入区 | 限价 | 建议股数 | 金额 | 止损 | 止盈 | 有效期 | 备注 |",
+            "|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for plan in plans:
+            expiry = plan.expires_at.astimezone(_ET).strftime("%m-%d %H:%M ET")
+            note = plan.block_reason or "+".join(plan.source_strategies)
+            lines.append(
+                f"| {plan.ticker} | {plan.state.value} |"
+                f" {plan.entry_low:.2f}-{plan.entry_high:.2f} |"
+                f" {plan.limit_price:.2f} | {_fmt_qty(plan.suggested_qty)} |"
+                f" {_fmt_price(plan.suggested_notional)} | {plan.stop_loss:.2f} |"
+                f" {plan.take_profit:.2f} | {expiry} | {note} |"
+            )
+    else:
+        lines += ["", "今日无执行候选。"]
+    lines += ["", _PAPER_FOOTER]
+    return Card(
+        kind=CardKind.REPORT,
+        title="🧭 PAPER 执行计划 · 盘前",
+        body_md="\n".join(lines),
+    )
+
+
+def plan_event_card(
+    plan: "ExecutionPlan", event: str, *, price: float | None, at: datetime
+) -> Card:
+    sgt = at.astimezone(_SGT).strftime("%Y-%m-%d %H:%M")
+    lines = [
+        f"**现价**: {_fmt_price(price)}",
+        f"**买入区**: {plan.entry_low:.2f}-{plan.entry_high:.2f} ·"
+        f" **限价** {plan.limit_price:.2f}",
+        f"**建议股数**: {_fmt_qty(plan.suggested_qty)} ·"
+        f" **金额** {_fmt_price(plan.suggested_notional)}",
+        f"**止损**: {plan.stop_loss:.2f} · **止盈**: {plan.take_profit:.2f}",
+        f"**时间**: {sgt} (SGT)",
+        "",
+        _PAPER_FOOTER,
+    ]
+    return Card(
+        kind=CardKind.SIGNAL,
+        title=f"⚡ PAPER 执行提醒 · {plan.ticker} {event}",
+        body_md="\n".join(lines),
+        url=f"https://www.tradingview.com/chart/?symbol={plan.ticker}",
+    )
 
 
 def build_ai_briefing_card(body_md: str) -> Card:

@@ -4,7 +4,11 @@ from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import structlog
-from apscheduler.events import EVENT_JOB_ERROR
+from apscheduler.events import (
+    EVENT_JOB_ERROR,
+    EVENT_JOB_MAX_INSTANCES,
+    EVENT_JOB_MISSED,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -33,6 +37,12 @@ class JobHealth:
         if exc is not None:
             with self._lock:
                 self._errors.append((getattr(event, "job_id", "?"), str(exc)))
+            return
+        code = getattr(event, "code", None)
+        label = {EVENT_JOB_MISSED: "missed", EVENT_JOB_MAX_INSTANCES: "max_instances"}.get(code)
+        if label is not None:
+            with self._lock:
+                self._errors.append((getattr(event, "job_id", "?"), label))
 
     def drain_errors(self) -> list[tuple[str, str]]:
         with self._lock:
@@ -184,8 +194,18 @@ def build_scheduler(
             # T3(O1)：每日备份台账(不可再生)与行情缓存(尽力)，保留14天
             run_backup(ledger, engine.settings.db_path, datetime.now(timezone.utc))
 
+    settings = getattr(engine, "settings", None)
+    legacy_deviation_enabled = (
+        bool(settings.legacy_price_deviation.enabled) if settings is not None else False
+    )
+    execution_enabled = (
+        bool(settings.execution_plan.enabled) if settings is not None else True
+    )
+
     health = JobHealth()
-    sched.add_listener(health.listen, EVENT_JOB_ERROR)
+    sched.add_listener(
+        health.listen, EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
+    )
     hb = Heartbeat(notifier=notifier, check=lambda: True, health=health)
 
     sched.add_job(
@@ -222,12 +242,45 @@ def build_scheduler(
         id="rotation_asia_close",  # 15:30 北京时间
         misfire_grace_time=3600,
     )
-    sched.add_job(
-        watch_deviation,
-        CronTrigger(hour="0-21", minute="*/5", day_of_week="mon-fri", timezone=timezone.utc),
-        id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
-        misfire_grace_time=240,
-    )
+    if legacy_deviation_enabled:
+        # 旧普通价格偏离提醒: 默认下线, 保留 feature flag 以便快速回滚
+        sched.add_job(
+            watch_deviation,
+            CronTrigger(hour="0-21", minute="*/5", day_of_week="mon-fri", timezone=timezone.utc),
+            id="watch_deviation",  # 覆盖亚洲(约01:00-08:00 UTC)与美股(13:30-21:00 UTC，含冬令时缓冲)
+            misfire_grace_time=240,
+        )
+
+    if execution_enabled:
+
+        def execution_brief() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="execution_brief")
+                return
+            engine.run_execution_brief(datetime.now(timezone.utc))
+
+        def execution_watch() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="execution_watch")
+                return
+            engine.run_execution_watch(datetime.now(timezone.utc))
+
+        # 08:15 ET: 指数扫描(07:00)之后、盘前早报(08:00)之外的独立执行计划卡
+        sched.add_job(
+            execution_brief,
+            CronTrigger(hour=8, minute=15, timezone=ET),
+            id="execution_brief",
+            misfire_grace_time=3600,
+        )
+        # 美股盘中每5分钟评估计划状态迁移(入场窗口约束在状态机内部)
+        sched.add_job(
+            execution_watch,
+            CronTrigger(hour="9-15", minute="*/5", timezone=ET),
+            id="execution_watch",
+            misfire_grace_time=240,
+        )
     sched.add_job(
         enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"
     )
