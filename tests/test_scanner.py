@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from quant_signal.scanner import liquidity_filter, scan_scores
+from quant_signal.scanner import liquidity_filter, robust_factor_scores, scan_scores
 
 
 def _bars(spec: dict[str, dict[str, float]], n: int = 140) -> pd.DataFrame:
@@ -50,3 +50,25 @@ def test_scan_scores_exclude_short_history() -> None:
     short = _bars({"NEW": {"price0": 50.0, "drift": 0.05}}, n=60)
     results = scan_scores(pd.concat([full, short]))
     assert [r.ticker for r in results] == ["OK"]
+
+
+def test_scan_scores_use_bounded_robust_percentiles() -> None:
+    bars = _bars({
+        "A": {"price0": 50.0, "drift": 0.003, "vol": 1e6},
+        "B": {"price0": 50.0, "drift": 0.002, "vol": 2e6},
+        "OUTLIER": {"price0": 50.0, "drift": 0.001, "vol": 1e12},
+    })
+
+    results = scan_scores(bars)
+
+    assert all(-0.5 <= result.score <= 0.5 for result in results)
+    assert results[0].ticker == "A"
+
+
+def test_robust_factor_scores_clip_outlier_and_center_ranks() -> None:
+    scores = robust_factor_scores({"A": 1.0, "B": 2.0, "C": 3.0, "X": 1e12})
+
+    assert set(scores) == {"A", "B", "C", "X"}
+    assert min(scores.values()) >= -0.5
+    assert max(scores.values()) <= 0.5
+    assert scores["A"] < scores["B"] < scores["C"] <= scores["X"]

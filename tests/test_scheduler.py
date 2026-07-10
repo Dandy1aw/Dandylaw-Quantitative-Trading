@@ -34,7 +34,7 @@ def test_scheduler_registers_all_jobs() -> None:
     assert ids == {
         "premarket", "intraday", "postmarket", "maintenance", "heartbeat",
         "rotation_asia_open", "rotation_asia_close", "watch_deviation", "enrichment",
-        "performance", "data_qa", "market_scan",
+        "performance", "data_qa", "market_scan", "negative_overreaction",
     }
 
 
@@ -51,7 +51,8 @@ def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
 def test_us_market_jobs_use_new_york_trigger_timezone() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     jobs = {job.id: job for job in sched.get_jobs()}
-    for job_id in ("premarket", "intraday", "postmarket", "maintenance", "enrichment"):
+    for job_id in ("premarket", "intraday", "postmarket", "maintenance", "enrichment",
+                   "negative_overreaction"):
         assert str(jobs[job_id].trigger.timezone) == "America/New_York"
 
 

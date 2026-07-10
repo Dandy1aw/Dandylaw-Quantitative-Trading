@@ -11,11 +11,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+
+import pandas as pd
 
 from quant_signal.notifier.base import Card, CardKind
 
 # 告警型策略：信号是"提醒"不是"下单意图"，不入虚拟盘
 _NON_TRADING = {"price_deviation", "target_hit"}
+_HORIZON_TRADING = {"market_scan"}
 
 _LABELS = {
     "momentum_rotation": "动量轮动",
@@ -47,7 +51,7 @@ def build_round_trips(rows: list[dict[str, object]]) -> list[Trade]:
     done: list[Trade] = []
     for row in rows:
         sid = str(row["strategy_id"])
-        if sid in _NON_TRADING:
+        if sid in _NON_TRADING or sid in _HORIZON_TRADING:
             continue
         key = (sid, str(row["ticker"]))
         direction = str(row["direction"])
@@ -61,6 +65,57 @@ def build_round_trips(rows: list[dict[str, object]]) -> list[Trade]:
                 Trade(pos.strategy_id, pos.ticker, pos.entry_price, pos.entry_at, price, at)
             )
     return done + list(open_pos.values())
+
+
+def build_horizon_trades(
+    rows: list[dict[str, object]], bars: pd.DataFrame, horizon_days: int = 20
+) -> list[Trade]:
+    """扫描信号按下一交易日开盘入场，第 horizon_days 日收盘离场。"""
+    if horizon_days < 1:
+        raise ValueError("horizon_days must be positive")
+    if bars.empty:
+        return []
+    available = set(bars.index.get_level_values("ticker"))
+    trades: list[Trade] = []
+    for row in rows:
+        if str(row["strategy_id"]) != "market_scan" or str(row["direction"]) != "buy":
+            continue
+        ticker = str(row["ticker"])
+        if ticker not in available:
+            continue
+        signal_at = pd.Timestamp(str(row["pushed_at"]))
+        if signal_at.tzinfo is None:
+            signal_at = signal_at.tz_localize("UTC")
+        else:
+            signal_at = signal_at.tz_convert("UTC")
+        signal_day = signal_at.normalize()
+        sub = bars.xs(ticker, level="ticker").sort_index()
+        idx = pd.DatetimeIndex(sub.index)
+        idx = idx.tz_localize("UTC") if idx.tz is None else idx.tz_convert("UTC")
+        future = sub.loc[idx.normalize() > signal_day]
+        future = future[pd.to_numeric(future["open"], errors="coerce").map(math.isfinite)]
+        if future.empty:
+            continue
+        entry_at = pd.Timestamp(future.index[0])
+        entry_price = float(future["open"].iloc[0])
+        if len(future) < horizon_days:
+            trades.append(Trade("market_scan", ticker, entry_price, entry_at.isoformat()))
+            continue
+        exit_at = pd.Timestamp(future.index[horizon_days - 1])
+        exit_price = float(future["close"].iloc[horizon_days - 1])
+        if not math.isfinite(exit_price):
+            continue
+        trades.append(
+            Trade(
+                "market_scan",
+                ticker,
+                entry_price,
+                entry_at.isoformat(),
+                exit_price,
+                exit_at.isoformat(),
+            )
+        )
+    return trades
 
 
 def strategy_summary(
@@ -94,7 +149,7 @@ def performance_card(
     benchmark_note: str | None = None,
 ) -> Card:
     lines = [
-        f"近 {window_days} 天已推送信号的虚拟盘复盘（按信号价成交，不计滑点/费用）",
+        f"近 {window_days} 天已推送信号复盘（扫描=次日开盘持有20日；其余=信号价，不计费用）",
         "",
         "| 策略 | 已平仓 | 胜率 | 平均收益 | 未平仓 | 浮动均益 |",
         "|---|---|---|---|---|---|",

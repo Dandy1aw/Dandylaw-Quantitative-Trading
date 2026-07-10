@@ -148,6 +148,13 @@ def build_scheduler(
 
         notifier.send(build_daily_report(ledger, store, now_et.date()))
 
+    def negative_overreaction() -> None:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="negative_overreaction")
+            return
+        engine.run_negative_overreaction(datetime.now(timezone.utc))
+
     def rotation_push() -> None:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
@@ -164,6 +171,7 @@ def build_scheduler(
         engine.run_enrichment(datetime.now(timezone.utc))
 
     def maintenance() -> None:
+        from quant_signal.backup import run_backup
         from quant_signal.ingest import ingest_daily_split
 
         if engine is not None:
@@ -173,6 +181,8 @@ def build_scheduler(
                 engine.settings.universe + engine.settings.watchlist,
                 days=10,
             )
+            # T3(O1)：每日备份台账(不可再生)与行情缓存(尽力)，保留14天
+            run_backup(ledger, engine.settings.db_path, datetime.now(timezone.utc))
 
     health = JobHealth()
     sched.add_listener(health.listen, EVENT_JOB_ERROR)
@@ -188,6 +198,12 @@ def build_scheduler(
     )
     sched.add_job(
         postmarket, CronTrigger(hour=16, minute=30, timezone=ET), id="postmarket"
+    )
+    sched.add_job(
+        negative_overreaction,
+        CronTrigger(hour=16, minute=45, timezone=ET),
+        id="negative_overreaction",
+        misfire_grace_time=3600,
     )
     sched.add_job(
         maintenance, CronTrigger(hour=3, minute=0, timezone=ET), id="maintenance"

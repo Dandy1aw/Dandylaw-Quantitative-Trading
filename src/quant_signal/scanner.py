@@ -1,6 +1,7 @@
-"""T2 全市场扫描（纯函数层）：流动性初筛 + 可解释三因子打分。
+"""T2 全市场扫描（纯函数层）：流动性初筛 + 稳健三因子打分。
 
-score = 0.4×z(60日动量) + 0.3×z(距20日高点近度) + 0.3×z(5日量比)。
+score = 0.4×rank(60日动量) + 0.3×rank(距20日高点近度) + 0.3×rank(5日量比)。
+各因子先按横截面 5%/95% 分位截尾，再转成居中的百分位排名。
 全部为可解释规则、无拟合参数；历史不足 130 日的次新直接排除。
 诚实定位：候选发现器，Top1 会写入台账接受绩效周报检验。
 """
@@ -46,13 +47,14 @@ class ScanResult:
     price: float
 
 
-def _zscores(values: dict[str, float]) -> dict[str, float]:
+def robust_factor_scores(values: dict[str, float]) -> dict[str, float]:
+    """横截面 5%/95% 截尾后转成 [-0.5, 0.5] 的百分位排名。"""
     s = pd.Series(values, dtype=float)
-    std = float(s.std())
-    if std == 0 or len(s) < 2:
+    if len(s) < 2:
         return {k: 0.0 for k in values}
-    mean = float(s.mean())
-    return {str(k): (float(v) - mean) / std for k, v in s.items()}
+    clipped = s.clip(lower=float(s.quantile(0.05)), upper=float(s.quantile(0.95)))
+    ranked = clipped.rank(method="average", pct=True) - 0.5
+    return {str(k): float(v) for k, v in ranked.items()}
 
 
 def scan_scores(bars: pd.DataFrame) -> list[ScanResult]:
@@ -77,7 +79,9 @@ def scan_scores(bars: pd.DataFrame) -> list[ScanResult]:
         base_vol = float(vol.tail(60).mean())
         volr[t] = float(vol.tail(5).mean()) / base_vol if base_vol > 0 else 0.0
         price[t] = last
-    zm, zp, zv = _zscores(mom), _zscores(prox), _zscores(volr)
+    zm = robust_factor_scores(mom)
+    zp = robust_factor_scores(prox)
+    zv = robust_factor_scores(volr)
     results = [
         ScanResult(
             ticker=t,

@@ -84,3 +84,36 @@ def test_market_scan_skips_source_without_asset_list(tmp_path: Path) -> None:
                     Plain(), SignalLedger(tmp_path / "s.db"), notifier)
     engine.run_market_scan(NOW)
     assert notifier.cards == []
+
+
+def test_market_scan_uses_full_volume_source_when_primary_is_partial(tmp_path: Path) -> None:
+    bars = _bars({"HOT": 0.01, "MEH": 0.0, "COLD": -0.005})
+
+    class PartialSource(FakeScanSource):
+        partial_market_volume = True
+
+        def __init__(self, data: pd.DataFrame) -> None:
+            super().__init__(data)
+            self.fetches = 0
+
+        def fetch_daily_bars(self, tickers, start, end):  # type: ignore[no-untyped-def]
+            self.fetches += 1
+            raise AssertionError("部分市场成交量不应参与扫描")
+
+    primary = PartialSource(bars)
+    full = FakeScanSource(bars)
+    settings = load_settings().model_copy(update={"watchlist": []})
+    notifier = FakeNotifier()
+    engine = Engine(
+        settings,
+        BarStore(tmp_path / "b.duckdb"),
+        primary,
+        SignalLedger(tmp_path / "s.db"),
+        notifier,
+    )
+    engine._intl_source = full  # type: ignore[assignment]
+
+    engine.run_market_scan(NOW)
+
+    assert primary.fetches == 0
+    assert notifier.cards

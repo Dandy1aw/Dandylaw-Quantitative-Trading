@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_signal.config import EnrichmentSettings
+from quant_signal.config import AIBriefingSettings, EnrichmentSettings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine, _intraday_snapshot
 from quant_signal.pipelines import premarket as premarket_pipeline
@@ -86,6 +86,67 @@ def test_premarket_generates_rotation_and_report(env, daily_bars) -> None:  # ty
     assert any("美股组" in t for t in titles)            # 合成标的均为美股，出美股组卡
     assert "📊 动量全池榜单" in titles
     assert all("盘前早报" in t or "【重要】" in t or "动量全池榜单" in t for t in titles)
+
+
+def test_premarket_sends_ai_briefing_card_when_cli_returns_text(
+    env, daily_bars, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    settings = settings.model_copy(
+        update={
+            "ai_briefing": AIBriefingSettings(
+                enabled=True, provider="claude_code_cli"
+            )
+        }
+    )
+    captured = {}
+
+    def fake_ai_briefing(settings, context):  # type: ignore[no-untyped-def]
+        captured["provider"] = settings.provider
+        captured["signals"] = context.signals
+        captured["ranking"] = context.ranking
+        captured["analysis_cards"] = context.analysis_cards
+        return "今日偏观察，等待回踩。仅供观察，不构成投资建议。"
+
+    monkeypatch.setattr(premarket_pipeline, "run_ai_briefing", fake_ai_briefing)
+
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+    engine.run_premarket(last_bar_ts + timedelta(hours=32))
+
+    titles = [card.title for card in notifier.cards]
+    assert "🤖 AI早报观点" in titles
+    assert captured["provider"] == "claude_code_cli"
+    assert captured["signals"]
+    assert captured["ranking"]
+    assert captured["analysis_cards"]
+    assert any("盘前早报" in card["title"] for card in captured["analysis_cards"])
+    assert any("动量全池榜单" in card["title"] for card in captured["analysis_cards"])
+
+
+def test_premarket_skips_ai_briefing_card_when_cli_returns_none(
+    env, daily_bars, monkeypatch: pytest.MonkeyPatch
+) -> None:  # type: ignore[no-untyped-def]
+    settings, store, ledger, notifier = env
+    settings = settings.model_copy(
+        update={
+            "ai_briefing": AIBriefingSettings(
+                enabled=True, provider="codex_cli"
+            )
+        }
+    )
+
+    def fake_ai_briefing(settings, context):  # type: ignore[no-untyped-def]
+        return None
+
+    monkeypatch.setattr(premarket_pipeline, "run_ai_briefing", fake_ai_briefing)
+
+    engine = Engine(settings, store, FakeSource(daily_bars), ledger, notifier)
+    last_bar_ts = daily_bars.index.get_level_values("ts").max()
+    engine.run_premarket(last_bar_ts + timedelta(hours=32))
+
+    assert all("AI早报观点" not in card.title for card in notifier.cards)
+    assert notifier.cards
 
 
 def test_premarket_report_shows_strategy_column_for_multiple_strategies(

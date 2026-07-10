@@ -93,3 +93,10 @@ enrichment:                      # UZI-Skill 深度分析信息增强（盘前 0
   depth: lite
   timeout_seconds: 60
   max_tickers: 8
+
+ai_briefing:                     # 盘前早报后调用 AI CLI 输出观点卡；失败/超时不影响原早报
+  enabled: true
+  provider: codex_cli             # claude_code_cli | codex_cli
+  command: codex                  # provider=claude_code_cli 时改为 claude
+  timeout_seconds: 90
+  max_chars: 6000

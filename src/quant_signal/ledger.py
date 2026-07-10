@@ -133,6 +133,16 @@ class SignalLedger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def backup_to(self, dest: Path) -> None:
+        """在线备份(sqlite backup API, 与写入互斥安全)。台账是唯一不可再生数据。"""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            target = sqlite3.connect(str(dest))
+            try:
+                self._con.backup(target)
+            finally:
+                target.close()
+
     def get_holdings(self, strategy_id: str) -> list[str]:
         with self._lock:
             rows = self._con.execute(

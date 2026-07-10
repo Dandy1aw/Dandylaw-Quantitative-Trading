@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 import pandas as pd
 import structlog
@@ -28,12 +28,27 @@ CHUNK = 200
 TOP_LIQUID = 500
 
 
-def _chunked_daily(engine: Engine, symbols: list[str], start: date, end: date) -> pd.DataFrame:
+class _DailySource(Protocol):
+    def fetch_daily_bars(
+        self, tickers: list[str], start: date, end: date
+    ) -> pd.DataFrame: ...
+
+
+def _scan_daily_source(engine: Engine) -> tuple[_DailySource, str]:
+    """部分市场成交量源只负责列举代码；扫描日线改用完整成交量源。"""
+    if bool(getattr(engine.source, "partial_market_volume", False)):
+        return cast(_DailySource, engine._intl_source), "yfinance"
+    return cast(_DailySource, engine.source), engine.settings.data_source
+
+
+def _chunked_daily(
+    source: _DailySource, symbols: list[str], start: date, end: date
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for i in range(0, len(symbols), CHUNK):
         chunk = symbols[i : i + CHUNK]
         try:
-            frames.append(engine.source.fetch_daily_bars(chunk, start, end))
+            frames.append(source.fetch_daily_bars(chunk, start, end))
         except Exception as error:  # noqa: BLE001
             log.warning("market_scan.chunk_failed", offset=i, error=str(error))
     valid = [f for f in frames if not f.empty]
@@ -58,8 +73,8 @@ def _card_body(top: list[ScanResult], extra_note: str) -> str:
         )
     lines += [
         "",
-        "> 候选发现器：可解释规则打分(动量40%/近高30%/量比30%)，非'必涨'预测；"
-        "Top1 已入虚拟盘，胜率见每周绩效周报。",
+        "> 候选发现器：截尾百分位打分(动量40%/近高30%/量比30%)，非'必涨'预测；"
+        "Top1 按次日开盘入场、持有20个交易日的固定口径接受周报检验。",
     ]
     return "\n".join(lines)
 
@@ -74,12 +89,17 @@ def run(engine: Engine, now: datetime) -> None:
         log.info("market_scan.skip", reason="no_symbols")
         return
 
-    bars5 = _chunked_daily(engine, symbols, (now - timedelta(days=9)).date(), now.date())
+    daily_source, source_name = _scan_daily_source(engine)
+    bars5 = _chunked_daily(
+        daily_source, symbols, (now - timedelta(days=9)).date(), now.date()
+    )
     liquid = liquidity_filter(bars5, top_k=TOP_LIQUID)
     if not liquid:
         log.info("market_scan.skip", reason="no_liquid_candidates")
         return
-    bars = _chunked_daily(engine, liquid, (now - timedelta(days=210)).date(), now.date())
+    bars = _chunked_daily(
+        daily_source, liquid, (now - timedelta(days=210)).date(), now.date()
+    )
     results = scan_scores(bars)
     if not results:
         log.info("market_scan.skip", reason="no_scores")
@@ -88,6 +108,7 @@ def run(engine: Engine, now: datetime) -> None:
     top = results[:5]
     first = top[0]
     sub = bars.xs(first.ticker, level="ticker").sort_index()
+    engine.store.write_daily_bars(bars.loc[[first.ticker]], source=source_name)
     hint = entry_hint(sub["high"], sub["low"], sub["close"])
     stop = chandelier_stop(sub["high"], sub["low"], sub["close"])
     extra: dict[str, object] = {

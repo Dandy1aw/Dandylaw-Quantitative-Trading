@@ -57,6 +57,14 @@ class EnrichmentSettings(BaseModel):
     max_tickers: int = 8
 
 
+class AIBriefingSettings(BaseModel):
+    enabled: bool = False
+    provider: Literal["claude_code_cli", "codex_cli"] = "codex_cli"
+    command: str = ""
+    timeout_seconds: int = 90
+    max_chars: int = 6000
+
+
 class TickerSettings(BaseModel):
     asset_type: Literal["ETF", "STOCK"]
     currency: str = "USD"
@@ -79,6 +87,7 @@ class Settings(BaseModel):
     international_tickers: dict[str, str] = Field(default_factory=dict)
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
+    ai_briefing: AIBriefingSettings = AIBriefingSettings()
     trend_gate: TrendGateSettings = TrendGateSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""

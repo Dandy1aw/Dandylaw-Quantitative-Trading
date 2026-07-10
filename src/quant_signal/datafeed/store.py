@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import threading
+import time
 
 import duckdb
 import numpy as np
@@ -19,13 +20,38 @@ CREATE TABLE IF NOT EXISTS {table} (
 );
 """
 _COLS = ["open", "high", "low", "close", "volume"]
+_CONNECT_RETRY_ATTEMPTS = 6
+_CONNECT_RETRY_SECONDS = 1.0
+
+
+def _is_transient_duckdb_lock(error: duckdb.IOException) -> bool:
+    message = str(error).lower()
+    return (
+        "cannot open file" in message
+        and ("already open" in message or "another program" in message)
+    )
+
+
+def _connect_with_retry(db_path: Path) -> duckdb.DuckDBPyConnection:
+    last_error: duckdb.IOException | None = None
+    for attempt in range(_CONNECT_RETRY_ATTEMPTS):
+        try:
+            return duckdb.connect(str(db_path))
+        except duckdb.IOException as error:
+            if not _is_transient_duckdb_lock(error):
+                raise
+            last_error = error
+            if attempt < _CONNECT_RETRY_ATTEMPTS - 1:
+                time.sleep(_CONNECT_RETRY_SECONDS)
+    assert last_error is not None
+    raise last_error
 
 
 class BarStore:
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._con = duckdb.connect(str(db_path))
+        self._con = _connect_with_retry(db_path)
         with self._lock:
             for table in ("bars_1d", "bars_5min"):
                 self._con.execute(_SCHEMA.format(table=table))

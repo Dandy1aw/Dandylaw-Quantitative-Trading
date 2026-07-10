@@ -5,6 +5,7 @@ import time
 
 import pandas as pd
 import pytest
+import duckdb
 
 from quant_signal.datafeed.store import BarStore
 
@@ -123,3 +124,46 @@ def test_write_drops_non_finite_close_even_when_volume_exists(store: BarStore) -
 
     assert written == 1
     assert store.daily_bar_count("7709.HK") == 1
+
+
+def test_startup_retries_transient_duckdb_file_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+    real_connect = duckdb.connect
+
+    def flaky_connect(path: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise duckdb.IOException(
+                f'IO Error: Cannot open file "{path}": file is already open'
+            )
+        return real_connect(path)
+
+    monkeypatch.setattr("quant_signal.datafeed.store.duckdb.connect", flaky_connect)
+    monkeypatch.setattr("quant_signal.datafeed.store.time.sleep", lambda _: None)
+
+    store = BarStore(tmp_path / "locked-once.duckdb")
+
+    assert calls == 3
+    assert store.daily_bar_count("SPY") == 0
+
+
+def test_startup_does_not_retry_non_lock_duckdb_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def broken_connect(path: str):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        raise duckdb.IOException("IO Error: database file is corrupt")
+
+    monkeypatch.setattr("quant_signal.datafeed.store.duckdb.connect", broken_connect)
+    monkeypatch.setattr("quant_signal.datafeed.store.time.sleep", lambda _: None)
+
+    with pytest.raises(duckdb.IOException, match="corrupt"):
+        BarStore(tmp_path / "corrupt.duckdb")
+
+    assert calls == 1

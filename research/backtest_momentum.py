@@ -17,6 +17,7 @@ from quant_signal.config import load_settings
 from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
+from quant_signal.research_execution import build_next_open_portfolio
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 
 REPORTS = Path(__file__).parent / "reports"
@@ -72,6 +73,7 @@ def run_backtest(
         lookbacks=lookbacks,
     )
     close = bars["close"].unstack("ticker").sort_index()
+    open_prices = bars["open"].unstack("ticker").reindex_like(close)
     month_ends = close.groupby(close.index.tz_localize(None).to_period("M")).tail(1).index
 
     weights = pd.DataFrame(0.0, index=close.index, columns=close.columns)
@@ -92,14 +94,7 @@ def run_backtest(
             "实际包含的标的没有交集，检查 run_backtest 的 universe 参数是否传对"
         )
 
-    pf = vbt.Portfolio.from_orders(
-        close=close,
-        size=weights,
-        size_type="targetpercent",
-        freq="1D",
-        cash_sharing=True,
-        call_seq="auto",
-    )
+    pf = build_next_open_portfolio(close, open_prices, weights)
     stats = pf.stats()
     years = (close.index[-1] - close.index[0]).days / 365.25
     total_ret = float(stats["Total Return [%]"]) / 100
@@ -152,7 +147,7 @@ def main() -> None:
     out.write_text(
         "# 动量轮动回测报告\n\n"
         f"- 数据: {args.start} 至今，universe={settings.universe}\n"
-        f"- 月末调仓，等权持有 top_n\n"
+        f"- 月末收盘生成信号，下一交易日开盘成交；单边手续费5bp+滑点5bp\n"
         f"{fx_note}\n" + "\n".join(rows) + "\n\n"
         "> 回测结果仅供评估，不构成投资建议。参数修改由用户决定。\n",
         encoding="utf-8",

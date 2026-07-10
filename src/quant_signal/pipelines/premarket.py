@@ -9,7 +9,12 @@ import pandas as pd
 import structlog
 
 from quant_signal.concentration import cluster_weight_warning, correlation_clusters
-from quant_signal.notifier.cards import momentum_ranking_card, premarket_cards
+from quant_signal.ai_briefing import AIBriefingContext, run_ai_briefing
+from quant_signal.notifier.cards import (
+    build_ai_briefing_card,
+    momentum_ranking_card,
+    premarket_cards,
+)
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.trend_gate import TrendInfo, apply_trend_gate
 
@@ -69,6 +74,84 @@ def _latest_finite_close(bars: pd.DataFrame, ticker: str) -> float | None:
     series = bars.xs(ticker, level="ticker")["close"].dropna()
     finite = series[series.map(lambda value: math.isfinite(float(value)))]
     return float(finite.iloc[-1]) if not finite.empty else None
+
+
+def _signal_context(
+    signals: list[Signal], ticker_currency: dict[str, str] | None = None
+) -> list[dict[str, object]]:
+    ticker_currency = ticker_currency or {}
+    rows: list[dict[str, object]] = []
+    for signal in signals:
+        extra = signal.extra or {}
+        row: dict[str, object] = {
+            "ticker": signal.ticker,
+            "direction": signal.direction.value.upper(),
+            "price": round(signal.price, 4),
+            "currency": ticker_currency.get(signal.ticker, "USD"),
+            "price_source": "structured_signal",
+            "strategy": signal.strategy_id,
+            "reason": signal.reason,
+        }
+        if signal.suggested_weight is not None:
+            row["suggested_weight"] = round(signal.suggested_weight, 4)
+        for key in (
+            "target_buy",
+            "take_profit",
+            "stop_loss",
+            "entry_low",
+            "entry_high",
+            "momentum_60d",
+            "holding_return",
+            "earnings_in_days",
+            "quality_flag",
+            "earnings_surprise",
+        ):
+            if key in extra:
+                row[key] = extra[key]
+        rows.append(row)
+    return rows
+
+
+def _ranking_context(
+    ranking: list[tuple[str, float, float]]
+) -> list[dict[str, object]]:
+    return [
+        {
+            "ticker": ticker,
+            "momentum": round(momentum, 4),
+            "price": round(price, 4),
+        }
+        for ticker, momentum, price in ranking[:8]
+    ]
+
+
+def _maybe_send_ai_briefing(
+    engine: Engine,
+    now: datetime,
+    signals: list[Signal],
+    ranking: list[tuple[str, float, float]],
+    holdings: list[str],
+    notes: list[str],
+    analysis_cards: list[dict[str, str]],
+) -> None:
+    cfg = engine.settings.ai_briefing
+    if not cfg.enabled:
+        return
+    context = AIBriefingContext(
+        as_of=now.isoformat(),
+        signals=_signal_context(signals, engine.settings.international_tickers),
+        ranking=_ranking_context(ranking),
+        holdings=sorted(holdings),
+        notes=[note for note in notes if note],
+        analysis_cards=analysis_cards,
+    )
+    try:
+        body = run_ai_briefing(cfg, context)
+    except Exception as error:  # noqa: BLE001
+        log.warning("ai_briefing.unexpected_error", error=str(error))
+        return
+    if body:
+        engine.notifier.send(build_ai_briefing_card(body))
 
 
 def run(engine: Engine, now: datetime) -> None:
@@ -151,10 +234,14 @@ def run(engine: Engine, now: datetime) -> None:
         engine.ledger.insert(signal, pushed=False, now=now)
 
     to_push = _annotate_earnings(engine, result.to_push, now)
+    analysis_cards: list[dict[str, str]] = []
     if to_push:
         live_prices = engine._fetch_live_prices({signal.ticker for signal in to_push})
         cards = premarket_cards(
             to_push, engine.settings.international_tickers, live_prices
+        )
+        analysis_cards.extend(
+            {"title": card.title, "body": card.body_md} for card in cards
         )
         delivery_results = [engine.notifier.send(card) for card in cards]
         delivered = bool(cards) and all(delivery_results)
@@ -169,15 +256,25 @@ def run(engine: Engine, now: datetime) -> None:
     }
     close_wide = bars["close"].unstack("ticker").sort_index()
     clusters = correlation_clusters(close_wide, list(weights))
-    engine.notifier.send(
-        momentum_ranking_card(
-            ranking,
-            held=set(current),
-            trend_flat={info.ticker for info in trend_infos if info.state == "FLAT"},
-            insufficient={
-                info.ticker for info in trend_infos if info.state == "INSUFFICIENT"
-            },
-            footer_md=cluster_weight_warning(clusters, weights),
-        )
+    concentration_note = cluster_weight_warning(clusters, weights)
+    ranking_card = momentum_ranking_card(
+        ranking,
+        held=set(current),
+        trend_flat={info.ticker for info in trend_infos if info.state == "FLAT"},
+        insufficient={
+            info.ticker for info in trend_infos if info.state == "INSUFFICIENT"
+        },
+        footer_md=concentration_note,
+    )
+    engine.notifier.send(ranking_card)
+    analysis_cards.append({"title": ranking_card.title, "body": ranking_card.body_md})
+    _maybe_send_ai_briefing(
+        engine,
+        now,
+        to_push,
+        ranking,
+        target_tickers,
+        [concentration_note] if concentration_note else [],
+        analysis_cards,
     )
     log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))

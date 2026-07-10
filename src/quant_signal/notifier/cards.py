@@ -37,6 +37,33 @@ def alert_card(title: str, body_md: str) -> Card:
     return Card(kind=CardKind.ALERT, title=f"🚨 {title}", body_md=body_md)
 
 
+def build_ai_briefing_card(body_md: str) -> Card:
+    disclaimer = "仅供观察，不构成投资建议"
+    body = body_md.strip()
+    if disclaimer not in body:
+        body = f"{body}\n\n_{disclaimer}_"
+    return report_card("🤖 AI早报观点", body)
+
+
+def negative_overreaction_card(cases: list[dict[str, object]]) -> Card:
+    lines = [
+        "仅观察：利空分类未发现结构性损伤，且价格已出现企稳；不代表已证明错杀。",
+        "",
+        "| 标的 | 事件类型 | 冲击跌幅 | 放量 | 确认日 | 下一步 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for case in cases:
+        drop = case["drop"]
+        volume_ratio = case["volume_ratio"]
+        assert isinstance(drop, (int, float))
+        assert isinstance(volume_ratio, (int, float))
+        lines.append(
+            f"| {case['ticker']} | {case['event_type']} | {float(drop):+.1%} | "
+            f"{float(volume_ratio):.1f}x | {case['confirmed_at']} | 虚拟观察 |"
+        )
+    return report_card("🩹 利空错杀 · 企稳观察", "\n".join(lines))
+
+
 def momentum_ranking_card(
     ranking: list[tuple[str, float, float]],
     held: set[str],

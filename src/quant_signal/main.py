@@ -24,11 +24,19 @@ def main() -> None:
     notifier = get_notifier(settings)
     from quant_signal.datafeed.earnings import YFinanceEarnings
     from quant_signal.datafeed.fundamentals import YFinanceFundamentals
+    from quant_signal.datafeed.news import AlpacaNewsSource
+    from quant_signal.news_store import NewsStore
 
     engine = Engine(
         settings, store, get_source(settings), ledger, notifier,
         earnings_source=YFinanceEarnings(),
         fundamentals_source=YFinanceFundamentals(),
+        news_source=(
+            AlpacaNewsSource(settings.alpaca_key, settings.alpaca_secret)
+            if settings.alpaca_key and settings.alpaca_secret
+            else None
+        ),
+        news_store=NewsStore(settings.db_path / "news.db"),
     )
     sched = build_scheduler(engine, ledger, store, notifier)
     sched.start()

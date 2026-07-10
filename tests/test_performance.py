@@ -1,4 +1,12 @@
-from quant_signal.performance import Trade, build_round_trips, performance_card, strategy_summary
+import pandas as pd
+
+from quant_signal.performance import (
+    Trade,
+    build_horizon_trades,
+    build_round_trips,
+    performance_card,
+    strategy_summary,
+)
 
 
 def _row(sid: str, ticker: str, direction: str, price: float, at: str) -> dict[str, object]:
@@ -22,6 +30,50 @@ def test_round_trips_pair_buy_then_sell() -> None:
 
 def test_round_trips_exclude_alert_strategies() -> None:
     rows = [_row("price_deviation", "MU", "buy", 100.0, "2026-06-01")]
+    assert build_round_trips(rows) == []
+
+
+def _daily_bars(n: int = 25) -> pd.DataFrame:
+    idx = pd.bdate_range("2026-06-02", periods=n, tz="UTC")
+    return pd.DataFrame(
+        {
+            "open": range(100, 100 + n),
+            "high": range(101, 101 + n),
+            "low": range(99, 99 + n),
+            "close": range(100, 100 + n),
+            "volume": 1_000_000,
+        },
+        index=pd.MultiIndex.from_product([["MU"], idx], names=["ticker", "ts"]),
+    )
+
+
+def test_market_scan_horizon_enters_next_open_and_exits_day_20_close() -> None:
+    rows = [_row("market_scan", "MU", "buy", 999.0, "2026-06-01T11:00:00+00:00")]
+
+    trades = build_horizon_trades(rows, _daily_bars(), horizon_days=20)
+
+    assert len(trades) == 1
+    assert trades[0].entry_price == 100.0
+    assert trades[0].exit_price == 119.0
+    assert trades[0].closed
+
+
+def test_market_scan_horizon_is_open_before_maturity() -> None:
+    rows = [_row("market_scan", "MU", "buy", 999.0, "2026-06-01T11:00:00+00:00")]
+
+    trades = build_horizon_trades(rows, _daily_bars(10), horizon_days=20)
+
+    assert len(trades) == 1 and not trades[0].closed
+    assert trades[0].entry_price == 100.0
+
+
+def test_market_scan_horizon_skips_signal_without_next_open() -> None:
+    rows = [_row("market_scan", "MU", "buy", 999.0, "2026-09-01T11:00:00+00:00")]
+    assert build_horizon_trades(rows, _daily_bars(), horizon_days=20) == []
+
+
+def test_round_trips_leave_market_scan_to_horizon_builder() -> None:
+    rows = [_row("market_scan", "MU", "buy", 100.0, "2026-06-01")]
     assert build_round_trips(rows) == []
 
 

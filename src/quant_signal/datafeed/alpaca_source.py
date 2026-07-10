@@ -13,6 +13,9 @@ _COLMAP = {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
 
 
 class AlpacaSource:
+    # 免费 IEX feed 只覆盖部分市场成交量，不适合横截面流动性/量比排名。
+    partial_market_volume = True
+
     def __init__(self, key: str, secret: str) -> None:
         if not key or not secret:
             raise ValueError("ALPACA_KEY/ALPACA_SECRET 未配置，请填写 config/.env")

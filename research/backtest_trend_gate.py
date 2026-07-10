@@ -16,6 +16,7 @@ import vectorbt as vbt
 from quant_signal.config import load_settings
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
+from quant_signal.research_execution import build_next_open_portfolio
 from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.trend_gate import (
     TrendGateConfig,
@@ -143,10 +144,8 @@ def build_weights(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly
 def build_portfolio(bars: pd.DataFrame, settings, gate: str, buffer: float, weekly_exit: bool):  # type: ignore[no-untyped-def]
     """构建组合并返回 (pf, close_index, changes)。"""
     weights, close, changes = build_weights(bars, settings, gate, buffer, weekly_exit)
-    pf = vbt.Portfolio.from_orders(
-        close=close, size=weights, size_type="targetpercent", freq="1D",
-        cash_sharing=True, call_seq="auto",
-    )
+    open_prices = bars["open"].unstack("ticker").reindex_like(close)
+    pf = build_next_open_portfolio(close, open_prices, weights)
     return pf, pd.DatetimeIndex(close.index), changes
 
 
@@ -201,6 +200,7 @@ def main() -> None:
         "# 趋势闸门 阶段B 回测报告\n\n"
         f"- 区间: {START} 至今，universe={settings.universe}\n"
         "- 月末动量选股 + 每周五评估趋势闸门退出，FLAT 仓位切最强防御(BIL/TLT/GLD)\n"
+        "- 收盘生成信号，下一交易日开盘成交；单边手续费5bp+滑点5bp\n"
         "- 无风险利率基准 BIL；个股相对强弱基准 SPY；非美元标的(港股/韩股)只用200日线\n\n"
         "## 主对照（buffer=0.03，周度退出）\n\n" + "\n".join(main_rows) + "\n\n"
         "## buffer 扫描（完整闸门，周度退出）\n\n" + "\n".join(buf_rows) + "\n\n"

@@ -9,6 +9,9 @@ def test_load_settings_from_repo_yaml() -> None:
     s = load_settings()
     assert s.data_source in ("yfinance", "alpaca")  # 用户在 settings.yaml 中可切换
     assert "SPY" in s.universe
+    assert s.ai_briefing.enabled is True
+    assert s.ai_briefing.provider == "codex_cli"
+    assert s.ai_briefing.command == "codex"
     assert s.strategies["momentum_rotation"]["top_n"] == 3
     assert s.notify.dedup_hours == 4
     # 趋势闸门：阶段B回测选出的最优配置(仅200线+防御，关绝对动量)
