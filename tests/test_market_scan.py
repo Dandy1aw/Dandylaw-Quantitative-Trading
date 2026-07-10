@@ -325,3 +325,34 @@ def test_index_market_scan_blocks_invalid_execution_price_order(
 
     first = ledger.latest_scan_candidates(NOW.date())[0]
     assert first["extra"]["block_reason"] == "INVALID_PRICE_ORDER"
+
+
+def test_index_market_scan_deadline_aborts_and_fails_closed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """超过总 deadline 时在 chunk 之间中止并 fail closed, 不产生候选和卡片。"""
+    import quant_signal.pipelines.market_scan as market_scan_module
+
+    bars = _index_bars({"HOT": 0.006, "MEH": 0.001, "COLD": -0.001})
+    provider = FakeUniverseProvider(
+        {"sp500": {"HOT", "MEH"}, "nasdaq100": {"HOT", "COLD"}}
+    )
+    source = FakeSipSource(bars)
+    store = BarStore(tmp_path / "bars.duckdb")
+    ledger = SignalLedger(tmp_path / "signals.db")
+    notifier = FakeNotifier()
+    engine = Engine(
+        _index_settings(),
+        store,
+        source,  # type: ignore[arg-type]
+        ledger,
+        notifier,
+        index_universe_provider=provider,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(market_scan_module, "SCAN_DEADLINE_SECONDS", -1.0)
+
+    engine.run_market_scan(NOW)
+
+    assert source.sip_calls == []  # 第一个 chunk 前就应中止
+    assert ledger.latest_scan_candidates(NOW.date()) == []
+    assert notifier.cards == []

@@ -225,3 +225,119 @@ def test_failed_job_error_alert_is_retried_next_tick() -> None:
     health.listen(_Event("premarket", RuntimeError("boom-2")))
     hb.tick()
     assert len(notifier.cards) == 2
+
+
+# ---------------------------------------------------------------- job runtime health
+
+
+def _utc(year: int, month: int, day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+
+
+class _Clock:
+    def __init__(self, start: datetime) -> None:
+        self.value = start
+
+    def now(self) -> datetime:
+        return self.value
+
+    def advance(self, **kwargs: float) -> None:
+        self.value += timedelta(**kwargs)
+
+
+def test_job_runtime_wrap_records_duration_and_success() -> None:
+    from quant_signal.scheduler import JobRuntime
+
+    clock = _Clock(_utc(2026, 7, 10, 11, 5))  # Fri 07:05 ET
+
+    def job() -> None:
+        clock.advance(seconds=42)
+
+    runtime = JobRuntime(now_fn=clock.now)
+    wrapped = runtime.wrap("market_scan", job)
+    assert runtime.last_success("market_scan") is None
+
+    wrapped()
+
+    assert runtime.last_success("market_scan") == clock.value
+    assert runtime.last_duration("market_scan") == 42.0
+    assert runtime.running_since("market_scan") is None
+
+
+def test_job_runtime_failure_does_not_record_success() -> None:
+    from quant_signal.scheduler import JobRuntime
+
+    clock = _Clock(_utc(2026, 7, 10, 11, 5))
+
+    def bad_job() -> None:
+        raise RuntimeError("boom")
+
+    runtime = JobRuntime(now_fn=clock.now)
+    wrapped = runtime.wrap("market_scan", bad_job)
+    with pytest.raises(RuntimeError):
+        wrapped()
+
+    assert runtime.last_success("market_scan") is None
+    assert runtime.running_since("market_scan") is None
+
+
+def test_runtime_check_fails_when_market_scan_misses_todays_run() -> None:
+    from quant_signal.scheduler import JobRuntime, build_runtime_check
+
+    clock = _Clock(_utc(2026, 7, 9, 12, 0))  # Thu: 服务启动
+    runtime = JobRuntime(now_fn=clock.now)
+    check = build_runtime_check(runtime, "market_scan")
+    assert check() is True  # 启动宽限: 还没到下一个应跑时点
+
+    clock.value = _utc(2026, 7, 10, 14, 0)  # Fri 10:00 ET, 07:00 的扫描没跑
+    assert check() is False
+
+    runtime.wrap("market_scan", lambda: None)()
+    assert check() is True
+
+
+def test_runtime_check_tolerates_weekend_gap() -> None:
+    from quant_signal.scheduler import JobRuntime, build_runtime_check
+
+    clock = _Clock(_utc(2026, 7, 10, 11, 5))  # Fri 07:05 ET
+    runtime = JobRuntime(now_fn=clock.now)
+    runtime.wrap("market_scan", lambda: None)()  # Fri 成功
+
+    check = build_runtime_check(runtime, "market_scan")
+    clock.value = _utc(2026, 7, 13, 10, 0)  # Mon 06:00 ET, 今日还没到运行窗口
+    assert check() is True
+
+    clock.value = _utc(2026, 7, 13, 14, 0)  # Mon 10:00 ET, 今天该跑没跑
+    assert check() is False
+
+
+def test_runtime_check_fails_when_job_runs_beyond_deadline() -> None:
+    from quant_signal.scheduler import JobRuntime, build_runtime_check
+
+    clock = _Clock(_utc(2026, 7, 10, 11, 5))
+    runtime = JobRuntime(now_fn=clock.now)
+    runtime.record_start("market_scan")
+    check = build_runtime_check(runtime, "market_scan")
+
+    clock.advance(minutes=5)
+    assert check() is True
+    clock.advance(minutes=6)
+    assert check() is False
+
+
+def test_log_processor_redacts_webhook_and_api_secrets() -> None:
+    from quant_signal.logging_setup import redact_secrets
+
+    event = {
+        "url": "https://open.feishu.cn/open-apis/bot/v2/hook/abc-token-123",
+        "error": "POST https://open.feishu.cn/open-apis/bot/v2/hook/abc-token-123 500",
+        "note": "APCA-API-SECRET-KEY: sk-super-secret",
+        "count": 3,
+    }
+    out = redact_secrets(None, "info", dict(event))
+
+    flat = str(out)
+    assert "abc-token-123" not in flat
+    assert "sk-super-secret" not in flat
+    assert out["count"] == 3
+    assert "open.feishu.cn" in str(out["url"])  # 只遮 token, 保留 host 便于排障

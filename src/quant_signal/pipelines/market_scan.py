@@ -41,6 +41,8 @@ log = structlog.get_logger()
 STRATEGY_ID = "market_scan"
 CHUNK = 200
 TOP_LIQUID = 500
+# 指数扫描总 deadline: 超时在 chunk 之间中止并 fail closed, 不得挤占 08:00 早报
+SCAN_DEADLINE_SECONDS = 600.0
 
 
 class _DailySource(Protocol):
@@ -106,8 +108,19 @@ def _fetch_sip_chunks(
     symbols: list[str],
     start: date,
     end: date,
-) -> None:
+    deadline_monotonic: float | None = None,
+) -> bool:
+    """按 chunk 拉取 SIP 日线; 到达总 deadline 时在 chunk 之间中止, 返回是否完整完成。"""
+    import time as _time
+
     for offset in range(0, len(symbols), CHUNK):
+        if deadline_monotonic is not None and _time.monotonic() >= deadline_monotonic:
+            log.warning(
+                "market_scan.deadline_exceeded",
+                offset=offset,
+                total=len(symbols),
+            )
+            return False
         chunk = symbols[offset : offset + CHUNK]
         try:
             fetched = source.fetch_sip_daily_bars(chunk, start, end)
@@ -117,6 +130,7 @@ def _fetch_sip_chunks(
         valid = valid_ohlcv_bars(fetched)
         if not valid.empty:
             engine.store.write_daily_bars(valid, source="alpaca_sip")
+    return True
 
 
 def _cached_scan_window(engine: Engine, symbols: list[str], as_of: date) -> pd.DataFrame:
@@ -188,22 +202,33 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
     bootstrap = [symbol for symbol in symbols if int(counts.get(symbol, 0)) < MIN_HISTORY]
     incremental = [symbol for symbol in symbols if symbol not in set(bootstrap)]
     source = cast(_SipDailySource, engine.source)
+    import time as _time
+
+    deadline = _time.monotonic() + SCAN_DEADLINE_SECONDS
+    completed = True
     if bootstrap:
-        _fetch_sip_chunks(
+        completed = _fetch_sip_chunks(
             engine,
             source,
             bootstrap,
             market_as_of - timedelta(days=320),
             market_as_of,
+            deadline_monotonic=deadline,
         )
-    if incremental:
-        _fetch_sip_chunks(
+    if completed and incremental:
+        completed = _fetch_sip_chunks(
             engine,
             source,
             incremental,
             market_as_of - timedelta(days=14),
             market_as_of,
+            deadline_monotonic=deadline,
         )
+    if not completed:
+        # 超时 fail closed: 已写入的 bar 保留, 但当日不产生候选
+        engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
+        log.warning("market_scan.index_skip", reason="deadline_exceeded")
+        return
     bars = _cached_scan_window(engine, symbols, market_as_of)
     validation = validate_scan_bars(bars, symbols, market_as_of)
     config = engine.settings.index_universe
