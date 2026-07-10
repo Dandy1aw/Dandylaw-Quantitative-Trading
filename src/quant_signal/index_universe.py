@@ -272,7 +272,11 @@ def parse_nasdaq100_payload(
             continue
     if not members:
         raise UniverseValidationError("Nasdaq payload contained no valid symbols")
-    as_of = _parse_date(outer.get("asOf") or outer.get("date")) or fallback_as_of
+    as_of = _parse_date(outer.get("asOf") or outer.get("date"))
+    if as_of is None:
+        raise UniverseValidationError(
+            "Nasdaq source date is missing or unparseable"
+        )
     return IndexConstituents(frozenset(members), as_of, NASDAQ100_URL)
 
 
@@ -287,6 +291,8 @@ def parse_sp500_workbook(
     ticker_column: int | None = None
     asset_column: int | None = None
     name_column: int | None = None
+    identifier_column: int | None = None
+    sector_column: int | None = None
     for row_number, (_, row) in enumerate(table.iterrows()):
         names = {
             str(value).strip().lower(): column
@@ -297,14 +303,22 @@ def parse_sp500_workbook(
             ticker_column = names["ticker"]
             asset_column = names.get("asset class")
             name_column = names.get("name")
+            identifier_column = names.get("identifier")
+            sector_column = names.get("sector")
             break
     if header_row is None or ticker_column is None:
         raise UniverseValidationError("SPY holdings workbook missing Ticker header")
-    as_of = fallback_as_of
+    if asset_column is None and (
+        identifier_column is None or sector_column is None
+    ):
+        raise UniverseValidationError(
+            "SPY holdings workbook missing recognizable equity classification"
+        )
+    as_of: date | None = None
     for _, row in table.iloc[:header_row].iterrows():
         values = [value for value in row.tolist() if not pd.isna(value)]
         if values and str(values[0]).strip().lower() in {"as of date:", "as of date"}:
-            as_of = _parse_date(values[1] if len(values) > 1 else None) or fallback_as_of
+            as_of = _parse_date(values[1] if len(values) > 1 else None)
             break
         for value in values:
             match = re.fullmatch(
@@ -315,17 +329,41 @@ def parse_sp500_workbook(
                 if parsed is not None:
                     as_of = parsed
                     break
-        if as_of != fallback_as_of:
+        if as_of is not None:
             break
+    if as_of is None:
+        raise UniverseValidationError(
+            "SPY holdings source date is missing or unparseable"
+        )
     members: set[str] = set()
     for _, row in table.iloc[header_row + 1 :].iterrows():
         if asset_column is not None:
             asset = str(row.iloc[asset_column]).strip().lower()
-            if asset not in {"equity", "common stock"}:
+            if asset not in {"equity", "common stock", "stock"}:
+                continue
+        else:
+            assert identifier_column is not None and sector_column is not None
+            identifier = row.iloc[identifier_column]
+            sector = row.iloc[sector_column]
+            if (
+                pd.isna(identifier)
+                or not str(identifier).strip()
+                or pd.isna(sector)
+                or not str(sector).strip()
+            ):
                 continue
         if name_column is not None:
             name = str(row.iloc[name_column]).lower()
-            if "cash" in name or "future" in name:
+            if any(
+                marker in name
+                for marker in (
+                    "cash",
+                    "future",
+                    "us dollar",
+                    "currency",
+                    "collateral",
+                )
+            ):
                 continue
         raw_symbol = row.iloc[ticker_column]
         if pd.isna(raw_symbol):
@@ -445,16 +483,17 @@ class IndexUniverseProvider:
         self, now: datetime, previous: IndexUniverseSnapshot | None
     ) -> IndexUniverseSnapshot:
         fetched = {index: self._fetch(index, now) for index in self.indices}
+        for index, result in fetched.items():
+            source_age = now.date() - result.as_of
+            if source_age < timedelta(0):
+                raise UniverseValidationError(
+                    f"{index} source as_of {result.as_of.isoformat()} is in the future"
+                )
+            if source_age > timedelta(days=self.max_stale_days):
+                raise StaleUniverseError(
+                    f"{index} source is {source_age.days} days stale"
+                )
         source_as_of = min(result.as_of for result in fetched.values())
-        source_age = now.date() - source_as_of
-        if source_age < timedelta(0):
-            raise UniverseValidationError(
-                f"index source as_of {source_as_of.isoformat()} is in the future"
-            )
-        if source_age > timedelta(days=self.max_stale_days):
-            raise StaleUniverseError(
-                f"index source is {source_age.days} days stale"
-            )
         members: dict[str, Iterable[str]] = {
             index: result.members for index, result in fetched.items()
         }

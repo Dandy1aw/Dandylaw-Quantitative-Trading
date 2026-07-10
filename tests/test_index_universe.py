@@ -49,23 +49,42 @@ def _snapshot(*, fetched_at: datetime = NOW):  # type: ignore[no-untyped-def]
     )
 
 
-def _workbook(symbols: set[str], *, actual_date_format: bool = False) -> bytes:
-    rows: list[list[object]] = [
-        ["Fund Name:", "SPDR S&P 500 ETF Trust", None],
-        (
-            ["Holdings:", "As of 09-Jul-2026", None]
-            if actual_date_format
-            else ["As of Date:", "2026-07-09", None]
-        ),
-        [None, None, None],
-        ["Ticker", "Name", "Asset Class"],
-    ]
-    rows.extend([[symbol, f"Company {symbol}", "Equity"] for symbol in sorted(symbols)])
+def _workbook(
+    symbols: set[str],
+    *,
+    actual_date_format: bool = False,
+    date_value: str | None = "2026-07-09",
+    include_asset_class: bool = True,
+) -> bytes:
+    rows: list[list[object]] = [["Fund Name:", "SPDR S&P 500 ETF Trust", None]]
+    if actual_date_format:
+        rows.append(["Holdings:", "As of 09-Jul-2026", None])
+    elif date_value is not None:
+        rows.append(["As of Date:", date_value, None])
+    rows.append([None, None, None])
+    header = ["Ticker", "Name"]
+    if include_asset_class:
+        header.append("Asset Class")
+    rows.append(header)
     rows.extend(
         [
-            ["USD", "US DOLLAR", "Cash"],
-            ["ESU6", "S&P 500 FUTURE", "Futures"],
-            [None, "Unmapped", "Equity"],
+            [symbol, f"Company {symbol}", "Equity"]
+            if include_asset_class
+            else [symbol, f"Company {symbol}"]
+            for symbol in sorted(symbols)
+        ]
+    )
+    rows.extend(
+        [
+            ["USD", "US DOLLAR", "Cash"]
+            if include_asset_class
+            else ["USD", "US DOLLAR"],
+            ["ESU6", "S&P 500 FUTURE", "Futures"]
+            if include_asset_class
+            else ["ESU6", "S&P 500 FUTURE"],
+            [None, "Unmapped", "Equity"]
+            if include_asset_class
+            else [None, "Unmapped"],
         ]
     )
     output = BytesIO()
@@ -134,6 +153,47 @@ def test_sp500_parser_recognizes_state_street_actual_as_of_format() -> None:
     )
 
     assert parsed.as_of == date(2026, 7, 9)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data": {"data": {"rows": [{"symbol": "AAPL"}]}}},
+        {
+            "data": {
+                "date": "not-a-date",
+                "data": {"rows": [{"symbol": "AAPL"}]},
+            }
+        },
+    ],
+)
+def test_nasdaq_parser_rejects_missing_or_unparseable_source_date(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(UniverseValidationError, match="date"):
+        parse_nasdaq100_payload(payload, fallback_as_of=NOW.date())
+
+
+@pytest.mark.parametrize("date_value", [None, "not-a-date"])
+def test_sp500_parser_rejects_missing_or_unparseable_source_date(
+    date_value: str | None,
+) -> None:
+    with pytest.raises(UniverseValidationError, match="date"):
+        parse_sp500_workbook(
+            _workbook({"AAPL", "MSFT"}, date_value=date_value),
+            fallback_as_of=NOW.date(),
+        )
+
+
+def test_sp500_parser_requires_recognizable_equity_classification() -> None:
+    with pytest.raises(UniverseValidationError, match="classification"):
+        parse_sp500_workbook(
+            _workbook(
+                {"AAPL", "MSFT"},
+                include_asset_class=False,
+            ),
+            fallback_as_of=NOW.date(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -249,6 +309,28 @@ def test_provider_rejects_stale_source_date_even_after_successful_fetch(
     )
 
     with pytest.raises(StaleUniverseError, match="source"):
+        provider.load(NOW)
+
+
+def test_provider_rejects_future_date_from_any_individual_source(
+    tmp_path: Path,
+) -> None:
+    def fetch_sp500() -> IndexConstituents:
+        return IndexConstituents(
+            frozenset(_symbols("S", 500)), NOW.date() - timedelta(days=1), "sp"
+        )
+
+    def fetch_nasdaq100() -> IndexConstituents:
+        return IndexConstituents(
+            frozenset(_symbols("N", 100)), NOW.date() + timedelta(days=1), "ndx"
+        )
+
+    provider = IndexUniverseProvider(
+        cache=UniverseCache(tmp_path / "index.json"),
+        fetchers={"sp500": fetch_sp500, "nasdaq100": fetch_nasdaq100},
+    )
+
+    with pytest.raises(UniverseError, match="nasdaq100.*future"):
         provider.load(NOW)
 
 
