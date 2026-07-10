@@ -341,3 +341,14 @@ def test_log_processor_redacts_webhook_and_api_secrets() -> None:
     assert "sk-super-secret" not in flat
     assert out["count"] == 3
     assert "open.feishu.cn" in str(out["url"])  # 只遮 token, 保留 host 便于排障
+
+
+def test_setup_logging_silences_httpx_request_urls() -> None:
+    """httpx INFO 日志会打印完整请求 URL(含 webhook token), 必须压到 WARNING。"""
+    import logging
+
+    from quant_signal.logging_setup import setup_logging
+
+    setup_logging()
+    assert logging.getLogger("httpx").level >= logging.WARNING
+    assert logging.getLogger("httpcore").level >= logging.WARNING

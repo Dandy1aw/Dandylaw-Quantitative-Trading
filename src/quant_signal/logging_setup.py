@@ -29,6 +29,9 @@ def redact_secrets(
 
 def setup_logging() -> None:
     logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(message)s")
+    # httpx 在 INFO 级会打印完整请求 URL(含飞书 webhook token), 必须压到 WARNING
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.processors.TimeStamper(fmt="iso", utc=True),
