@@ -44,7 +44,29 @@ def test_fetch_daily_bars_parses_and_normalizes(monkeypatch: pytest.MonkeyPatch)
     assert list(out.columns) == ["open", "high", "low", "close", "volume"]
     assert out.index.names == ["ticker", "ts"]
     assert captured["params"]["adjustment"] == "all"  # type: ignore[index]
+    assert captured["params"]["feed"] == "iex"  # type: ignore[index]
     assert captured["headers"]["APCA-API-KEY-ID"] == "k"  # type: ignore[index]
+
+
+def test_fetch_sip_daily_bars_requests_full_market_feed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    def fake_get(url: str, params: dict, headers: dict, timeout: float) -> httpx.Response:  # type: ignore[type-arg]
+        captured.append(dict(params))
+        return httpx.Response(200, json=FAKE_PAGE, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    out = AlpacaSource("k", "s").fetch_sip_daily_bars(
+        ["SPY"], date(2026, 7, 1), date(2026, 7, 3)
+    )
+
+    assert len(out) == 2
+    assert captured[0]["feed"] == "sip"
+    assert captured[0]["timeframe"] == "1Day"
+    assert captured[0]["start"] == "2026-07-01"
+    assert captured[0]["end"] == "2026-07-03"
 
 
 def test_missing_credentials_raises() -> None:

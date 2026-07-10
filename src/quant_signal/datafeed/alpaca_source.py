@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Union
+from typing import Literal, Union
 
 import httpx
 import pandas as pd
@@ -22,7 +22,13 @@ class AlpacaSource:
         self._headers = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
     def _fetch(
-        self, tickers: list[str], timeframe: str, start: str, end: str | None
+        self,
+        tickers: list[str],
+        timeframe: str,
+        start: str,
+        end: str | None,
+        *,
+        feed: Literal["iex", "sip"] = "iex",
     ) -> pd.DataFrame:
         frames: list[pd.DataFrame] = []
         params: dict[str, _QueryValue] = {
@@ -30,7 +36,7 @@ class AlpacaSource:
             "timeframe": timeframe,
             "start": start,
             "adjustment": "all",
-            "feed": "iex",
+            "feed": feed,
             "limit": 10_000,
         }
         if end:
@@ -59,6 +65,17 @@ class AlpacaSource:
 
     def fetch_daily_bars(self, tickers: list[str], start: date, end: date) -> pd.DataFrame:
         return self._fetch(tickers, "1Day", start.isoformat(), end.isoformat())
+
+    def fetch_sip_daily_bars(
+        self, tickers: list[str], start: date, end: date
+    ) -> pd.DataFrame:
+        return self._fetch(
+            tickers,
+            "1Day",
+            start.isoformat(),
+            end.isoformat(),
+            feed="sip",
+        )
 
     def list_active_symbols(self) -> list[str]:
         """全部 active+tradable 美股普通股代码(排除 OTC 与带后缀的权证/单位类)。
