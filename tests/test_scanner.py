@@ -1,7 +1,15 @@
+from datetime import date
+import time
+
 import numpy as np
 import pandas as pd
 
-from quant_signal.scanner import liquidity_filter, robust_factor_scores, scan_scores
+from quant_signal.scanner import (
+    liquidity_filter,
+    robust_factor_scores,
+    scan_scores,
+    validate_scan_bars,
+)
 
 
 def _bars(spec: dict[str, dict[str, float]], n: int = 140) -> pd.DataFrame:
@@ -31,6 +39,16 @@ def test_liquidity_filter_drops_cheap_and_thin() -> None:
 def test_liquidity_filter_top_k_by_dollar_volume() -> None:
     bars = _bars({"A": {"price0": 50.0, "vol": 2e6}, "B": {"price0": 50.0, "vol": 9e6}}, n=6)
     assert liquidity_filter(bars, min_dollar_volume=1e6, top_k=1) == ["B"]
+
+
+def test_liquidity_filter_uses_recent_twenty_sessions() -> None:
+    bars = _bars({"FADED": {"price0": 50.0, "vol": 1.0}}, n=40)
+    bars.loc[("FADED", slice(None)), "volume"] = np.r_[
+        np.full(20, 10_000_000),
+        np.full(20, 1_000),
+    ]
+
+    assert liquidity_filter(bars, min_dollar_volume=1_000_000) == []
 
 
 def test_scan_scores_rank_momentum_leader_first() -> None:
@@ -72,3 +90,48 @@ def test_robust_factor_scores_clip_outlier_and_center_ranks() -> None:
     assert min(scores.values()) >= -0.5
     assert max(scores.values()) <= 0.5
     assert scores["A"] < scores["B"] < scores["C"] <= scores["X"]
+
+
+def test_validate_scan_bars_checks_history_freshness_and_ohlcv() -> None:
+    fresh = _bars({"FRESH": {"price0": 50.0, "drift": 0.001}}, n=140)
+    as_of = fresh.index.get_level_values("ts").max().date()
+    stale = _bars({"STALE": {"price0": 50.0, "drift": 0.001}}, n=139)
+    short = _bars({"SHORT": {"price0": 50.0, "drift": 0.001}}, n=60)
+    invalid = _bars({"INVALID": {"price0": 50.0, "drift": 0.001}}, n=140)
+    invalid.loc[("INVALID", invalid.index.get_level_values("ts").max()), "close"] = -1
+
+    validation = validate_scan_bars(
+        pd.concat([fresh, stale, short, invalid]),
+        ["FRESH", "STALE", "SHORT", "INVALID", "MISSING"],
+        as_of,
+    )
+
+    assert validation.valid_symbols == ("FRESH",)
+    assert validation.coverage == 0.2
+    assert validation.rejected == {
+        "INVALID": "STALE",
+        "MISSING": "MISSING",
+        "SHORT": "SHORT_HISTORY",
+        "STALE": "STALE",
+    }
+    assert (validation.bars[["open", "high", "low", "close"]] > 0).all().all()
+
+
+def test_scan_scores_handles_600_symbols_locally_under_ten_seconds() -> None:
+    bars = _bars(
+        {
+            f"S{i:03d}": {
+                "price0": 20.0 + i / 10,
+                "drift": (i % 17) / 100_000,
+                "vol": 2_000_000 + i,
+            }
+            for i in range(600)
+        }
+    )
+
+    started = time.perf_counter()
+    results = scan_scores(bars)
+    elapsed = time.perf_counter() - started
+
+    assert len(results) == 600
+    assert elapsed < 10.0
