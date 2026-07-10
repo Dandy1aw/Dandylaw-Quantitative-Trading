@@ -2,6 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import json
 import math
+import sqlite3
 
 import pytest
 
@@ -227,6 +228,24 @@ def test_latest_scan_candidates_uses_most_recent_scan_date(
     ] == ["OLD"]
 
 
+def test_empty_new_scan_does_not_fall_back_to_previous_candidates(
+    ledger: SignalLedger,
+) -> None:
+    old_date = date(2026, 7, 8)
+    new_date = date(2026, 7, 9)
+    ledger.replace_scan_candidates(
+        old_date,
+        [{"ticker": "OLD", "rank": 1, "score": 0.1, "price": 10.0}],
+        as_of=date(2026, 7, 7),
+    )
+    ledger.replace_scan_candidates(new_date, [], as_of=date(2026, 7, 8))
+
+    assert ledger.latest_scan_candidates() == []
+    assert [row["ticker"] for row in ledger.latest_scan_candidates(old_date)] == [
+        "OLD"
+    ]
+
+
 def test_scan_candidate_schema_is_additive_to_existing_signals(
     ledger: SignalLedger,
 ) -> None:
@@ -238,3 +257,28 @@ def test_scan_candidate_schema_is_additive_to_existing_signals(
     )
 
     assert [row["ticker"] for row in ledger.signals_on(NOW.date())] == ["SPY"]
+
+
+def test_scan_candidate_replace_rolls_back_on_insert_failure(
+    ledger: SignalLedger,
+) -> None:
+    scan_date = NOW.date()
+    ledger.replace_scan_candidates(
+        scan_date,
+        [{"ticker": "OLD", "rank": 1, "score": 0.1, "price": 10.0}],
+        as_of=scan_date,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.replace_scan_candidates(
+            scan_date,
+            [
+                {"ticker": "DUP", "rank": 1, "score": 0.2, "price": 20.0},
+                {"ticker": "DUP", "rank": 2, "score": 0.3, "price": 21.0},
+            ],
+            as_of=scan_date,
+        )
+
+    assert [row["ticker"] for row in ledger.latest_scan_candidates(scan_date)] == [
+        "OLD"
+    ]

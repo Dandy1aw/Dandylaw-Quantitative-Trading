@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, cast
 
@@ -145,6 +146,16 @@ def _content_hash(members: Mapping[str, IndexMember]) -> str:
         [member.ticker, list(member.memberships)] for member in members.values()
     ]
     encoded = json.dumps(content, ensure_ascii=True, separators=(",", ":"))
+    return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _snapshot_hash(payload: Mapping[str, object]) -> str:
+    protected = {
+        key: value for key, value in payload.items() if key != "snapshot_hash"
+    }
+    encoded = json.dumps(
+        protected, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
     return sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -295,6 +306,17 @@ def parse_sp500_workbook(
         if values and str(values[0]).strip().lower() in {"as of date:", "as of date"}:
             as_of = _parse_date(values[1] if len(values) > 1 else None) or fallback_as_of
             break
+        for value in values:
+            match = re.fullmatch(
+                r"as of(?: date)?\s*:?\s*(.+)", str(value).strip(), flags=re.IGNORECASE
+            )
+            if match is not None:
+                parsed = _parse_date(match.group(1))
+                if parsed is not None:
+                    as_of = parsed
+                    break
+        if as_of != fallback_as_of:
+            break
     members: set[str] = set()
     for _, row in table.iloc[header_row + 1 :].iterrows():
         if asset_column is not None:
@@ -320,36 +342,47 @@ def parse_sp500_workbook(
 class UniverseCache:
     def __init__(self, path: Path) -> None:
         self.path = path
+        self._lock = threading.RLock()
 
     def load(self) -> IndexUniverseSnapshot:
-        try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise UniverseValidationError(f"unable to read universe cache: {error}") from error
+        with self._lock:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise UniverseValidationError(
+                    f"unable to read universe cache: {error}"
+                ) from error
         if not isinstance(payload, Mapping):
             raise UniverseValidationError("universe cache root must be an object")
-        return IndexUniverseSnapshot.from_dict(cast(Mapping[str, object], payload))
+        typed_payload = cast(Mapping[str, object], payload)
+        expected_hash = typed_payload.get("snapshot_hash")
+        if not isinstance(expected_hash, str) or _snapshot_hash(typed_payload) != expected_hash:
+            raise UniverseValidationError("universe cache snapshot hash mismatch")
+        return IndexUniverseSnapshot.from_dict(typed_payload)
 
     def save(self, snapshot: IndexUniverseSnapshot) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=self.path.parent,
-                prefix=f".{self.path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                temporary = Path(handle.name)
-                json.dump(snapshot.to_dict(), handle, ensure_ascii=False, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.replace(self.path)
-        finally:
-            if temporary is not None and temporary.exists():
-                temporary.unlink()
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            payload = snapshot.to_dict()
+            payload["snapshot_hash"] = _snapshot_hash(payload)
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                temporary.replace(self.path)
+            finally:
+                if temporary is not None and temporary.exists():
+                    temporary.unlink()
 
 
 Fetcher = Callable[[], IndexConstituents | Iterable[str]]
@@ -367,9 +400,7 @@ class IndexUniverseProvider:
         fetchers: Mapping[IndexName, Fetcher] | None = None,
     ) -> None:
         self.cache = cache
-        selected = indices or (
-            tuple(fetchers) if fetchers is not None else ("sp500", "nasdaq100")
-        )
+        selected = indices or ("sp500", "nasdaq100")
         self.indices: tuple[IndexName, ...] = tuple(selected)
         self.refresh_days = refresh_days
         self.max_stale_days = max_stale_days
@@ -414,6 +445,16 @@ class IndexUniverseProvider:
         self, now: datetime, previous: IndexUniverseSnapshot | None
     ) -> IndexUniverseSnapshot:
         fetched = {index: self._fetch(index, now) for index in self.indices}
+        source_as_of = min(result.as_of for result in fetched.values())
+        source_age = now.date() - source_as_of
+        if source_age < timedelta(0):
+            raise UniverseValidationError(
+                f"index source as_of {source_as_of.isoformat()} is in the future"
+            )
+        if source_age > timedelta(days=self.max_stale_days):
+            raise StaleUniverseError(
+                f"index source is {source_age.days} days stale"
+            )
         members: dict[str, Iterable[str]] = {
             index: result.members for index, result in fetched.items()
         }
@@ -422,7 +463,7 @@ class IndexUniverseProvider:
         snapshot = merge_members(
             members,
             now,
-            as_of=min(result.as_of for result in fetched.values()),
+            as_of=source_as_of,
             sources={index: result.source for index, result in fetched.items()},
         )
         self.cache.save(snapshot)
@@ -431,23 +472,44 @@ class IndexUniverseProvider:
     def load(self, now: datetime) -> IndexUniverseSnapshot:
         now = _utc(now)
         cached: IndexUniverseSnapshot | None = None
+        cache_matches_configuration = False
         if self.cache.path.exists():
             try:
                 cached = self.cache.load()
             except UniverseValidationError:
                 cached = None
         if cached is not None:
+            if cached.fetched_at > now or cached.as_of > now.date():
+                cached = None
+        if cached is not None:
+            cache_matches_configuration = set(
+                self._members_by_index(cached)
+            ) == set(self.indices)
             age = now - cached.fetched_at
-            if age.days < self.refresh_days:
+            source_age = now.date() - cached.as_of
+            if (
+                cache_matches_configuration
+                and age < timedelta(days=self.refresh_days)
+                and source_age <= timedelta(days=self.max_stale_days)
+            ):
                 return cached
         try:
-            return self._refresh(now, cached)
+            return self._refresh(
+                now, cached if cache_matches_configuration else None
+            )
         except Exception as error:  # noqa: BLE001
-            if cached is None:
+            if cached is None or not cache_matches_configuration:
+                if isinstance(error, StaleUniverseError):
+                    raise
                 raise UniverseError(f"index universe refresh failed: {error}") from error
-            age_days = (now - cached.fetched_at).days
-            if age_days > self.max_stale_days:
+            age = now - cached.fetched_at
+            source_age = now.date() - cached.as_of
+            if (
+                age > timedelta(days=self.max_stale_days)
+                or source_age > timedelta(days=self.max_stale_days)
+            ):
+                age_days = age.total_seconds() / 86_400
                 raise StaleUniverseError(
-                    f"last-known-good index universe is {age_days} days old"
+                    f"last-known-good index universe is {age_days:.2f} days old"
                 ) from error
             return cached

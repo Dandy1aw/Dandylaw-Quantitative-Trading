@@ -271,6 +271,35 @@ def test_index_market_scan_fails_closed_below_coverage_floor(
     assert notifier.cards == []
 
 
+def test_index_market_scan_universe_failure_marks_today_empty(
+    tmp_path: Path,
+) -> None:
+    class FailingProvider:
+        def load(self, now: datetime):  # type: ignore[no-untyped-def]
+            raise RuntimeError("stale universe")
+
+    ledger = SignalLedger(tmp_path / "signals.db")
+    ledger.replace_scan_candidates(
+        date(2026, 7, 7),
+        [{"ticker": "OLD", "rank": 1, "score": 0.2, "price": 20.0}],
+        as_of=date(2026, 7, 6),
+    )
+    source = FakeSipSource(_index_bars({"A": 0.004}))
+    engine = Engine(
+        _index_settings(),
+        BarStore(tmp_path / "bars.duckdb"),
+        source,  # type: ignore[arg-type]
+        ledger,
+        FakeNotifier(),
+        index_universe_provider=FailingProvider(),  # type: ignore[arg-type]
+    )
+
+    engine.run_market_scan(NOW)
+
+    assert ledger.latest_scan_candidates() == []
+    assert source.lister_calls == 0
+
+
 def test_index_market_scan_blocks_invalid_execution_price_order(
     tmp_path: Path,
     monkeypatch,  # type: ignore[no-untyped-def]

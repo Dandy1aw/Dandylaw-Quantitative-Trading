@@ -152,6 +152,12 @@ def test_index_universe_requires_stale_window_to_cover_refresh_window() -> None:
         IndexUniverseSettings(refresh_days=15, max_stale_days=14)
 
 
+@pytest.mark.parametrize("indices", [[], ["sp500", "sp500"]])
+def test_index_universe_requires_nonempty_unique_indices(indices: list[str]) -> None:
+    with pytest.raises(ValidationError, match="indices"):
+        IndexUniverseSettings(indices=indices)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

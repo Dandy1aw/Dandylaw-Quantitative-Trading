@@ -13,9 +13,11 @@ import pytest
 from quant_signal.index_universe import (
     NASDAQ100_URL,
     SPY_HOLDINGS_URL,
+    IndexConstituents,
     IndexUniverseProvider,
     StaleUniverseError,
     UniverseCache,
+    UniverseError,
     UniverseValidationError,
     merge_members,
     parse_nasdaq100_payload,
@@ -47,10 +49,14 @@ def _snapshot(*, fetched_at: datetime = NOW):  # type: ignore[no-untyped-def]
     )
 
 
-def _workbook(symbols: set[str]) -> bytes:
+def _workbook(symbols: set[str], *, actual_date_format: bool = False) -> bytes:
     rows: list[list[object]] = [
         ["Fund Name:", "SPDR S&P 500 ETF Trust", None],
-        ["As of Date:", "2026-07-09", None],
+        (
+            ["Holdings:", "As of 09-Jul-2026", None]
+            if actual_date_format
+            else ["As of Date:", "2026-07-09", None]
+        ),
         [None, None, None],
         ["Ticker", "Name", "Asset Class"],
     ]
@@ -121,6 +127,15 @@ def test_official_payload_and_workbook_parsers_filter_non_equities() -> None:
     assert sp500.as_of == date(2026, 7, 9)
 
 
+def test_sp500_parser_recognizes_state_street_actual_as_of_format() -> None:
+    parsed = parse_sp500_workbook(
+        _workbook({"AAPL", "MSFT"}, actual_date_format=True),
+        fallback_as_of=date(2026, 7, 10),
+    )
+
+    assert parsed.as_of == date(2026, 7, 9)
+
+
 @pytest.mark.parametrize(
     "members",
     [
@@ -155,6 +170,17 @@ def test_cache_round_trip_and_rejects_tampered_hash(tmp_path: Path) -> None:
     payload["members"][0]["ticker"] = "ZZZZ"
     cache.path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(UniverseValidationError, match="hash"):
+        cache.load()
+
+
+def test_cache_hash_protects_time_metadata(tmp_path: Path) -> None:
+    cache = UniverseCache(tmp_path / "index.json")
+    cache.save(_snapshot())
+    payload = json.loads(cache.path.read_text(encoding="utf-8"))
+    payload["fetched_at"] = (NOW + timedelta(days=30)).isoformat()
+    cache.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(UniverseValidationError, match="snapshot hash"):
         cache.load()
 
 
@@ -193,6 +219,75 @@ def test_failed_refresh_rejects_stale_last_known_good(tmp_path: Path) -> None:
 
     with pytest.raises(StaleUniverseError, match="15"):
         provider.load(NOW)
+
+
+def test_stale_limit_uses_exact_elapsed_time(tmp_path: Path) -> None:
+    cache = UniverseCache(tmp_path / "index.json")
+    cache.save(_snapshot(fetched_at=NOW - timedelta(days=14, seconds=1)))
+
+    def fail() -> set[str]:
+        raise RuntimeError("source unavailable")
+
+    with pytest.raises(StaleUniverseError, match="14"):
+        IndexUniverseProvider(cache=cache, fetchers={"sp500": fail}).load(NOW)
+
+
+def test_provider_rejects_stale_source_date_even_after_successful_fetch(
+    tmp_path: Path,
+) -> None:
+    old_as_of = NOW.date() - timedelta(days=15)
+
+    def fetch_sp500() -> IndexConstituents:
+        return IndexConstituents(frozenset(_symbols("S", 500)), old_as_of, "sp")
+
+    def fetch_nasdaq100() -> IndexConstituents:
+        return IndexConstituents(frozenset(_symbols("N", 100)), old_as_of, "ndx")
+
+    provider = IndexUniverseProvider(
+        cache=UniverseCache(tmp_path / "index.json"),
+        fetchers={"sp500": fetch_sp500, "nasdaq100": fetch_nasdaq100},
+    )
+
+    with pytest.raises(StaleUniverseError, match="source"):
+        provider.load(NOW)
+
+
+def test_provider_does_not_trust_future_fetched_at_cache(tmp_path: Path) -> None:
+    cache = UniverseCache(tmp_path / "index.json")
+    cache.save(_snapshot(fetched_at=NOW + timedelta(days=1)))
+
+    def fail() -> set[str]:
+        raise RuntimeError("source unavailable")
+
+    with pytest.raises(UniverseError, match="refresh failed"):
+        IndexUniverseProvider(cache=cache, fetchers={"sp500": fail}).load(NOW)
+
+
+def test_fresh_cache_with_different_configured_indices_is_refreshed(
+    tmp_path: Path,
+) -> None:
+    cache = UniverseCache(tmp_path / "index.json")
+    cache.save(merge_members({"sp500": _symbols("S", 500)}, NOW))
+    calls: list[str] = []
+
+    def fetch_sp500() -> set[str]:
+        calls.append("sp500")
+        return _symbols("S", 500)
+
+    def fetch_nasdaq100() -> set[str]:
+        calls.append("nasdaq100")
+        return _symbols("N", 100)
+
+    provider = IndexUniverseProvider(
+        cache=cache,
+        indices=["sp500", "nasdaq100"],
+        fetchers={"sp500": fetch_sp500, "nasdaq100": fetch_nasdaq100},
+    )
+
+    snapshot = provider.load(NOW + timedelta(hours=1))
+
+    assert calls == ["sp500", "nasdaq100"]
+    assert len(snapshot.members) == 600
 
 
 class _Response:

@@ -42,6 +42,12 @@ CREATE TABLE IF NOT EXISTS scan_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_scan_candidates_latest
     ON scan_candidates(scan_date DESC, rank ASC);
+CREATE TABLE IF NOT EXISTS scan_candidate_runs (
+    scan_date TEXT PRIMARY KEY,
+    as_of TEXT NOT NULL
+);
+INSERT OR IGNORE INTO scan_candidate_runs (scan_date, as_of)
+    SELECT scan_date, max(as_of) FROM scan_candidates GROUP BY scan_date;
 """
 
 
@@ -202,17 +208,26 @@ class SignalLedger:
                 )
             )
         with self._lock:
-            self._con.execute(
-                "DELETE FROM scan_candidates WHERE scan_date = ?",
-                (scan_date.isoformat(),),
-            )
-            self._con.executemany(
-                "INSERT INTO scan_candidates "
-                "(scan_date, ticker, rank, score, price, extra_json, as_of) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-            self._con.commit()
+            try:
+                self._con.execute(
+                    "INSERT OR REPLACE INTO scan_candidate_runs (scan_date, as_of) "
+                    "VALUES (?, ?)",
+                    (scan_date.isoformat(), as_of_text),
+                )
+                self._con.execute(
+                    "DELETE FROM scan_candidates WHERE scan_date = ?",
+                    (scan_date.isoformat(),),
+                )
+                self._con.executemany(
+                    "INSERT INTO scan_candidates "
+                    "(scan_date, ticker, rank, score, price, extra_json, as_of) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    values,
+                )
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
 
     def latest_scan_candidates(
         self, scan_date: date | None = None
@@ -220,7 +235,7 @@ class SignalLedger:
         with self._lock:
             if scan_date is None:
                 row = self._con.execute(
-                    "SELECT max(scan_date) AS scan_date FROM scan_candidates"
+                    "SELECT max(scan_date) AS scan_date FROM scan_candidate_runs"
                 ).fetchone()
                 selected = str(row["scan_date"]) if row and row["scan_date"] else None
             else:

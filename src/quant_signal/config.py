@@ -72,7 +72,8 @@ class AIBriefingSettings(BaseModel):
 class IndexUniverseSettings(BaseModel):
     enabled: bool = False
     indices: list[Literal["sp500", "nasdaq100"]] = Field(
-        default_factory=_default_index_names
+        default_factory=_default_index_names,
+        min_length=1,
     )
     cache_path: str = "data/index_universe.json"
     refresh_days: int = Field(default=7, ge=1, le=30)
@@ -84,6 +85,8 @@ class IndexUniverseSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_windows_and_pool_sizes(self) -> Self:
+        if len(set(self.indices)) != len(self.indices):
+            raise ValueError("indices must not contain duplicates")
         if self.max_stale_days < self.refresh_days:
             raise ValueError("max_stale_days must be greater than or equal to refresh_days")
         if self.execution_top_n > self.scan_top_n:

@@ -159,23 +159,26 @@ def _execution_levels(bars: pd.DataFrame) -> dict[str, object]:
 
 
 def _run_index_scan(engine: Engine, now: datetime) -> None:
+    market_as_of = previous_trading_day(
+        now.astimezone(ZoneInfo("America/New_York")).date()
+    )
     provider = engine.index_universe_provider
     sip_fetcher = getattr(engine.source, "fetch_sip_daily_bars", None)
     if provider is None or sip_fetcher is None:
+        engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="missing_index_or_sip_provider")
         return
     try:
         snapshot = provider.load(now)
     except Exception as error:  # noqa: BLE001
+        engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="universe_unavailable", error=str(error))
         return
     symbols = list(snapshot.symbols)
     if not symbols:
+        engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="empty_index_universe")
         return
-    market_as_of = previous_trading_day(
-        now.astimezone(ZoneInfo("America/New_York")).date()
-    )
     cached_before = _cached_scan_window(engine, symbols, market_as_of)
     counts = (
         cached_before.groupby(level="ticker").size().to_dict()
