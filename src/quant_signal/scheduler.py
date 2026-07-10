@@ -360,7 +360,7 @@ def build_scheduler(
         # 美股盘中每5分钟评估计划状态迁移(入场窗口约束在状态机内部)
         sched.add_job(
             runtime.wrap("execution_watch", execution_watch),
-            CronTrigger(hour="9-15", minute="*/5", timezone=ET),
+            CronTrigger(hour="9-15", minute="1-56/5", timezone=ET),
             id="execution_watch",
             misfire_grace_time=240,
         )

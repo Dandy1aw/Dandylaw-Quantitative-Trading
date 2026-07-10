@@ -44,7 +44,7 @@ def test_scheduler_registers_all_jobs() -> None:
     assert "watch_deviation" not in ids
 
 
-def test_execution_jobs_run_at_0815_and_every_5min_us_hours() -> None:
+def test_execution_jobs_run_at_0815_and_watch_is_staggered_one_minute() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     jobs = {job.id: job for job in sched.get_jobs()}
 
@@ -53,7 +53,7 @@ def test_execution_jobs_run_at_0815_and_every_5min_us_hours() -> None:
     assert str(jobs["execution_brief"].trigger.timezone) == "America/New_York"
 
     watch = str(jobs["execution_watch"].trigger)
-    assert "hour='9-15'" in watch and "minute='*/5'" in watch
+    assert "hour='9-15'" in watch and "minute='1-56/5'" in watch
     assert str(jobs["execution_watch"].trigger.timezone) == "America/New_York"
     assert jobs["execution_watch"].misfire_grace_time == 240
 

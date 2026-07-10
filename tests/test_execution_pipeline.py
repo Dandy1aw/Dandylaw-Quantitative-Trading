@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from conftest import make_test_settings
 
@@ -142,6 +143,11 @@ class FakeIntradaySource(_EmptySource):
     def fetch_intraday_bars(self, tickers, lookback_days=5):  # type: ignore[no-untyped-def]
         mask = self._bars.index.get_level_values("ticker").isin(tickers)
         return self._bars[mask]
+
+
+class FailingIntradaySource(_EmptySource):
+    def fetch_intraday_bars(self, tickers, lookback_days=5):  # type: ignore[no-untyped-def]
+        raise TimeoutError("market data unavailable")
 
 
 def seed_candidates(ledger: SignalLedger, extra: dict[str, object]) -> None:
@@ -398,3 +404,15 @@ def test_watch_without_active_plans_is_noop(tmp_path: Path) -> None:
     engine.run_execution_watch(WATCH_NOW)
 
     assert notifier.cards == []
+
+
+def test_watch_market_data_failure_propagates_to_job_health(tmp_path: Path) -> None:
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FailingIntradaySource(),
+    )
+    seed_active_plan(ledger, state=PlanState.ARMED)
+
+    with pytest.raises(TimeoutError, match="market data unavailable"):
+        engine.run_execution_watch(WATCH_NOW)

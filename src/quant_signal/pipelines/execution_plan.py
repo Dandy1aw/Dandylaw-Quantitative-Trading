@@ -316,7 +316,7 @@ def run_watch(engine: Engine, now: datetime) -> None:
         bars = engine.source.fetch_intraday_bars(tickers, lookback_days=1)
     except Exception as error:  # noqa: BLE001
         log.warning("execution_watch.bars_failed", error=str(error))
-        return
+        raise
 
     position_qty: dict[str, float] = {}
     open_buy_tickers: set[str] = set()
