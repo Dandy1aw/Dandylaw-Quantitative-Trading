@@ -47,6 +47,7 @@ def alert_card(title: str, body_md: str) -> Card:
 
 
 _PAPER_FOOTER = "> PAPER 模拟账户建议，仅供观察，不构成投资建议；本系统不自动下单。"
+_ADVISORY_FOOTER = "> 观察模式，不自动下单。仅供观察，不构成投资建议。"
 
 
 def _fmt_qty(value: object) -> str:
@@ -242,11 +243,11 @@ def plan_event_card(
         f"**止损**: {plan.stop_loss:.2f} · **止盈**: {plan.take_profit:.2f}",
         f"**时间**: {sgt} (SGT)",
         "",
-        _PAPER_FOOTER,
+        _ADVISORY_FOOTER,
     ]
     return Card(
         kind=CardKind.SIGNAL,
-        title=f"⚡ PAPER 执行提醒 · {plan.ticker} {event}",
+        title=f"⚡ 执行提醒 · {plan.ticker} {event}",
         body_md="\n".join(lines),
         url=f"https://www.tradingview.com/chart/?symbol={plan.ticker}",
     )

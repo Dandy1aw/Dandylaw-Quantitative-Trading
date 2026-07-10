@@ -539,7 +539,7 @@ def test_watch_confirmed_entry_emits_actionable_once(tmp_path: Path) -> None:
     assert len(notifier.cards) == 1
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "ACTIONABLE" in body or "ACTIONABLE" in notifier.cards[0].title  # type: ignore[attr-defined]
-    assert "PAPER" in notifier.cards[0].title or "PAPER" in body  # type: ignore[attr-defined]
+    assert "PAPER" not in notifier.cards[0].title and "PAPER" not in body  # type: ignore[attr-defined]
 
     active = ledger.active_execution_plans()
     assert len(active) == 1
@@ -574,6 +574,27 @@ def test_watch_retries_failed_notification_from_outbox(tmp_path: Path) -> None:
     assert ledger.event_was_delivered(
         ledger.active_execution_plans()[0].plan_id, 1, "ACTIONABLE"
     ) is True
+
+
+def test_watch_queues_event_before_plan_state_update(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bars = _intraday_frame("AAPL", [103.0, 101.5, 101.0], WATCH_NOW)
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(paper_account()),
+        source=FakeIntradaySource(bars),
+    )
+    seed_active_plan(ledger, state=PlanState.IN_ENTRY_ZONE)
+
+    def fail_update(plan: object) -> None:
+        raise RuntimeError("simulated state write failure")
+
+    monkeypatch.setattr(ledger, "upsert_execution_plan", fail_update)
+    with pytest.raises(RuntimeError, match="state write failure"):
+        engine.run_execution_watch(WATCH_NOW)
+
+    assert len(ledger.due_plan_events(WATCH_NOW)) == 1
 
 
 def test_watch_stop_breach_invalidates_and_notifies(tmp_path: Path) -> None:

@@ -432,8 +432,6 @@ def run_watch(engine: Engine, now: datetime) -> None:
             transition = advance_plan(plan, observation, cfg)
         except PlanTransitionError:
             continue
-        if transition.state is not plan.state:
-            engine.ledger.upsert_execution_plan(apply_transition(plan, transition))
         if transition.event is not None:
             engine.ledger.queue_plan_event(
                 plan.plan_id,
@@ -444,5 +442,7 @@ def run_watch(engine: Engine, now: datetime) -> None:
                 ),
                 now=now,
             )
+        if transition.state is not plan.state:
+            engine.ledger.upsert_execution_plan(apply_transition(plan, transition))
     events += _deliver_plan_events(engine, now)
     log.info("execution_watch.done", plans=len(plans), events=events)
