@@ -28,6 +28,7 @@ from quant_signal.execution import (
     apply_transition,
     build_plan,
     plan_to_dict,
+    portfolio_budget_from_state,
 )
 from quant_signal.notifier.cards import (
     build_ai_briefing_card,
@@ -66,11 +67,19 @@ class _RawCandidate:
     score: float | None
     sources: tuple[str, ...]
     memberships: tuple[str, ...]
+    currency: str = "USD"
     forced_block: str | None = None
 
 
 def _has_prices(extra: Mapping[str, object]) -> bool:
     return all(isinstance(extra.get(key), (int, float)) for key in _PRICE_KEYS)
+
+
+def _currency(engine: Engine, ticker: str) -> str:
+    metadata = engine.settings.tickers.get(ticker)
+    if metadata is not None:
+        return metadata.currency
+    return engine.settings.international_tickers.get(ticker, "USD")
 
 
 def _index_candidates(engine: Engine, now: datetime) -> list[_RawCandidate]:
@@ -105,6 +114,7 @@ def _index_candidates(engine: Engine, now: datetime) -> list[_RawCandidate]:
                 )
                 if isinstance(memberships, list)
                 else (),
+                currency=_currency(engine, str(row["ticker"])),
                 forced_block=forced_block,
             )
         )
@@ -147,6 +157,7 @@ def _core_signals(engine: Engine, day: date) -> tuple[list[_RawCandidate], set[s
                 score=None,
                 sources=(str(row["strategy_id"]),),
                 memberships=(),
+                currency=_currency(engine, ticker),
             )
         )
     return buys, sells
@@ -170,6 +181,7 @@ def _merge(first: _RawCandidate, second: _RawCandidate) -> _RawCandidate:
         score=first.score if first.score is not None else second.score,
         sources=tuple(dict.fromkeys(first.sources + second.sources)),
         memberships=first.memberships or second.memberships,
+        currency=first.currency,
         forced_block=first.forced_block
         or second.forced_block
         or ("BLOCKED_CONFLICT" if conflict else None),
@@ -254,6 +266,7 @@ def run_daily(engine: Engine, now: datetime) -> None:
             source_strategies=raw.sources,
             memberships=raw.memberships,
             quote_at=now,
+            currency=raw.currency,
         )
         plan = build_plan(
             candidate,
@@ -262,13 +275,19 @@ def run_daily(engine: Engine, now: datetime) -> None:
             account_state.open_orders if account_state is not None else (),
             cfg,
             now,
+            observed_positions=(
+                account_state.observed_positions if account_state is not None else ()
+            ),
         )
         if raw.forced_block is not None:
             plan = _force_block(plan, raw.forced_block)
         plans.append(plan)
     if account_state is not None:
         plans = apply_portfolio_limits(
-            plans, account_state.snapshot.equity, cfg
+            plans,
+            account_state.snapshot.equity,
+            cfg,
+            budget=portfolio_budget_from_state(account_state, cfg),
         )
     for plan in plans:
         engine.ledger.upsert_execution_plan(plan)

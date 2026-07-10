@@ -14,6 +14,7 @@ from quant_signal.account import (
     AccountState,
     BrokerOrder,
     BrokerPosition,
+    ObservedPosition,
 )
 from quant_signal.config import ExecutionPlanSettings, IndexUniverseSettings
 from quant_signal.datafeed.store import BarStore
@@ -66,6 +67,50 @@ def paper_account(
         positions=positions,
         open_orders=open_orders,
         recent_orders=recent_orders,
+    )
+
+
+def screenshot_account() -> AccountState:
+    observed = tuple(
+        ObservedPosition(
+            symbol=symbol,
+            qty=None,
+            avg_entry_price=None,
+            current_price=None,
+            market_value=None,
+            estimated_market_value=Decimal(value),
+            pnl=None,
+            pnl_pct=None,
+            weight_pct=None,
+            precision="ESTIMATED",
+        )
+        for symbol, value in {
+            "DRAM": "887.34",
+            "MU": "991.06",
+            "RAM": "363.93",
+            "SMH": "1226.68",
+            "SNXX": "774.62",
+        }.items()
+    )
+    return AccountState(
+        snapshot=AccountSnapshot(
+            account_id="screenshot:abc",
+            equity=Decimal("5995.52"),
+            cash=Decimal("1751.13"),
+            buying_power=Decimal("3474.15"),
+            currency="USD",
+            retrieved_at=BRIEF_NOW,
+            source="screenshot",
+            market_value=Decimal("4244.15"),
+            capital_limit=Decimal("6000"),
+            max_financing_ratio=Decimal("0.20"),
+        ),
+        positions=(),
+        open_orders=(),
+        recent_orders=(),
+        observed_positions=observed,
+        positions_partial=True,
+        reported_position_count=6,
     )
 
 
@@ -336,6 +381,88 @@ def test_daily_brief_disabled_flag_is_noop(tmp_path: Path) -> None:
 
     assert notifier.cards == []
     assert ledger.active_execution_plans() == []
+
+
+def test_daily_brief_sizes_unheld_aapl_from_screenshot_account(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        risk_clusters={
+            "semiconductor_memory": ["DRAM", "MU", "RAM", "SMH", "SNXX", "AMD"]
+        },
+    )
+    engine, _notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+    )
+    seed_candidates(
+        ledger,
+        scan_extra(
+            entry_low=307.26,
+            entry_high=316.22,
+            stop_loss=290.49,
+            take_profit=341.68,
+        ),
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    active = ledger.active_execution_plans()
+    assert len(active) == 1
+    assert active[0].ticker == "AAPL"
+    assert active[0].suggested_qty == 1
+    assert active[0].suggested_notional == 316.22
+
+
+def test_daily_brief_blocks_existing_semiconductor_cluster_addition(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        risk_clusters={
+            "semiconductor_memory": ["DRAM", "MU", "RAM", "SMH", "SNXX", "AMD"]
+        },
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+    )
+    ledger.replace_scan_candidates(
+        BRIEF_NOW.date(),
+        [{"ticker": "AMD", "rank": 1, "score": 0.9, "price": 103.0, "extra": scan_extra()}],
+        as_of=MARKET_AS_OF,
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert ledger.active_execution_plans() == []
+    assert "CLUSTER_WEIGHT_EXCEEDED" in notifier.cards[0].body_md  # type: ignore[attr-defined]
+
+
+def test_daily_brief_propagates_currency_and_blocks_non_usd_quantity(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(enabled=True, cash_reserve=0)
+    engine, notifier, ledger = make_engine(
+        tmp_path,
+        FakeAccountProvider(screenshot_account()),
+        execution_plan=settings,
+        universe=["000660.KS"],
+        international_tickers={"000660.KS": "KRW"},
+    )
+    ledger.replace_scan_candidates(
+        BRIEF_NOW.date(),
+        [{"ticker": "000660.KS", "rank": 1, "score": 0.9, "price": 103.0, "extra": scan_extra()}],
+        as_of=MARKET_AS_OF,
+    )
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    assert ledger.active_execution_plans() == []
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "UNSUPPORTED_MARKET" in body
+    assert "KRW" in body
 
 
 # ---------------------------------------------------------------- intraday watch

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
@@ -10,7 +10,13 @@ import math
 from typing import Sequence, cast
 from zoneinfo import ZoneInfo
 
-from quant_signal.account import AccountSnapshot, BrokerOrder, BrokerPosition
+from quant_signal.account import (
+    AccountSnapshot,
+    AccountState,
+    BrokerOrder,
+    BrokerPosition,
+    ObservedPosition,
+)
 from quant_signal.config import ExecutionPlanSettings
 
 ET = ZoneInfo("America/New_York")
@@ -23,6 +29,77 @@ ACTION_WINDOW_END = time(15, 45)
 
 class PlanTransitionError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class PortfolioBudget:
+    equity: Decimal
+    cash: Decimal
+    buying_power: Decimal
+    current_exposure: Decimal
+    capital_limit: Decimal
+    max_financing_ratio: Decimal
+    exposure_by_symbol: dict[str, Decimal] = field(default_factory=dict)
+    cluster_by_symbol: dict[str, str] = field(default_factory=dict)
+    cluster_exposure: dict[str, Decimal] = field(default_factory=dict)
+
+    @property
+    def max_gross_exposure(self) -> Decimal:
+        return self.capital_limit * (Decimal("1") + self.max_financing_ratio)
+
+    @property
+    def available_new_notional(self) -> Decimal:
+        financing = self.capital_limit * self.max_financing_ratio
+        return max(
+            Decimal("0"),
+            min(
+                self.buying_power,
+                self.cash + financing,
+                self.max_gross_exposure - self.current_exposure,
+            ),
+        )
+
+
+def portfolio_budget_from_state(
+    state: AccountState,
+    config: ExecutionPlanSettings,
+) -> PortfolioBudget:
+    snapshot = state.snapshot
+    capital_limit = snapshot.capital_limit or snapshot.equity
+    exposure_by_symbol: dict[str, Decimal] = {}
+    if state.observed_positions:
+        exposure_by_symbol = {
+            position.symbol: position.exposure_value
+            for position in state.observed_positions
+        }
+    else:
+        exposure_by_symbol = {
+            position.symbol: position.market_value for position in state.positions
+        }
+    current_exposure = snapshot.market_value
+    if current_exposure is None:
+        current_exposure = sum(exposure_by_symbol.values(), Decimal("0"))
+    cluster_by_symbol = {
+        symbol: cluster
+        for cluster, symbols in config.risk_clusters.items()
+        for symbol in symbols
+    }
+    cluster_exposure: dict[str, Decimal] = {}
+    for symbol, value in exposure_by_symbol.items():
+        cluster = cluster_by_symbol.get(symbol)
+        if cluster is not None:
+            cluster_exposure[cluster] = cluster_exposure.get(cluster, Decimal("0")) + value
+    return PortfolioBudget(
+        equity=min(snapshot.equity, capital_limit),
+        cash=snapshot.cash,
+        buying_power=snapshot.buying_power,
+        current_exposure=current_exposure,
+        capital_limit=capital_limit,
+        max_financing_ratio=snapshot.max_financing_ratio,
+        exposure_by_symbol=exposure_by_symbol,
+        cluster_by_symbol=cluster_by_symbol,
+        cluster_exposure=cluster_exposure,
+    )
 
 
 class PlanState(str, Enum):
@@ -188,6 +265,7 @@ def build_plan(
     orders: Sequence[BrokerOrder],
     config: ExecutionPlanSettings,
     now: datetime,
+    observed_positions: Sequence[ObservedPosition] = (),
 ) -> ExecutionPlan:
     """确定性生成单 ticker 执行计划; 所有中间上限都保留在计划里以便审计。"""
     limit_price = candidate.entry_high
@@ -225,27 +303,50 @@ def build_plan(
     if price_block is not None:
         return dataclasses.replace(base, state=PlanState.BLOCKED, block_reason=price_block)
 
+    if candidate.currency != "USD":
+        return dataclasses.replace(
+            base, state=PlanState.BLOCKED, block_reason="UNSUPPORTED_MARKET"
+        )
+
     quote_age = (now - candidate.quote_at).total_seconds()
     if quote_age > config.quote_max_age_seconds:
         return dataclasses.replace(base, state=PlanState.BLOCKED, block_reason="STALE_QUOTE")
     if account is None:
         return dataclasses.replace(base, state=PlanState.BLOCKED, block_reason="NO_ACCOUNT")
     account_age = (now - account.retrieved_at).total_seconds()
-    if account_age > config.account_max_age_seconds:
+    account_max_age = (
+        config.screenshot_max_age_hours * 3600
+        if account.source == "screenshot"
+        else config.account_max_age_seconds
+    )
+    if account_age > account_max_age:
         return dataclasses.replace(
             base, state=PlanState.BLOCKED, block_reason="STALE_ACCOUNT"
         )
 
-    equity = float(account.equity)
+    capital_limit = account.capital_limit or account.equity
+    effective_equity = min(account.equity, capital_limit)
+    equity = float(effective_equity)
     cash = float(account.cash)
     current_qty = sum(
         float(position.qty) for position in positions if position.symbol == candidate.ticker
     )
-    current_value = sum(
+    exact_current_value = sum(
         float(position.market_value)
         for position in positions
         if position.symbol == candidate.ticker
     )
+    observed_for_ticker = [
+        position for position in observed_positions if position.symbol == candidate.ticker
+    ]
+    if observed_for_ticker and any(position.qty is None for position in observed_for_ticker):
+        return dataclasses.replace(
+            base, state=PlanState.BLOCKED, block_reason="POSITION_QTY_UNKNOWN"
+        )
+    observed_current_value = sum(
+        float(position.exposure_value) for position in observed_for_ticker
+    )
+    current_value = observed_current_value or exact_current_value
     open_buys = [order for order in orders if _is_open_buy(order)]
     open_buy_qty = sum(
         float(order.qty or 0) for order in open_buys if order.symbol == candidate.ticker
@@ -271,11 +372,22 @@ def build_plan(
     risk_qty = math.floor(
         equity * config.risk_per_trade / (limit_price - candidate.stop_loss)
     )
-    cash_qty = math.floor(
-        (cash - equity * config.cash_reserve - frozen_cash) / limit_price
-    )
+    if account.source == "screenshot" or account.capital_limit is not None:
+        current_exposure = float(account.market_value or 0)
+        max_financing = float(capital_limit * account.max_financing_ratio)
+        remaining_gross = float(account.max_gross_exposure) - current_exposure
+        available_funds = min(
+            float(account.buying_power),
+            cash + max_financing,
+            remaining_gross,
+        )
+        cash_qty = math.floor((available_funds - frozen_cash) / limit_price)
+    else:
+        cash_qty = math.floor(
+            (cash - equity * config.cash_reserve - frozen_cash) / limit_price
+        )
     cap_qty = math.floor(
-        (equity * config.max_position_weight - current_value - open_buy_notional)
+        (float(capital_limit) * config.max_position_weight - current_value - open_buy_notional)
         / limit_price
     )
 
@@ -304,17 +416,61 @@ def apply_portfolio_limits(
     plans: Sequence[ExecutionPlan],
     equity: Decimal | float,
     config: ExecutionPlanSettings,
+    *,
+    budget: PortfolioBudget | None = None,
 ) -> list[ExecutionPlan]:
     """按顺序套用当日组合级限制: 新仓数量与当日新增风险额度。"""
-    budget = float(equity) * config.max_daily_new_risk
+    risk_budget = float(equity) * config.max_daily_new_risk
     used_risk = 0.0
     accepted = 0
+    remaining_notional = (
+        float(budget.available_new_notional) if budget is not None else math.inf
+    )
+    cluster_exposure = (
+        {key: float(value) for key, value in budget.cluster_exposure.items()}
+        if budget is not None
+        else {}
+    )
     limited: list[ExecutionPlan] = []
     for plan in plans:
         if plan.state is not PlanState.CANDIDATE or not plan.suggested_qty:
             limited.append(plan)
             continue
-        plan_risk = plan.suggested_qty * (plan.limit_price - plan.stop_loss)
+        affordable_qty = (
+            max(0, math.floor(remaining_notional / plan.limit_price))
+            if budget is not None
+            else plan.suggested_qty
+        )
+        suggested_qty = min(plan.suggested_qty, affordable_qty)
+        exhausted_reason = "PORTFOLIO_BUDGET_EXHAUSTED"
+        cluster = budget.cluster_by_symbol.get(plan.ticker) if budget is not None else None
+        if cluster is not None and budget is not None:
+            cluster_room = (
+                float(budget.capital_limit) * config.max_cluster_weight
+                - cluster_exposure.get(cluster, 0.0)
+            )
+            cluster_qty = max(0, math.floor(cluster_room / plan.limit_price))
+            if cluster_qty < suggested_qty:
+                suggested_qty = cluster_qty
+                exhausted_reason = "CLUSTER_WEIGHT_EXCEEDED"
+        if suggested_qty <= 0:
+            limited.append(
+                dataclasses.replace(
+                    plan,
+                    state=PlanState.BLOCKED,
+                    block_reason=exhausted_reason,
+                    suggested_qty=None,
+                    suggested_notional=None,
+                )
+            )
+            continue
+        if suggested_qty != plan.suggested_qty:
+            plan = dataclasses.replace(
+                plan,
+                suggested_qty=suggested_qty,
+                suggested_notional=round(suggested_qty * plan.limit_price, 2),
+            )
+        plan_risk = suggested_qty * (plan.limit_price - plan.stop_loss)
         if accepted >= config.max_new_positions_per_day:
             limited.append(
                 dataclasses.replace(
@@ -322,7 +478,7 @@ def apply_portfolio_limits(
                 )
             )
             continue
-        if used_risk + plan_risk > budget * (1 + 1e-9):
+        if used_risk + plan_risk > risk_budget * (1 + 1e-9):
             limited.append(
                 dataclasses.replace(
                     plan, state=PlanState.BLOCKED, block_reason="DAILY_RISK_EXHAUSTED"
@@ -331,6 +487,10 @@ def apply_portfolio_limits(
             continue
         used_risk += plan_risk
         accepted += 1
+        notional = suggested_qty * plan.limit_price
+        remaining_notional -= notional
+        if cluster is not None:
+            cluster_exposure[cluster] = cluster_exposure.get(cluster, 0.0) + notional
         limited.append(plan)
     return limited
 

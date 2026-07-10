@@ -103,7 +103,7 @@ def execution_plan_card(
             expiry = plan.expires_at.astimezone(_ET).strftime("%m-%d %H:%M ET")
             note = plan.block_reason or "+".join(plan.source_strategies)
             lines.append(
-                f"| {plan.ticker} | {plan.state.value} |"
+                f"| {plan.ticker} ({plan.currency}) | {plan.state.value} |"
                 f" {plan.entry_low:.2f}-{plan.entry_high:.2f} |"
                 f" {plan.limit_price:.2f} | {_fmt_qty(plan.suggested_qty)} |"
                 f" {_fmt_price(plan.suggested_notional)} | {plan.stop_loss:.2f} |"

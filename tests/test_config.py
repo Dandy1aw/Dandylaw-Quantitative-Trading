@@ -186,3 +186,13 @@ def test_execution_plan_rejects_invalid_risk_limits(field: str, value: object) -
 def test_execution_plan_requires_stop_distance_order() -> None:
     with pytest.raises(ValidationError, match="max_stop_distance"):
         ExecutionPlanSettings(min_stop_distance=0.20, max_stop_distance=0.20)
+
+
+def test_execution_plan_risk_clusters_are_unique_and_normalized() -> None:
+    settings = ExecutionPlanSettings(
+        risk_clusters={"semiconductor_memory": ["MU", "SMH", "SNXX"]}
+    )
+    assert settings.risk_clusters["semiconductor_memory"] == ["MU", "SMH", "SNXX"]
+
+    with pytest.raises(ValidationError, match="risk_clusters"):
+        ExecutionPlanSettings(risk_clusters={"a": ["MU"], "b": ["MU"]})
