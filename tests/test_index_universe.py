@@ -220,6 +220,29 @@ def test_sp500_identifier_sector_branch_rejects_non_equity_sectors() -> None:
     assert parsed.members == frozenset({"AAPL", "MSFT"})
 
 
+def test_sp500_identifier_branch_accepts_uninformative_dash_sector() -> None:
+    """真实 SSGA 文件 Sector 列恒为 '-': 未分类不等于非股票, 现金/合约行由
+    name 标记与 ticker 规范化排除(2026-07-10 线上实测)。"""
+    rows = [
+        ["Fund Name:", "SPDR S&P 500 ETF Trust", None, None],
+        ["Holdings:", "As of 09-Jul-2026", None, None],
+        [None, None, None, None],
+        ["Name", "Ticker", "Identifier", "Sector"],
+        ["NVIDIA CORP", "NVDA", "67066G104", "-"],
+        ["APPLE INC", "AAPL", "037833100", "-"],
+        ["US DOLLAR", "-", "999USDZ92", "-"],
+        ["CONTRA HOLOGIC INCORPO", "2602335D", "436CVR021", "-"],
+    ]
+    output = BytesIO()
+    pd.DataFrame(rows).to_excel(
+        output, index=False, header=False, engine="openpyxl"
+    )
+
+    parsed = parse_sp500_workbook(output.getvalue(), fallback_as_of=NOW.date())
+
+    assert parsed.members == frozenset({"NVDA", "AAPL"})
+
+
 @pytest.mark.parametrize(
     "members",
     [

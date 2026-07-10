@@ -45,6 +45,9 @@ _EQUITY_SECTORS = {
     "real estate",
     "utilities",
 }
+# 真实 SSGA 文件的 Sector 列常为 "-"(无信息): 未分类不等于非股票,
+# 此时依赖 identifier 存在性、name 现金/合约标记与 ticker 规范化兜底。
+_UNCLASSIFIED_SECTORS = {"-", "--", "n/a"}
 _HTTP_HEADERS = {
     "Accept": "application/json,text/plain,*/*",
     "User-Agent": "Mozilla/5.0 quant-signal/index-universe",
@@ -366,7 +369,10 @@ def parse_sp500_workbook(
             ):
                 continue
             normalized_sector = " ".join(str(sector).casefold().split())
-            if normalized_sector not in _EQUITY_SECTORS:
+            if (
+                normalized_sector not in _EQUITY_SECTORS
+                and normalized_sector not in _UNCLASSIFIED_SECTORS
+            ):
                 continue
         if name_column is not None:
             name = str(row.iloc[name_column]).lower()
