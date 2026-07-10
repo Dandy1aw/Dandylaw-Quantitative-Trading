@@ -7,8 +7,10 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import subprocess
+import shutil
 import tempfile
 from typing import Any
 from typing import TYPE_CHECKING
@@ -240,6 +242,12 @@ def _default_run(
     )
 
 
+def _codex_executable() -> str:
+    if os.name != "nt":
+        return "codex"
+    return shutil.which("codex") or "codex"
+
+
 class CodexPortfolioExtractor:
     def __init__(
         self,
@@ -271,7 +279,7 @@ class CodexPortfolioExtractor:
                 json.dumps(PortfolioExtraction.model_json_schema(), ensure_ascii=False),
                 encoding="utf-8",
             )
-            args = ["codex", "exec"]
+            args = [_codex_executable(), "exec"]
             for image in resolved:
                 args.extend(["--image", str(image)])
             args.extend(
@@ -281,7 +289,6 @@ class CodexPortfolioExtractor:
                     "--output-last-message",
                     str(output_path),
                     "--ephemeral",
-                    "--ignore-user-config",
                     "--ignore-rules",
                     "--sandbox",
                     "read-only",

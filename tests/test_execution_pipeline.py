@@ -479,6 +479,8 @@ def test_daily_brief_embeds_one_short_ai_summary_in_same_card(
     def fake_ai(settings, context):  # type: ignore[no-untyped-def]
         seen["mode"] = context.output_mode
         seen["label"] = context.execution_plans[0]["account_label"]
+        seen["holdings"] = context.holdings
+        seen["ranking"] = context.ranking
         return "观" * 500
 
     monkeypatch.setattr(
@@ -498,7 +500,10 @@ def test_daily_brief_embeds_one_short_ai_summary_in_same_card(
     engine.run_execution_brief(BRIEF_NOW)
 
     assert len(notifier.cards) == 1
-    assert seen == {"mode": "action_card", "label": "SCREENSHOT"}
+    assert seen["mode"] == "action_card"
+    assert seen["label"] == "SCREENSHOT"
+    assert set(seen["holdings"]) == {"DRAM", "MU", "RAM", "SMH", "SNXX"}
+    assert seen["ranking"][0]["ticker"] == "AAPL"
     body = notifier.cards[0].body_md  # type: ignore[attr-defined]
     assert "AI简评" in body
     assert "观" * 301 not in body

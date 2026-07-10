@@ -228,9 +228,36 @@ def _ai_explanation(
     account_label = (
         account_state.snapshot.source.upper() if account_state is not None else "UNAVAILABLE"
     )
+    holdings = (
+        sorted(
+            {position.symbol for position in account_state.positions}
+            | {position.symbol for position in account_state.observed_positions}
+        )
+        if account_state is not None
+        else []
+    )
+    ranking = [
+        {
+            "ticker": str(row["ticker"]),
+            "rank": int(str(row["rank"])),
+            "score": float(str(row["score"])),
+            "price": float(str(row["price"])),
+        }
+        for row in engine.ledger.latest_scan_candidates()[:5]
+    ]
+    notes: list[str] = []
+    if account_state is not None:
+        notes.append(
+            f"账户来源={account_state.snapshot.source};权益={account_state.snapshot.equity};"
+            f"资金上限={account_state.snapshot.capital_limit or account_state.snapshot.equity};"
+            f"持仓明细={'PARTIAL' if account_state.positions_partial else 'COMPLETE'}"
+        )
     context = AIBriefingContext(
         as_of=now.isoformat(),
         output_mode="action_card",
+        holdings=holdings,
+        ranking=ranking,
+        notes=notes,
         execution_plans=[
             {**plan_to_dict(plan), "account_label": account_label} for plan in plans
         ],

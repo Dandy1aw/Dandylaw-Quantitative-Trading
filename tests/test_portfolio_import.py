@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -159,10 +160,15 @@ def test_codex_extractor_uses_image_schema_ephemeral_and_output_file(tmp_path: P
     extraction = CodexPortfolioExtractor(run=fake_run, timeout_seconds=180).extract([image])
 
     args, prompt, cwd, timeout = calls[0]
-    assert args[:2] == ["codex", "exec"]
+    if os.name == "nt":
+        assert Path(args[0]).suffix.lower() in {".cmd", ".bat", ".exe"}
+    else:
+        assert args[0] == "codex"
+    assert args[1] == "exec"
     assert "--image" in args and str(image.resolve()) in args
     assert "--output-schema" in args and "--output-last-message" in args
-    assert "--ephemeral" in args and "--ignore-user-config" in args
+    assert "--ephemeral" in args and "--ignore-user-config" not in args
+    assert "--ignore-rules" in args
     assert args[args.index("--sandbox") + 1] == "read-only"
     assert "禁止推测" in prompt
     assert cwd != image.parent
