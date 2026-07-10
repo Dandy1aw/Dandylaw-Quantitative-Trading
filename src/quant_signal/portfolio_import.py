@@ -11,10 +11,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 from typing import Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from quant_signal.index_universe import to_canonical_symbol
+
+if TYPE_CHECKING:
+    from quant_signal.ledger import SignalLedger
 
 _CENT = Decimal("0.01")
 _ACCOUNT_TOLERANCE = Decimal("1.00")
@@ -209,6 +213,18 @@ def image_digest(images: Sequence[Path]) -> str:
     return digest.hexdigest()
 
 
+def apply_validated_import(
+    ledger: "SignalLedger",
+    record: ValidatedPortfolioImport,
+    *,
+    now: datetime,
+) -> bool:
+    applied = ledger.save_portfolio_import(record)
+    if applied and record.account_valid:
+        ledger.invalidate_active_plans("ACCOUNT_CHANGED", now=now)
+    return applied
+
+
 def _default_run(
     args: list[str], *, input: str, cwd: Path, timeout: float
 ) -> subprocess.CompletedProcess[str]:
@@ -322,7 +338,7 @@ def main() -> None:
 
         settings = load_settings()
         ledger = SignalLedger(settings.db_path / "signals.db")
-        applied = ledger.save_portfolio_import(result)
+        applied = apply_validated_import(ledger, result, now=datetime.now(timezone.utc))
     print(
         json.dumps(
             {

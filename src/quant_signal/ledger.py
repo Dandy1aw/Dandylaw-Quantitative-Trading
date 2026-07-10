@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sqlite3
 import threading
@@ -12,6 +13,7 @@ from quant_signal.account import AccountState
 from quant_signal.execution import (
     TERMINAL_STATES,
     ExecutionPlan,
+    PlanState,
     plan_from_dict,
     plan_to_dict,
 )
@@ -698,6 +700,21 @@ class SignalLedger:
         with self._lock:
             rows = self._con.execute(query, params).fetchall()
         return [plan_from_dict(json.loads(r["payload_json"])) for r in rows]
+
+    def invalidate_active_plans(self, reason: str, *, now: datetime) -> int:
+        plans = self.active_execution_plans()
+        for plan in plans:
+            self.upsert_execution_plan(
+                dataclasses.replace(
+                    plan,
+                    state=PlanState.INVALIDATED,
+                    block_reason=reason,
+                    suggested_qty=None,
+                    suggested_notional=None,
+                    account_at=now,
+                )
+            )
+        return len(plans)
 
     def record_plan_event(
         self, plan_id: str, plan_version: int, event_type: str, *, now: datetime

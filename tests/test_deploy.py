@@ -21,5 +21,7 @@ def test_production_settings_enable_execution_and_disable_legacy_deviation() -> 
 
     assert data["index_universe"]["enabled"] is True
     assert data["execution_plan"]["enabled"] is True
-    assert data["execution_plan"]["account_provider"] == "alpaca_paper"
+    assert data["execution_plan"]["account_provider"] == "screenshot"
+    assert data["execution_plan"]["capital_limit_usd"] == 6000
+    assert data["execution_plan"]["max_financing_ratio"] == 0.20
     assert data["legacy_price_deviation"]["enabled"] is False

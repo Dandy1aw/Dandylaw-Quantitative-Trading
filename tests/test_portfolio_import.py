@@ -15,8 +15,12 @@ from quant_signal.portfolio_import import (
     ExtractedPosition,
     ImportStatus,
     PortfolioExtraction,
+    apply_validated_import,
     validate_extraction,
 )
+from quant_signal.execution import PlanCandidate, PlanState, build_plan
+from quant_signal.account import AccountSnapshot
+from quant_signal.config import ExecutionPlanSettings
 
 NOW = datetime(2026, 7, 11, 1, 55, tzinfo=timezone(timedelta(hours=8)))
 
@@ -177,3 +181,41 @@ def test_codex_extractor_timeout_is_safe(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="timed out"):
         CodexPortfolioExtractor(run=timeout_run, timeout_seconds=1).extract([image])
+
+
+def test_applying_new_account_invalidates_old_paper_plans(tmp_path: Path) -> None:
+    ledger = SignalLedger(tmp_path / "signals.db")
+    old_account = AccountSnapshot(
+        account_id="paper-1",
+        equity=Decimal("100000"),
+        cash=Decimal("100000"),
+        buying_power=Decimal("400000"),
+        currency="USD",
+        retrieved_at=NOW,
+    )
+    candidate = PlanCandidate(
+        ticker="AAPL",
+        plan_date=NOW.date(),
+        entry_low=307.26,
+        entry_high=316.22,
+        stop_loss=290.49,
+        take_profit=341.68,
+        target_weight=None,
+        score=0.9,
+        source_strategies=("index_scan",),
+        memberships=("sp500",),
+        quote_at=NOW,
+    )
+    ledger.upsert_execution_plan(
+        build_plan(candidate, old_account, (), (), ExecutionPlanSettings(), NOW)
+    )
+    result = validate_extraction(
+        screenshot_extraction(),
+        image_sha256="f" * 64,
+        uploaded_at=NOW,
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+
+    assert apply_validated_import(ledger, result, now=NOW) is True
+    assert ledger.active_execution_plans() == []
