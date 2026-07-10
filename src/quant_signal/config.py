@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field, model_validator
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _default_index_names() -> list[Literal["sp500", "nasdaq100"]]:
+    return ["sp500", "nasdaq100"]
+
+
 class NotifySettings(BaseModel):
     dedup_hours: int = 4
     hourly_limit: int = 10
@@ -68,7 +72,7 @@ class AIBriefingSettings(BaseModel):
 class IndexUniverseSettings(BaseModel):
     enabled: bool = False
     indices: list[Literal["sp500", "nasdaq100"]] = Field(
-        default_factory=lambda: ["sp500", "nasdaq100"]
+        default_factory=_default_index_names
     )
     cache_path: str = "data/index_universe.json"
     refresh_days: int = Field(default=7, ge=1, le=30)

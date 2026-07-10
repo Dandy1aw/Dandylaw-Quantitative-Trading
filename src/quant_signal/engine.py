@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 import structlog
 
-from quant_signal.config import Settings
+from quant_signal.config import REPO_ROOT, Settings
 from quant_signal.datafeed.base import DataSource
 from quant_signal.datafeed.earnings import EarningsSource
 from quant_signal.datafeed.fundamentals import FundamentalsSource
@@ -15,6 +16,7 @@ from quant_signal.datafeed.fx import fetch_usd_rates
 from quant_signal.datafeed.store import BarStore
 from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.ledger import SignalLedger
+from quant_signal.index_universe import IndexUniverseProvider, UniverseCache
 from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.dedup import DedupResult, apply_dedup
 from quant_signal.pipelines.deviation import run as run_deviation_pipeline
@@ -63,6 +65,7 @@ class Engine:
         fundamentals_source: FundamentalsSource | None = None,
         news_source: "NewsSource | None" = None,
         news_store: "NewsStore | None" = None,
+        index_universe_provider: IndexUniverseProvider | None = None,
     ) -> None:
         # 财报日历/基本面为可选注入：不注入(如测试)则完全跳过标注，零网络依赖
         self.earnings_source = earnings_source
@@ -75,6 +78,17 @@ class Engine:
         self.ledger = ledger
         self.notifier = notifier
         self.enrichers = enrichers or []
+        if index_universe_provider is None and settings.index_universe.enabled:
+            cache_path = Path(settings.index_universe.cache_path)
+            if not cache_path.is_absolute():
+                cache_path = REPO_ROOT / cache_path
+            index_universe_provider = IndexUniverseProvider(
+                cache=UniverseCache(cache_path),
+                indices=settings.index_universe.indices,
+                refresh_days=settings.index_universe.refresh_days,
+                max_stale_days=settings.index_universe.max_stale_days,
+            )
+        self.index_universe_provider = index_universe_provider
         momentum = settings.strategies["momentum_rotation"]
         breakout = settings.strategies["breakout_20d"]
         self.momentum = MomentumRotation(

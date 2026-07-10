@@ -60,7 +60,7 @@ class ScanValidation:
     rejected: Mapping[str, str]
 
 
-def _valid_ohlcv(bars: pd.DataFrame) -> pd.DataFrame:
+def valid_ohlcv_bars(bars: pd.DataFrame) -> pd.DataFrame:
     required = ["open", "high", "low", "close", "volume"]
     if bars.empty or any(column not in bars.columns for column in required):
         return bars.iloc[0:0].copy()
@@ -82,7 +82,7 @@ def validate_scan_bars(
     min_history: int = MIN_HISTORY,
 ) -> ScanValidation:
     requested = tuple(sorted(set(symbols)))
-    clean = _valid_ohlcv(bars)
+    clean = valid_ohlcv_bars(bars)
     available = (
         set(map(str, clean.index.get_level_values("ticker").unique()))
         if not clean.empty
