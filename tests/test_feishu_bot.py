@@ -200,7 +200,7 @@ def test_service_options_without_scan_then_with_scan(tmp_path: Path) -> None:
 
     service, out, ledger = make_service(tmp_path)
     service.handle(msg(message_id="om_a", content={"text": "期权"}))
-    assert "暂无" in out.texts[0][1]
+    assert "无期权扫描数据" in out.texts[0][1]
 
     rows = tuple(
         OptionContractVolume(
@@ -377,6 +377,70 @@ def event_payload(
             },
         },
     }
+
+
+def test_options_query_falls_back_to_last_trading_day(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from quant_signal.options_flow import (
+        OptionContractVolume,
+        OptionFlowSnapshot,
+        scan_slot,
+    )
+
+    ledger = SignalLedger(tmp_path / "signals.db")
+    settings = make_test_settings(
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+    )
+    out = FakeTransport()
+    saturday = NOW + timedelta(days=1)  # 2026-07-11 周六
+    service = FeishuBotService(ledger, settings, out, clock=lambda: saturday)
+
+    rows = (
+        OptionContractVolume(
+            contract_symbol="NVDA260717C00210000",
+            underlying="NVDA",
+            side="call",
+            expiration=date(2026, 7, 17),
+            strike=Decimal("210"),
+            volume=10_000,
+            rank=1,
+            venues=("cone",),
+            captured_at=NOW,
+        ),
+    )
+    ledger.save_option_flow_scan(
+        OptionFlowSnapshot(
+            slot=scan_slot(NOW),  # 周五的扫描
+            captured_at=NOW,
+            provider="cboe-four-venues",
+            venue_coverage=1.0,
+            rows=rows,
+        ),
+        "quiet",
+        None,
+        now=NOW,
+        expires_at=None,
+    )
+    service.handle(msg(content={"text": "期权"}))
+    assert len(out.cards) == 1  # 周六查询回退到周五榜单
+    assert "07/10" in out.cards[0][1].body_md
+
+
+def test_options_query_gives_up_after_five_sessions(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    ledger = SignalLedger(tmp_path / "signals.db")
+    settings = make_test_settings(
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+    )
+    out = FakeTransport()
+    service = FeishuBotService(
+        ledger, settings, out, clock=lambda: NOW + timedelta(days=1)
+    )
+    service.handle(msg(content={"text": "期权"}))
+    assert out.cards == []
+    assert "无期权扫描数据" in out.texts[0][1]
 
 
 def test_group_options_replies_in_group(tmp_path: Path) -> None:

@@ -301,12 +301,19 @@ class FeishuBotService:
         return "\n".join(lines)
 
     def _reply_options(self, chat_id: str, now: datetime) -> None:
+        from quant_signal.calendar import previous_trading_day
         from quant_signal.notifier.cards import option_flow_card
 
+        # 非交易时段回退到最近一个有扫描的交易日（最多 5 个）
         session = now.astimezone(_ET).date()
         snapshot = self._ledger.latest_option_flow_snapshot(session)
+        for _ in range(5):
+            if snapshot is not None:
+                break
+            session = previous_trading_day(session)
+            snapshot = self._ledger.latest_option_flow_snapshot(session)
         if snapshot is None:
-            self._transport.send_text(chat_id, "今日暂无期权扫描数据。")
+            self._transport.send_text(chat_id, "近 5 个交易日无期权扫描数据。")
             return
         cfg = self._settings.option_flow
         enrichment: Literal["ok", "off"] = (
