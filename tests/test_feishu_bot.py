@@ -27,10 +27,17 @@ class FakeTransport:
         self.texts: list[tuple[str, str]] = []
         self.cards: list[tuple[str, Card]] = []
         self.downloads: list[tuple[str, str]] = []
+        self.private_texts: list[tuple[str, str, str]] = []
         self.image_bytes = b"\x89PNG fake"
 
     def send_text(self, chat_id: str, text: str) -> bool:
         self.texts.append((chat_id, text))
+        return True
+
+    def send_text_to(
+        self, receive_id: str, receive_id_type: str, text: str
+    ) -> bool:
+        self.private_texts.append((receive_id, receive_id_type, text))
         return True
 
     def send_card(self, chat_id: str, card: Card) -> bool:
@@ -66,6 +73,7 @@ def msg(
     message_type: str = "text",
     content: object = None,
     sender: str = "ou_owner",
+    mentioned: bool = False,
 ) -> BotMessage:
     if content is None:
         content = {"text": "帮助"}
@@ -78,11 +86,30 @@ def msg(
         if not isinstance(content, str)
         else content,
         sender_open_id=sender,
+        mentioned=mentioned,
     )
 
 
-def test_group_messages_are_ignored() -> None:
+def test_group_without_mention_is_ignored() -> None:
     assert route(msg(chat_type="group"), ALLOWED) is BotIntent.IGNORE
+    assert (
+        route(msg(chat_type="group", content={"text": "期权"}), ALLOWED)
+        is BotIntent.IGNORE
+    )
+
+
+def test_group_mention_routes_readonly_commands_for_allowed_sender() -> None:
+    message = msg(
+        chat_type="group", mentioned=True, content={"text": "@_user_1 期权"}
+    )
+    assert route(message, ALLOWED) is BotIntent.OPTIONS
+    stranger = msg(
+        chat_type="group",
+        mentioned=True,
+        sender="ou_stranger",
+        content={"text": "@_user_1 期权"},
+    )
+    assert route(stranger, ALLOWED) is BotIntent.IGNORE  # 群里不回显 open_id，静默
 
 
 def test_unlisted_sender_gets_open_id_echo() -> None:
@@ -122,6 +149,8 @@ def test_content_parsers_are_defensive() -> None:
     assert parse_text('{"text": " 状态 "}') == "状态"
     assert parse_text("{not json") == ""
     assert parse_text('{"other": 1}') == ""
+    assert parse_text('{"text": "@_user_1 持仓"}') == "持仓"  # 剥掉 @ 占位符
+    assert parse_text('{"text": "@_user_1 @_user_2 期权 "}') == "期权"
     assert parse_image_key('{"image_key": "img_1"}') == "img_1"
     assert parse_image_key("{not json") is None
     assert parse_image_key('{"text": "x"}') is None
@@ -350,6 +379,83 @@ def event_payload(
     }
 
 
+def test_group_options_replies_in_group(tmp_path: Path) -> None:
+    from quant_signal.options_flow import (
+        OptionContractVolume,
+        OptionFlowSnapshot,
+        scan_slot,
+    )
+
+    service, out, ledger = make_service(tmp_path)
+    rows = (
+        OptionContractVolume(
+            contract_symbol="NVDA260717C00210000",
+            underlying="NVDA",
+            side="call",
+            expiration=date(2026, 7, 17),
+            strike=Decimal("210"),
+            volume=10_000,
+            rank=1,
+            venues=("cone",),
+            captured_at=NOW,
+        ),
+    )
+    ledger.save_option_flow_scan(
+        OptionFlowSnapshot(
+            slot=scan_slot(NOW),
+            captured_at=NOW,
+            provider="cboe-four-venues",
+            venue_coverage=1.0,
+            rows=rows,
+        ),
+        "quiet",
+        None,
+        now=NOW,
+        expires_at=None,
+    )
+    service.handle(
+        msg(chat_type="group", mentioned=True, content={"text": "@_user_1 期权"})
+    )
+    assert len(out.cards) == 1 and out.cards[0][0] == "oc_chat"  # 回在群里
+
+
+def test_group_holdings_goes_private_with_group_notice(tmp_path: Path) -> None:
+    service, out, _ = make_service(tmp_path)
+    service.handle(
+        msg(chat_type="group", mentioned=True, content={"text": "@_user_1 持仓"})
+    )
+    assert out.private_texts and out.private_texts[0][0] == "ou_owner"
+    assert out.private_texts[0][1] == "open_id"
+    assert "暂无账户快照" in out.private_texts[0][2]
+    assert out.texts and "私发" in out.texts[0][1]  # 群里只提示
+
+
+def test_group_import_and_confirm_are_redirected_to_p2p(tmp_path: Path) -> None:
+    service, out, ledger = make_service(
+        tmp_path, extractor=FakeExtractor(portfolio_extraction())
+    )
+    service.handle(
+        msg(
+            message_id="om_g1",
+            chat_type="group",
+            mentioned=True,
+            message_type="image",
+            content={"image_key": "img_x"},
+        )
+    )
+    service.handle(
+        msg(
+            message_id="om_g2",
+            chat_type="group",
+            mentioned=True,
+            content={"text": "@_user_1 确认导入"},
+        )
+    )
+    assert ledger.latest_observed_account() is None  # 群里绝不触发导入
+    assert out.downloads == []
+    assert all("单聊" in text for _, text in out.texts)
+
+
 def test_message_from_event_parses_text_and_image() -> None:
     from quant_signal.feishu_bot import message_from_event
 
@@ -367,6 +473,14 @@ def test_message_from_event_parses_text_and_image() -> None:
 
     group = message_from_event(event_payload(chat_type="group"))
     assert group is not None and group.chat_type == "group"
+    assert group.mentioned is False
+
+    mentioned = event_payload(chat_type="group", content='{"text":"@_user_1 期权"}')
+    mentioned["event"]["message"]["mentions"] = [
+        {"key": "@_user_1", "id": {"open_id": "ou_bot"}, "name": "量化交易助手"}
+    ]
+    parsed = message_from_event(mentioned)
+    assert parsed is not None and parsed.mentioned is True
 
 
 def test_message_from_event_rejects_malformed_payloads() -> None:

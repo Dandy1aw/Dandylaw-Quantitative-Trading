@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import json
 from pathlib import Path
+import re
 import queue
 import threading
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -50,6 +51,7 @@ class BotMessage:
     message_type: str  # "text" | "image" | ...
     content_json: str  # 事件里的原始 content 字段
     sender_open_id: str
+    mentioned: bool = False  # 群消息里是否 @ 了机器人(群 @ 事件 scope 下恒真)
 
 
 class BotIntent(str, Enum):
@@ -88,7 +90,9 @@ def parse_text(content_json: str) -> str:
     if not isinstance(payload, dict):
         return ""
     text = payload.get("text")
-    return str(text).strip() if isinstance(text, str) else ""
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"@_user_\d+", "", text).strip()
 
 
 def parse_image_key(content_json: str) -> str | None:
@@ -103,10 +107,19 @@ def parse_image_key(content_json: str) -> str | None:
 
 
 def route(message: BotMessage, allowed_open_ids: frozenset[str]) -> BotIntent:
-    """纯函数路由：群聊忽略、白名单外回显 open_id、文本按表匹配。"""
-    if message.chat_type != "p2p":
+    """纯函数路由。
+
+    单聊：白名单外回显 open_id；图片走导入；文本按表匹配。
+    群聊：必须 @ 机器人且发送者在白名单，否则静默忽略（不回显、不刷屏）。
+    """
+    if message.chat_type == "group":
+        if not message.mentioned:
+            return BotIntent.IGNORE
+        if message.sender_open_id not in allowed_open_ids:
+            return BotIntent.IGNORE
+    elif message.chat_type != "p2p":
         return BotIntent.IGNORE
-    if message.sender_open_id not in allowed_open_ids:
+    elif message.sender_open_id not in allowed_open_ids:
         return BotIntent.ECHO_OPEN_ID
     if message.message_type == "image":
         return BotIntent.IMPORT_IMAGE
@@ -118,6 +131,10 @@ def route(message: BotMessage, allowed_open_ids: frozenset[str]) -> BotIntent:
 
 class BotTransport(Protocol):
     def send_text(self, chat_id: str, text: str) -> bool: ...
+
+    def send_text_to(
+        self, receive_id: str, receive_id_type: str, text: str
+    ) -> bool: ...
 
     def send_card(self, chat_id: str, card: Card) -> bool: ...
 
@@ -192,6 +209,20 @@ class FeishuBotService:
             )
 
     def _dispatch(self, intent: BotIntent, message: BotMessage, now: datetime) -> None:
+        if message.chat_type == "group":
+            # 群里只提供只读查询；改状态的操作一律引导回单聊
+            if intent in (BotIntent.IMPORT_IMAGE, BotIntent.CONFIRM_IMPORT):
+                self._transport.send_text(
+                    message.chat_id, "导入相关操作请在与机器人的单聊中进行。"
+                )
+                return
+            if intent is BotIntent.HOLDINGS:
+                # 持仓含权益/市值明细，不贴群里：私发详情，群里只留提示
+                self._transport.send_text_to(
+                    message.sender_open_id, "open_id", self._holdings_text()
+                )
+                self._transport.send_text(message.chat_id, "持仓明细已私发给你。")
+                return
         if intent is BotIntent.ECHO_OPEN_ID:
             self._transport.send_text(
                 message.chat_id,
@@ -432,6 +463,7 @@ def message_from_event(payload: object) -> BotMessage | None:
     if not all(isinstance(value, str) and value for value in fields):
         return None
     message_id, chat_id, chat_type, message_type, content, sender_open_id = fields
+    mentions = message.get("mentions")
     return BotMessage(
         message_id=str(message_id),
         chat_id=str(chat_id),
@@ -439,6 +471,7 @@ def message_from_event(payload: object) -> BotMessage | None:
         message_type=str(message_type),
         content_json=str(content),
         sender_open_id=str(sender_open_id),
+        mentioned=isinstance(mentions, list) and len(mentions) > 0,
     )
 
 
@@ -491,6 +524,16 @@ class LarkTransport:
     def send_text(self, chat_id: str, text: str) -> bool:
         return self._send(
             chat_id, "text", json.dumps({"text": text}, ensure_ascii=False)
+        )
+
+    def send_text_to(
+        self, receive_id: str, receive_id_type: str, text: str
+    ) -> bool:
+        return self._send(
+            receive_id,
+            "text",
+            json.dumps({"text": text}, ensure_ascii=False),
+            receive_id_type=receive_id_type,
         )
 
     def send_card(self, chat_id: str, card: Card) -> bool:
