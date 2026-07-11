@@ -58,6 +58,113 @@ def test_execution_jobs_run_at_0815_and_watch_is_staggered_one_minute() -> None:
     assert jobs["execution_watch"].misfire_grace_time == 240
 
 
+def test_option_flow_jobs_registered_only_when_enabled() -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import ExecutionPlanSettings, OptionFlowSettings
+
+    disabled = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            option_flow=OptionFlowSettings(enabled=False),
+        )
+    )
+    disabled_jobs = {
+        job.id
+        for job in build_scheduler(
+            engine=disabled, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+    assert "option_flow" not in disabled_jobs
+    assert "option_flow_close" not in disabled_jobs
+    assert "option_flow_drain" not in disabled_jobs
+
+    enabled = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            option_flow=OptionFlowSettings(enabled=True),
+        )
+    )
+    sched = build_scheduler(
+        engine=enabled, ledger=None, store=None, notifier=FakeNotifier()
+    )
+    jobs = {job.id: job for job in sched.get_jobs()}
+    assert {"option_flow", "option_flow_close", "option_flow_drain"} <= jobs.keys()
+
+    intraday = jobs["option_flow"]
+    assert "hour='10-15'" in str(intraday.trigger)
+    assert "minute='0,15,30,45'" in str(intraday.trigger)
+    assert str(intraday.trigger.timezone) == "America/New_York"
+    assert intraday.max_instances == 1
+    assert intraday.coalesce is True
+    assert intraday.misfire_grace_time == 600
+
+    closing = jobs["option_flow_close"]
+    assert "hour='16'" in str(closing.trigger)
+    assert "minute='20'" in str(closing.trigger)
+    assert str(closing.trigger.timezone) == "America/New_York"
+    assert closing.max_instances == 1
+    assert closing.coalesce is True
+    assert closing.misfire_grace_time == 1800
+
+    drain = jobs["option_flow_drain"]
+    assert "hour='16-21'" in str(drain.trigger)
+    assert "minute='35'" in str(drain.trigger)
+    assert str(drain.trigger.timezone) == "America/New_York"
+    assert drain.max_instances == 1
+    assert drain.coalesce is True
+    assert drain.misfire_grace_time == 600
+
+
+def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from conftest import make_test_settings
+    from quant_signal.config import (
+        ExecutionPlanSettings,
+        NotifySettings,
+        OptionFlowSettings,
+    )
+
+    class Engine:
+        def __init__(self) -> None:
+            self.settings = make_test_settings(
+                execution_plan=ExecutionPlanSettings(enabled=False),
+                notify=NotifySettings(action_card_only=True),
+                option_flow=OptionFlowSettings(enabled=True),
+            )
+            self.calls: list[bool] = []
+            self.drains = 0
+
+        def run_option_flow(
+            self, now: datetime, *, force_summary: bool = False
+        ) -> None:
+            self.calls.append(force_summary)
+
+        def run_option_flow_delivery(self, now: datetime) -> None:
+            self.drains += 1
+
+    engine = Engine()
+    sched = build_scheduler(
+        engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+    )
+    jobs = {job.id: job for job in sched.get_jobs()}
+
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: False)
+    jobs["option_flow"].func()
+    jobs["option_flow_close"].func()
+    jobs["option_flow_drain"].func()
+    assert engine.calls == [] and engine.drains == 0
+
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+    jobs["option_flow"].func()
+    jobs["option_flow_close"].func()
+    jobs["option_flow_drain"].func()
+    assert engine.calls == [False, True]
+    assert engine.drains == 1
+
+
 def test_legacy_deviation_job_registered_only_when_enabled() -> None:
     from types import SimpleNamespace
 

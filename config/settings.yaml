@@ -132,5 +132,23 @@ execution_plan:
   quote_max_age_seconds: 420
   account_max_age_seconds: 60
 
+option_flow:
+  enabled: true
+  feed: indicative
+  top_n: 10
+  discovery_limit: 50
+  venues: [cone, ctwo, opt, exo]
+  excluded_index_roots: [SPX, SPXW, VIX, RUT, RUTW, NDX, XSP, OEX]
+  etf_roots: [SPY, QQQ, IWM]
+  min_volume: 5000
+  surge_volume: 10000
+  zero_dte_surge_volume: 20000
+  rank_jump: 3
+  cooldown_minutes: 60
+  max_alerts_per_day: 4
+  intraday_expiry_minutes: 45
+  closing_expiry_hours: 12
+  min_venue_coverage: 1.0
+
 legacy_price_deviation:
   enabled: false

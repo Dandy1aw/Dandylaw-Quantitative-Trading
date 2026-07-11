@@ -135,6 +135,59 @@ class ExecutionPlanSettings(BaseModel):
         return self
 
 
+def _default_option_venues() -> list[Literal["cone", "ctwo", "opt", "exo"]]:
+    return ["cone", "ctwo", "opt", "exo"]
+
+
+class OptionFlowSettings(BaseModel):
+    enabled: bool = False
+    feed: Literal["indicative", "opra"] = "indicative"
+    top_n: int = Field(default=10, ge=1, le=20)
+    discovery_limit: int = Field(default=50, ge=10, le=100)
+    venues: list[Literal["cone", "ctwo", "opt", "exo"]] = Field(
+        default_factory=_default_option_venues,
+        min_length=1,
+    )
+    excluded_index_roots: list[str] = Field(
+        default_factory=lambda: [
+            "SPX", "SPXW", "VIX", "RUT", "RUTW", "NDX", "XSP", "OEX"
+        ]
+    )
+    etf_roots: list[str] = Field(default_factory=lambda: ["SPY", "QQQ", "IWM"])
+    min_volume: int = Field(default=5000, ge=0)
+    surge_volume: int = Field(default=10_000, ge=1)
+    zero_dte_surge_volume: int = Field(default=20_000, ge=1)
+    rank_jump: int = Field(default=3, ge=1, le=20)
+    cooldown_minutes: int = Field(default=60, ge=15, le=240)
+    max_alerts_per_day: int = Field(default=4, ge=2, le=12)
+    intraday_expiry_minutes: int = Field(default=45, ge=15, le=180)
+    closing_expiry_hours: int = Field(default=12, ge=1, le=24)
+    min_venue_coverage: float = Field(default=1.0, ge=1.0, le=1.0)
+
+    @model_validator(mode="after")
+    def validate_option_flow_policy(self) -> Self:
+        if self.discovery_limit < self.top_n:
+            raise ValueError("discovery_limit must be greater than or equal to top_n")
+        if self.zero_dte_surge_volume < self.surge_volume:
+            raise ValueError(
+                "zero_dte_surge_volume must be greater than or equal to surge_volume"
+            )
+        if len(self.venues) != len(set(self.venues)):
+            raise ValueError("venues must not contain duplicates")
+        expected = {"cone", "ctwo", "opt", "exo"}
+        if self.enabled and set(self.venues) != expected:
+            raise ValueError("venues must include cone, ctwo, opt, and exo when enabled")
+        self.excluded_index_roots = [
+            root.strip().upper() for root in self.excluded_index_roots if root.strip()
+        ]
+        self.etf_roots = [root.strip().upper() for root in self.etf_roots if root.strip()]
+        if len(self.excluded_index_roots) != len(set(self.excluded_index_roots)):
+            raise ValueError("excluded_index_roots must not contain duplicates")
+        if len(self.etf_roots) != len(set(self.etf_roots)):
+            raise ValueError("etf_roots must not contain duplicates")
+        return self
+
+
 class LegacyPriceDeviationSettings(BaseModel):
     enabled: bool = False
 
@@ -165,6 +218,7 @@ class Settings(BaseModel):
     trend_gate: TrendGateSettings = TrendGateSettings()
     index_universe: IndexUniverseSettings = IndexUniverseSettings()
     execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
+    option_flow: OptionFlowSettings = OptionFlowSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""

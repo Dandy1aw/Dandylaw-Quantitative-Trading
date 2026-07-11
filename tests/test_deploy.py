@@ -25,6 +25,10 @@ def test_production_settings_enable_execution_and_disable_legacy_deviation() -> 
     assert data["execution_plan"]["capital_limit_usd"] == 6000
     assert data["execution_plan"]["max_financing_ratio"] == 0.20
     assert data["legacy_price_deviation"]["enabled"] is False
+    assert data["option_flow"]["enabled"] is True
+    assert data["option_flow"]["feed"] == "indicative"
+    assert data["option_flow"]["top_n"] == 10
+    assert data["option_flow"]["venues"] == ["cone", "ctwo", "opt", "exo"]
 
 
 def test_status_script_reports_unattended_task_identity() -> None:

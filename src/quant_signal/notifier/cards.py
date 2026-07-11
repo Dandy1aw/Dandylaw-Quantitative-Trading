@@ -12,10 +12,131 @@ from quant_signal.strategies.base import Direction, Signal
 if TYPE_CHECKING:
     from quant_signal.account import AccountState
     from quant_signal.execution import ExecutionPlan
+    from quant_signal.options_flow import (
+        OptionContractVolume,
+        OptionFlowChange,
+        OptionFlowSnapshot,
+    )
 
 _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
 _DIRECTION_EMOJI = {"buy": "📈", "sell": "📉", "reduce": "⚖️"}
+
+
+def option_flow_card(
+    snapshot: "OptionFlowSnapshot",
+    changes: "Sequence[OptionFlowChange]",
+    phase: str,
+    now: datetime,
+    *,
+    previous: "OptionFlowSnapshot | None" = None,
+    enrichment_available: bool = True,
+) -> Card:
+    """Compact research card for Cboe-visible Call/Put activity."""
+    from quant_signal.options_flow import top_by_side
+
+    phase_names = {"baseline": "首次榜", "change": "盘中异动", "close": "收盘榜"}
+    phase_name = phase_names.get(phase, phase)
+    observed = snapshot.captured_at.astimezone(_ET).strftime("%m/%d %H:%M ET")
+    enrichment_label = (
+        "Alpaca INDICATIVE · 约15分钟延迟"
+        if enrichment_available
+        else "Alpaca补全失败 · 本卡仅含Cboe成交量"
+    )
+    identity = CardSection(
+        "**数据身份**\n"
+        f"{phase_name}｜{observed}｜覆盖 {snapshot.venue_coverage:.0%}\n"
+        "Cboe C1/C2/BZX/EDGX 四市场｜可见榜单量下限近似\n"
+        f"补全：{enrichment_label}"
+    )
+
+    flag_names = {
+        "NEW_TOP10": "新进Top10",
+        "RANK_JUMP": "排名跃升",
+        "VOLUME_SURGE": "成交加速",
+        "HIGH_TURNOVER": "高换手",
+    }
+
+    def money(value: Decimal) -> str:
+        amount = float(value)
+        if amount >= 1_000_000:
+            return f"${amount / 1_000_000:.2f}M"
+        if amount >= 1_000:
+            return f"${amount / 1_000:.0f}K"
+        return f"${amount:.0f}"
+
+    focus_lines = ["**异动聚焦**"]
+    if changes:
+        for change in changes[:5]:
+            item = change.contract
+            prior_rank = f"#{change.previous_rank}" if change.previous_rank is not None else "新"
+            labels = "、".join(flag_names.get(flag, flag) for flag in change.flags)
+            context: list[str] = []
+            if item.enrichment is not None:
+                ratio = item.enrichment.volume_oi_ratio(item.volume)
+                premium = item.enrichment.estimated_premium(item.volume)
+                if ratio is not None:
+                    context.append(f"V/OI {float(ratio):.1f}x")
+                if premium is not None:
+                    context.append(f"估算权利金 {money(premium)}")
+            suffix = f"｜{'｜'.join(context)}" if context else ""
+            marker = "C" if item.side == "call" else "P"
+            delta_label = (
+                f"+{change.volume_delta:,}/15m"
+                if change.volume_delta is not None
+                else "首次可见"
+            )
+            focus_lines.append(
+                f"{item.underlying} {item.expiration:%m/%d} {item.strike:g}{marker}｜"
+                f"{labels}｜{prior_rank}→#{item.rank}｜"
+                f"{delta_label}｜分数 {change.score}{suffix}"
+            )
+    else:
+        focus_lines.append("暂无可比较的实质变化；保留原始Top10作为市场温度。")
+    focus = CardSection("\n".join(focus_lines))
+
+    prior_by_symbol = (
+        {item.contract_symbol: item for item in previous.rows}
+        if previous is not None
+        else {}
+    )
+
+    def rank_section(side: str) -> CardSection:
+        heading = "CALL Top10" if side == "call" else "PUT Top10"
+        marker = "C" if side == "call" else "P"
+        lines = [f"**{heading}**"]
+        for item in top_by_side(snapshot, side, 10):  # type: ignore[arg-type]
+            old = prior_by_symbol.get(item.contract_symbol)
+            delta = max(item.volume - old.volume, 0) if old is not None else None
+            delta_text = f"+{delta:,}/15m" if delta is not None else "首次可见"
+            dte = (item.expiration - snapshot.session_date).days
+            dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
+            lines.append(
+                f"{item.rank}. {item.underlying} {item.expiration:%m/%d} "
+                f"{item.strike:g}{marker} · {item.volume:,}张 · {delta_text} · {dte_text}"
+            )
+        return CardSection("\n".join(lines))
+
+    boundary = CardSection(
+        "**解释边界**\n"
+        "Call成交不等于看涨，Put成交不等于看跌；可能是平仓、备兑、保护、价差或做市对冲。\n"
+        "Volume/OI使用前一结算日OI，不能证明新开仓；Indicative报价不能用于判断主动买卖。\n"
+        "> 期权成交热度研究提醒，不自动下单，仅供观察，不构成投资建议。"
+    )
+    sections = (
+        identity,
+        focus,
+        rank_section("call"),
+        rank_section("put"),
+        boundary,
+    )
+    body = "\n\n".join(section.content_md for section in sections)
+    return Card(
+        kind=CardKind.SIGNAL if phase == "change" else CardKind.REPORT,
+        title="🔥 美股期权热度 · Cboe四市场",
+        body_md=body,
+        sections=sections,
+    )
 
 
 def signal_card(s: Signal, delayed: bool = False) -> Card:
