@@ -132,6 +132,69 @@ def test_card_distinguishes_unconfigured_enrichment_from_failure() -> None:
     assert "失败" not in card.body_md
 
 
+def test_rank_section_dedupes_underlying_and_puts_near_expiry_first() -> None:
+    current = snapshot()
+    spy_near = replace(
+        current.rows[0],
+        underlying="SPY",
+        contract_symbol="SPY260713C00750000",
+        strike=Decimal("750"),
+        expiration=date(2026, 7, 13),
+        volume=40_000,
+        rank=1,
+    )
+    spy_far = replace(
+        current.rows[1],
+        underlying="SPY",
+        contract_symbol="SPY260717C00755000",
+        strike=Decimal("755"),
+        volume=39_000,
+        rank=2,
+    )
+    card = option_flow_card(
+        replace(current, rows=(spy_near, spy_far) + current.rows[2:]), (), "baseline"
+    )
+    body = card.body_md
+
+    assert body.count("SPY") == 1              # 同标的只显示最高量那张
+    assert "(+1)" in body                      # 折叠标注：原始榜还有1张 SPY
+    assert "#1 SPY 07/13 750C" in body         # 行首为原始每侧排名
+    assert "755C" not in body
+    assert body.index("#1 SPY") < body.index("#3 MSFT")  # 近月排最前
+
+
+def test_rank_section_switches_revert_to_raw_order() -> None:
+    current = snapshot()
+    spy_near = replace(
+        current.rows[0],
+        underlying="SPY",
+        contract_symbol="SPY260713C00750000",
+        strike=Decimal("750"),
+        expiration=date(2026, 7, 13),
+        volume=40_000,
+        rank=1,
+    )
+    spy_far = replace(
+        current.rows[1],
+        underlying="SPY",
+        contract_symbol="SPY260717C00755000",
+        strike=Decimal("755"),
+        volume=39_000,
+        rank=2,
+    )
+    card = option_flow_card(
+        replace(current, rows=(spy_near, spy_far) + current.rows[2:]),
+        (),
+        "baseline",
+        display_dedupe=False,
+        display_sort_by_expiry=False,
+    )
+    body = card.body_md
+    assert "750C" in body and "755C" in body   # 不去重
+    assert "(+" not in body
+    assert body.index("#1 SPY") < body.index("#2 SPY")  # 按原始排名顺序
+
+
 def test_strike_display_strips_trailing_zeros() -> None:
     current = snapshot()
     padded = replace(current.rows[0], strike=Decimal("201.000"))

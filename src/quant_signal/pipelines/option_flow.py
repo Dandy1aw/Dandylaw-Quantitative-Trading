@@ -13,6 +13,7 @@ from quant_signal.notifier.cards import option_flow_card
 from quant_signal.options_flow import (
     OptionFlowPolicy,
     detect_material_changes,
+    display_top_by_side,
     top_by_side,
 )
 
@@ -119,9 +120,22 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
         "ok" if engine.option_flow_enricher is not None else "off"
     )
     if engine.option_flow_enricher is not None:
+        # enrichment 目标 = 展示集合：去重后顶上来的行也要有 OI/报价
         displayed = (
-            *top_by_side(snapshot, "call", cfg.top_n),
-            *top_by_side(snapshot, "put", cfg.top_n),
+            *display_top_by_side(
+                snapshot,
+                "call",
+                cfg.top_n,
+                dedupe=cfg.display_dedupe_underlying,
+                sort_by_expiry=cfg.display_sort_by_expiry,
+            ),
+            *display_top_by_side(
+                snapshot,
+                "put",
+                cfg.top_n,
+                dedupe=cfg.display_dedupe_underlying,
+                sort_by_expiry=cfg.display_sort_by_expiry,
+            ),
         )
         try:
             enrichments = engine.option_flow_enricher.enrich(displayed, now)
@@ -181,6 +195,8 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
             phase,
             previous=previous,
             enrichment_status=enrichment_status,
+            display_dedupe=cfg.display_dedupe_underlying,
+            display_sort_by_expiry=cfg.display_sort_by_expiry,
         )
         if should_alert
         else None

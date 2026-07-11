@@ -186,6 +186,93 @@ def test_delivery_only_run_drains_outbox_without_fetching(tmp_path: Path) -> Non
     assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) == []
 
 
+class RecordingEnricher:
+    def __init__(self) -> None:
+        self.symbols: list[str] = []
+
+    def enrich(self, rows, now):  # type: ignore[no-untyped-def]
+        self.symbols = [row.contract_symbol for row in rows]
+        return {}
+
+
+def dup_underlying_scan(at: datetime) -> OptionFlowSnapshot:
+    """SPY 两张合约霸占 call 榜前两名，去重后第 11 名应顶进展示。"""
+    rows: list[OptionContractVolume] = []
+    for rank, strike in ((1, Decimal("750")), (2, Decimal("755"))):
+        rows.append(
+            OptionContractVolume(
+                contract_symbol=f"SPY260717C{int(strike * 1000):08d}",
+                underlying="SPY",
+                side="call",
+                expiration=date(2026, 7, 17),
+                strike=strike,
+                volume=30_000 - rank * 500,
+                rank=rank,
+                venues=("cone", "ctwo", "exo", "opt"),
+                captured_at=at,
+            )
+        )
+    for offset, root in enumerate(ROOTS[:10], start=3):
+        strike = Decimal(200 + offset)
+        rows.append(
+            OptionContractVolume(
+                contract_symbol=f"{root}260717C{int(strike * 1000):08d}",
+                underlying=root,
+                side="call",
+                expiration=date(2026, 7, 17),
+                strike=strike,
+                volume=20_000 - offset * 500,
+                rank=offset,
+                venues=("cone", "ctwo", "exo", "opt"),
+                captured_at=at,
+            )
+        )
+    for rank, root in enumerate(ROOTS[:10], start=1):
+        strike = Decimal(300 + rank)
+        rows.append(
+            OptionContractVolume(
+                contract_symbol=f"{root}260717P{int(strike * 1000):08d}",
+                underlying=root,
+                side="put",
+                expiration=date(2026, 7, 17),
+                strike=strike,
+                volume=15_000 - rank * 400,
+                rank=rank,
+                venues=("cone", "ctwo", "exo", "opt"),
+                captured_at=at,
+            )
+        )
+    return OptionFlowSnapshot(
+        slot=scan_slot(at),
+        captured_at=at,
+        provider="cboe-four-venues",
+        venue_coverage=1.0,
+        rows=tuple(rows),
+    )
+
+
+class DupOptionSource:
+    def fetch(self, now: datetime) -> OptionFlowSnapshot:
+        return dup_underlying_scan(now)
+
+
+def test_enrichment_targets_the_displayed_deduped_rows(tmp_path: Path) -> None:
+    # 去重后顶上来的行也要有补全：enrichment 目标 = 展示集合。
+    enricher = RecordingEnricher()
+    engine, _ = make_engine(
+        tmp_path,
+        option_source=DupOptionSource(),  # type: ignore[arg-type]
+        option_enricher=enricher,
+    )
+    engine.run_option_flow(NOW)
+
+    assert "SPY260717C00750000" in enricher.symbols       # SPY 最高量那张
+    assert "SPY260717C00755000" not in enricher.symbols   # 重复 SPY 被折叠
+    # 原始第 11 名(MU, offset=11)因去重腾出席位而进入展示集合
+    assert "MU260717C00211000" in enricher.symbols
+    assert len(enricher.symbols) == 20
+
+
 def test_unconfigured_enricher_is_not_labeled_as_failure(tmp_path: Path) -> None:
     engine, notifier = make_engine(tmp_path)  # option_enricher=None
     engine.run_option_flow(NOW)

@@ -230,6 +230,17 @@ def test_option_flow_requires_complete_unique_venues_when_enabled() -> None:
         OptionFlowSettings(enabled=True, venues=["cone", "cone", "opt", "exo"])
 
 
+def test_option_flow_display_switches_default_on() -> None:
+    settings = OptionFlowSettings()
+    assert settings.display_dedupe_underlying is True
+    assert settings.display_sort_by_expiry is True
+    tuned = OptionFlowSettings(
+        display_dedupe_underlying=False, display_sort_by_expiry=False
+    )
+    assert tuned.display_dedupe_underlying is False
+    assert tuned.display_sort_by_expiry is False
+
+
 def test_option_flow_normalizes_roots_and_threshold_order() -> None:
     settings = OptionFlowSettings(
         excluded_index_roots=["spx", "vix"],

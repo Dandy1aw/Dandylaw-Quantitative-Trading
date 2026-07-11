@@ -163,6 +163,9 @@ class OptionFlowSettings(BaseModel):
     intraday_expiry_minutes: int = Field(default=45, ge=15, le=180)
     closing_expiry_hours: int = Field(default=12, ge=1, le=24)
     min_venue_coverage: float = Field(default=1.0, ge=1.0, le=1.0)
+    # 展示层开关：只影响卡片显示，不改变排名/异动/落库口径
+    display_dedupe_underlying: bool = True
+    display_sort_by_expiry: bool = True
 
     @model_validator(mode="after")
     def validate_option_flow_policy(self) -> Self:

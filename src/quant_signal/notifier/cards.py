@@ -30,9 +30,11 @@ def option_flow_card(
     *,
     previous: "OptionFlowSnapshot | None" = None,
     enrichment_status: Literal["ok", "failed", "off"] = "ok",
+    display_dedupe: bool = True,
+    display_sort_by_expiry: bool = True,
 ) -> Card:
     """Compact research card for Cboe-visible Call/Put activity."""
-    from quant_signal.options_flow import top_by_side
+    from quant_signal.options_flow import display_top_by_side, top_by_side
 
     phase_names = {"baseline": "首次榜", "change": "盘中异动", "close": "收盘榜"}
     phase_name = phase_names.get(phase, phase)
@@ -108,15 +110,27 @@ def option_flow_card(
         heading = "CALL Top10" if side == "call" else "PUT Top10"
         marker = "C" if side == "call" else "P"
         lines = [f"**{heading}**"]
-        for item in top_by_side(snapshot, side, 10):  # type: ignore[arg-type]
+        raw_top10 = top_by_side(snapshot, side, 10)  # type: ignore[arg-type]
+        siblings = Counter(item.underlying for item in raw_top10)
+        shown = display_top_by_side(
+            snapshot,
+            side,  # type: ignore[arg-type]
+            10,
+            dedupe=display_dedupe,
+            sort_by_expiry=display_sort_by_expiry,
+        )
+        for item in shown:
             old = prior_by_symbol.get(item.contract_symbol)
             delta = max(item.volume - old.volume, 0) if old is not None else None
             delta_text = f"+{delta:,}/15m" if delta is not None else "首次可见"
             dte = (item.expiration - snapshot.session_date).days
             dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
+            folded = siblings.get(item.underlying, 0) - 1 if display_dedupe else 0
+            fold_text = f" (+{folded})" if folded > 0 else ""
             lines.append(
-                f"{item.rank}. {item.underlying} {item.expiration:%m/%d} "
-                f"{strike_text(item.strike)}{marker} · {item.volume:,}张 · {delta_text} · {dte_text}"
+                f"#{item.rank} {item.underlying} {item.expiration:%m/%d} "
+                f"{strike_text(item.strike)}{marker} · {item.volume:,}张 · "
+                f"{delta_text} · {dte_text}{fold_text}"
             )
         return CardSection("\n".join(lines))
 
