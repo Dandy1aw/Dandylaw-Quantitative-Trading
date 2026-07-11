@@ -1,6 +1,8 @@
 # 美股/港股/韩股半自动量化信号系统 (quant-signal)
 
-只产生信号并推送飞书，**不自动下单**——所有交易由用户在券商 App 手动决策执行。
+只产生信号与 **PAPER 执行建议**并推送飞书，**不自动下单**——所有交易由用户在券商 App
+手动决策执行。执行建议基于只读 Alpaca paper 账户计算"何时、什么限价、买多少股"，
+由确定性规则生成，AI 只解释不改写。
 
 ## 目录
 
@@ -10,6 +12,7 @@
 - [凭证配置](#凭证配置)
 - [核心概念](#核心概念)
 - [策略](#策略)
+- [指数发现池与 PAPER 执行建议](#指数发现池与-paper-执行建议)
 - [调度：一天跑哪些任务](#调度一天跑哪些任务)
 - [配置参考（settings.yaml）](#配置参考settingsyaml)
 - [命令行工具](#命令行工具)
@@ -23,10 +26,12 @@
 
 ## 非目标（明确不做的事）
 
-- 不自动下单，不接入任何券商交易 API
+- 不自动下单：账户适配器只调 GET 接口，代码里不存在下单/撤单能力
 - 不做 tick/秒级高频，最小颗粒度是 5 分钟 bar
 - 不维护港股/韩股专属交易日历（用固定 UTC 时间窗口兜底，见"已知限制"）
 - 不做 Web UI，所有输出走飞书（或本地终端 Console 模式）
+- 不让 AI 生成或修改任何价格、金额和股数（prompt 硬约束 + 结构化卡片独立于 AI）
+- 不用当前指数成分宣称历史回测无偏（幸存者偏差显式标注）
 
 ## 架构
 
@@ -37,14 +42,19 @@
 │ Alpaca/yfinance│    │ Engine        │    │ Console/飞书    │
 └──────┬───────┘    └───────┬───────┘    └───────────────┘
        ↓                    ↓
-   duckdb(bars)        sqlite(signals+holdings)
+   duckdb(bars)        sqlite(signals/holdings/plans/events)
+       ↑                    ↑
+┌──────┴───────┐    ┌───────┴───────┐
+│ index-universe│    │ execution      │  只读 paper 账户 → 确定性
+│ 纳指100+标普500│    │ 计划+状态机     │  sizing + 状态迁移提醒
+└──────────────┘    └───────────────┘
                             ↑
                     ┌───────────────┐
-                    │  research      │  离线回测（vectorbt + walk-forward）
+                    │  research      │  离线回测（vectorbt + walk-forward + 回放）
                     └───────────────┘
 ```
 
-单进程 monorepo，APScheduler 驱动 9 个定时任务（详见下文）。数据源
+单进程 monorepo，APScheduler 驱动 14 个定时任务（详见下文）。数据源
 （yfinance / Alpaca）与通知器（Console / 飞书）都是可切换的抽象：
 
 - 每个标的按 `tickers.<symbol>.currency` 自动派生数据源：非 USD 固定走 yfinance，USD 跟随
@@ -200,24 +210,62 @@ BUY 端历史表现尚可（20日胜率52-60%，正收益），**SELL 端（超�
 - 韩股等 UZI-Skill 覆盖较弱的市场，实测会触发 `timeout_seconds`（默认60秒）
   超时，属于预期的优雅降级，不是 bug
 
+## 指数发现池与 PAPER 执行建议
+
+v0.5 起系统从"价格到点提醒器"升级为只读交易执行建议系统（tag
+`v0.5.0-index-execution-paper`），核心链路：
+
+1. **指数发现池**（`index_universe.py`）：每次扫描从官方源拉取纳指100（Nasdaq
+   API）与标普500（State Street SPY 每日持仓 xlsx）成分股，去重并集约 520 只。
+   硬校验成分数量区间、单次变更 ≤25 只，原子缓存最后一次成功快照；源站挂了用
+   快照兜底，快照超过 14 天进入 STALE 状态并停发新计划（fail closed）
+2. **有界扫描**（`market_scan` 指数模式）：Alpaca SIP 完整市场成交量日线，增量
+   写入 BarStore；覆盖率 <98% 或超 10 分钟 deadline 一律 fail closed。三因子
+   截尾百分位打分（60日动量40% / 距20日高30% / 5日量比30%）出 Top20 观察榜 +
+   前 5 名带执行价位（买入区/限价/止损/止盈）
+3. **只读账户**（`account.py`）：Alpaca paper 账户适配器只调 GET 接口，代码里
+   不存在下单能力；凭据不进日志/repr/异常
+4. **确定性 sizing**（`execution.py`）：整股数量 =
+   `min(目标权重缺口, 风险预算, 可用现金, 单票上限)`，全部中间上限落库可审计；
+   止损距离 <2% 或 >20%、价格次序错误、账户/行情过期、当日新仓超额都会 BLOCKED
+   并写明原因，绝不静默补算
+5. **买入状态机**：`CANDIDATE → ARMED → IN_ENTRY_ZONE → ACTIONABLE`，只有
+   09:45–15:45 ET 内一根**完整 5 分钟 bar** 收在买入区内且未破止损才确认
+   ACTIONABLE；跌破止损/趋势转平/过期立即失效。同一计划同一事件最多推送一次
+   （sqlite `plan_events` 幂等表）
+6. **AI 边界**：AI 早报/计划解释只能引用结构化数据，prompt 硬约束禁止改写
+   limit/qty/stop/take-profit、缺失字段只能写"不可用"、PAPER 不得描述为实盘；
+   AI 失败不影响结构化卡片（生产已验证优雅降级）
+
+一句话：**每天 08:15 ET 一张 PAPER 执行计划卡**（账户/持仓/未成交/候选计划+
+阻断原因），**盘中只在状态迁移时提醒**（ACTIONABLE / INVALIDATED / EXPIRED /
+STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（feature flag
+`legacy_price_deviation.enabled` 可回滚）。
+
 ## 调度：一天跑哪些任务
 
 | Job ID | 时间 | 门控 | 做什么 |
 |---|---|---|---|
-| `premarket` | 08:00 ET | NYSE 交易日历 | 补历史数据 → 跑动量轮动 → 推早报 |
-| `rotation_asia_open` | 08:00 北京时间 (00:00 UTC) | 工作日 | 同上，服务亚洲盘前（不依赖 NYSE 日历，美股假期照跑） |
+| `market_scan` | 07:00 ET | NYSE 交易日历 | 指数发现池扫描 → Top20 候选榜 + Top1 入台账受检验 |
+| `premarket` | 08:00 ET | NYSE 交易日历 | 补历史数据 → 跑动量轮动+技术策略 → 推早报（+可选 AI 观点） |
+| `execution_brief` | 08:15 ET | NYSE 交易日历 | 聚合指数候选+核心信号 → 只读账户风控 → PAPER 执行计划卡 |
+| `rotation_asia_open` | 08:00 北京时间 (00:00 UTC) | 工作日 | 早报逻辑，服务亚洲盘前（不依赖 NYSE 日历） |
 | `rotation_asia_close` | 15:30 北京时间 (07:30 UTC) | 工作日 | 同上，港股/韩股收盘前后 |
-| `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已过开盘时间 | 跑 20日突破策略，监控 `watchlist` |
-| `watch_deviation` | 00:00–21:55 UTC 每5分钟 | 工作日 | 持仓偏离监控（覆盖亚洲+美股交易时段，含冬令时缓冲） |
 | `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
-| `postmarket` | 16:30 ET | NYSE 交易日历 | 推送当日信号日报（数量、理论收益） |
-| `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉（美股走配置的数据源，国际标的固定走 yfinance） |
-| `heartbeat` | 每 15 分钟 | 无 | 进程自检，连续 2 次失败推告警卡片 |
+| `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已开盘 | 20日突破策略，监控 `watchlist` |
+| `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
+| `postmarket` | 16:30 ET | NYSE 交易日历 | 当日信号日报（数量、理论收益） |
+| `negative_overreaction` | 16:45 ET | NYSE 交易日历 | 利空错杀观察（新闻分类+企稳确认，仅观察不建仓） |
+| `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉 + 台账/行情备份（保留14天） |
+| `data_qa` | 03:30 ET | 无 | 两源收盘价偏差体检 |
+| `performance` | 周六 09:00 ET | 无 | 近 90 天信号虚拟盘复盘周报 |
+| `heartbeat` | 每 15 分钟 | 无 | 任务失败/MISSED/超时汇总告警 + market_scan 停摆检测 |
 
 三个"推早报"的 job（`premarket`/`rotation_asia_open`/`rotation_asia_close`）
-跑的是同一套逻辑（`Engine.run_premarket`），只是时间点和门控条件不同——每次都
-用当时能拿到的最新收盘价重新计算一遍动量排名。去重机制保证同一标的的同一个
-信号 4 小时内不会重复推送三次。
+跑的是同一套逻辑（`Engine.run_premarket`），只是时间点和门控条件不同。去重机制
+保证同一标的的同一个信号 4 小时内不会重复推送。所有 job 都被 `JobRuntime` 包装，
+记录开始/时长/最近成功时间——`market_scan` 在应跑时点后 30 分钟仍无成功、或任一
+job 运行超过 10 分钟，心跳会持续告警（健康检查不恒为 True）。
 
 ## 配置参考（settings.yaml）
 
@@ -273,6 +321,32 @@ enrichment:                      # UZI-Skill 深度分析，可选，默认关�
   depth: lite
   timeout_seconds: 60
   max_tickers: 8
+
+index_universe:                  # 指数发现池（v0.5）
+  enabled: true
+  indices: [sp500, nasdaq100]
+  cache_path: data/index_universe.json
+  refresh_days: 7                # 成分快照刷新周期
+  max_stale_days: 14             # 快照超龄 → STALE, 停发新计划
+  scan_top_n: 20                 # 观察榜数量
+  execution_top_n: 5             # 进入执行风控的候选数
+  min_coverage: 0.98             # 行情覆盖率下限, 不足 fail closed
+  min_dollar_volume: 50000000
+
+execution_plan:                  # PAPER 执行建议（v0.5）
+  enabled: true
+  account_provider: alpaca_paper # 只读, 仅 GET
+  risk_per_trade: 0.005          # 单笔风险占权益
+  max_daily_new_risk: 0.01       # 当日新增风险上限
+  max_position_weight: 0.12      # 单票市值上限
+  cash_reserve: 0.20             # 现金保留比例
+  max_new_positions_per_day: 2
+  min_stop_distance: 0.02        # 止损距离 <2% → STOP_TOO_TIGHT
+  max_stop_distance: 0.20        # >20% → STOP_TOO_WIDE
+  account_max_age_seconds: 60    # 账户快照超龄不出股数
+
+legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回滚
+  enabled: false
 ```
 
 ## 命令行工具
@@ -325,6 +399,8 @@ uv run python research/backtest_breakout.py       # 突破策略回测（日线�
 uv run python research/backtest_new_strategies.py # RSI/MACD/布林带 事件驱动回测
 uv run python research/backtest_my_holdings.py    # 只针对真实持仓标的的专属回测(复用上面几个脚本的函数)
 uv run python research/walkforward.py             # 逐日喂数据 vs 全量回放，验证无未来函数（覆盖全部5个策略）
+uv run python research/oos_validation.py          # 滚动样本外验证（选参与检验分窗）
+uv run python research/replay_execution.py        # 新旧口径回放：target-hit 提醒 vs ACTIONABLE 确认（幸存者偏差显式标注）
 ```
 
 回测脚本 import 的是 `src/quant_signal/strategies/` 下同一份策略代码，不重复实现。
@@ -357,11 +433,18 @@ uv run mypy src/          # 类型检查（strict 模式，research/ 目录不�
 - **虚拟持仓需要手动初始化同步**：系统不会自动读取你券商账户的真实持仓，
   首次使用务必跑一次 `seed_holdings`，否则动量轮动会对你已持有的标的重复
   提示"买入"
+- **PAPER 账户 ≠ 你的券商账户**：执行建议的股数按 Alpaca paper 账户的权益/现金
+  计算；`OPEN`（成交检测）与止损/止盈提醒也只看 paper 持仓——如果你不在 paper
+  账户镜像下单，计划最多走到 ACTIONABLE，不会有后续持仓事件
+- **指数成分快照没有历史时点库**：缓存只存最新一次成功快照，用当前成分回放
+  历史必然带幸存者偏差，回放报告已显式标注，不作为正式 alpha 证据
 
 ## 风险与合规提示
 
-- 本系统仅生成参考信号，**不构成投资建议**；所有交易由用户人工决策并在券商 App 执行
-- 系统在任何情况下都不实现自动下单逻辑，不接入任何券商交易 API
+- 本系统仅生成参考信号与 PAPER 执行建议，**不构成投资建议**；所有交易由用户
+  人工决策并在券商 App 执行
+- 系统在任何情况下都不实现自动下单逻辑：账户适配器只有 GET 方法，卡片与日志
+  全部标注 PAPER
 - 回测结果（`research/reports/`）仅供策略评估参考，不保证未来表现
 
 ## 目录结构
