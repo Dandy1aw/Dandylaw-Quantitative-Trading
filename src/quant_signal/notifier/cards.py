@@ -36,7 +36,12 @@ def option_flow_card(
     """Compact research card for Cboe-visible Call/Put activity."""
     from quant_signal.options_flow import display_top_by_side, top_by_side
 
-    phase_names = {"baseline": "首次榜", "change": "盘中异动", "close": "收盘榜"}
+    phase_names = {
+        "baseline": "首次榜",
+        "change": "盘中异动",
+        "close": "收盘榜",
+        "query": "即时查询",
+    }
     phase_name = phase_names.get(phase, phase)
     observed = snapshot.captured_at.astimezone(_ET).strftime("%m/%d %H:%M ET")
     enrichment_label = {
