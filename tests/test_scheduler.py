@@ -165,6 +165,50 @@ def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
     assert engine.drains == 1
 
 
+def test_build_scheduler_accepts_injected_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import ExecutionPlanSettings, OptionFlowSettings
+    from quant_signal.scheduler import JobRuntime
+
+    runtime = JobRuntime()
+    engine = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            option_flow=OptionFlowSettings(enabled=True),
+        )
+    )
+    sched = build_scheduler(
+        engine=engine, ledger=None, store=None, notifier=FakeNotifier(),
+        runtime=runtime,
+    )
+    jobs = {job.id: job for job in sched.get_jobs()}
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: False)
+    jobs["option_flow"].func()  # 非交易日跳过=正常返回，注入的 runtime 应记到成功
+    assert runtime.last_success("option_flow") is not None
+
+
+def test_job_runtime_snapshot_exposes_per_job_state() -> None:
+    from datetime import datetime, timezone
+
+    from quant_signal.scheduler import JobRuntime
+
+    times = [datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)]
+    runtime = JobRuntime(now_fn=lambda: times[-1])
+    wrapped = runtime.wrap(
+        "demo",
+        lambda: times.append(datetime(2026, 7, 10, 12, 0, 30, tzinfo=timezone.utc)),
+    )
+    wrapped()
+    snap = runtime.snapshot()
+    assert snap["demo"]["last_success"] is not None
+    assert snap["demo"]["last_duration"] == 30.0
+    assert snap["demo"]["running_since"] is None
+
+
 def test_legacy_deviation_job_registered_only_when_enabled() -> None:
     from types import SimpleNamespace
 

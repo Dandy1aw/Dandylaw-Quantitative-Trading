@@ -70,6 +70,21 @@ class JobRuntime:
         with self._lock:
             return self._starts.get(job_id)
 
+    def snapshot(self) -> dict[str, dict[str, object]]:
+        """所有已知 job 的运行状态只读快照，供机器人「健康」指令渲染。"""
+        with self._lock:
+            job_ids = (
+                set(self._starts) | set(self._last_success) | set(self._last_duration)
+            )
+            return {
+                job_id: {
+                    "last_success": self._last_success.get(job_id),
+                    "last_duration": self._last_duration.get(job_id),
+                    "running_since": self._starts.get(job_id),
+                }
+                for job_id in sorted(job_ids)
+            }
+
 
 def _expected_scan_run(now_et: datetime) -> datetime:
     """最近一个应该完成 market_scan 的 07:00 ET 时点(交易日历感知)。"""
@@ -201,7 +216,11 @@ def _now_et() -> datetime:
 
 
 def build_scheduler(
-    engine: Any, ledger: Any, store: Any, notifier: Any
+    engine: Any,
+    ledger: Any,
+    store: Any,
+    notifier: Any,
+    runtime: "JobRuntime | None" = None,
 ) -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone=ET)
     rotation_lock = threading.Lock()
@@ -288,7 +307,7 @@ def build_scheduler(
     sched.add_listener(
         health.listen, EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
     )
-    runtime = JobRuntime()
+    runtime = runtime or JobRuntime()
     hb = Heartbeat(
         notifier=notifier, check=build_runtime_check(runtime), health=health
     )
