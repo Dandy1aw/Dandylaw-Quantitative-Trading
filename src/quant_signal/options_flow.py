@@ -248,6 +248,40 @@ def top_by_side(
     )
 
 
+def display_top_by_side(
+    rows: Sequence[OptionContractVolume] | OptionFlowSnapshot,
+    side: OptionSide,
+    n: int,
+    *,
+    dedupe: bool = True,
+    sort_by_expiry: bool = True,
+) -> tuple[OptionContractVolume, ...]:
+    """展示层选取：去重→按量选 n 个→按到期日排序。
+
+    只影响卡片显示，不改变排名/异动判定/落库的逐合约语义。
+    近月优先只调整顺序，入选仍按成交量（热度榜定位）。
+    """
+    candidates = list(top_by_side(rows, side, 10**6))
+    if dedupe:
+        best: dict[str, OptionContractVolume] = {}
+        for item in candidates:
+            kept = best.get(item.underlying)
+            if kept is None or (item.volume, kept.contract_symbol) > (
+                kept.volume,
+                item.contract_symbol,
+            ):
+                best[item.underlying] = item
+        candidates = sorted(
+            best.values(), key=lambda item: (-item.volume, item.contract_symbol)
+        )
+    selected = candidates[:n]
+    if sort_by_expiry:
+        selected.sort(
+            key=lambda item: (item.expiration, -item.volume, item.contract_symbol)
+        )
+    return tuple(selected)
+
+
 def scan_slot(at: datetime, minutes: int = 15) -> str:
     if at.tzinfo is None:
         raise ValueError("scan time must be timezone-aware")

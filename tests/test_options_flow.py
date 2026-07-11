@@ -12,6 +12,7 @@ from quant_signal.options_flow import (
     VenueOptionVolume,
     aggregate_and_rank,
     detect_material_changes,
+    display_top_by_side,
     occ_symbol,
     scan_slot,
     snapshot_from_dict,
@@ -244,6 +245,66 @@ def test_card_gate_keeps_secondary_material_changes() -> None:
         snapshot(small_prior), snapshot(small_now), OptionFlowPolicy()
     )
     assert alone == ()
+
+
+def test_display_dedupes_underlying_and_sorts_by_expiry() -> None:
+    rows = (
+        contract(
+            "SPY260713C00750000", underlying="SPY", strike="750",
+            expiration=date(2026, 7, 13), volume=30_000, rank=1,
+        ),
+        contract(
+            "SPY260717C00755000", underlying="SPY", strike="755",
+            expiration=date(2026, 7, 17), volume=25_000, rank=2,
+        ),
+        contract("NVDA260717C00210000", volume=20_000, rank=3),
+        contract(
+            "MSFT260714C00500000", underlying="MSFT", strike="500",
+            expiration=date(2026, 7, 14), volume=15_000, rank=4,
+        ),
+    )
+    shown = display_top_by_side(rows, "call", 3)
+    assert [item.underlying for item in shown] == ["SPY", "MSFT", "NVDA"]
+    assert shown[0].contract_symbol == "SPY260713C00750000"  # SPY 只留最高量那张
+
+
+def test_display_selection_is_still_by_volume_not_expiry() -> None:
+    # 近月只影响顺序不影响入选：量大的远月不能被量小的近月挤出榜。
+    rows = (
+        contract("NVDA260717C00210000", volume=50_000, rank=1),
+        contract(
+            "MSFT260713C00500000", underlying="MSFT", strike="500",
+            expiration=date(2026, 7, 13), volume=1_000, rank=2,
+        ),
+    )
+    shown = display_top_by_side(rows, "call", 1)
+    assert [item.underlying for item in shown] == ["NVDA"]
+
+
+def test_display_switches_can_be_disabled_independently() -> None:
+    rows = (
+        contract(
+            "SPY260717C00755000", underlying="SPY", strike="755",
+            volume=25_000, rank=1,
+        ),
+        contract(
+            "SPY260713C00750000", underlying="SPY", strike="750",
+            expiration=date(2026, 7, 13), volume=30_000, rank=2,
+        ),
+    )
+    raw = display_top_by_side(rows, "call", 2, dedupe=False, sort_by_expiry=False)
+    assert [item.rank for item in raw] == [1, 2]  # 完全回退旧展示
+    deduped = display_top_by_side(rows, "call", 2, sort_by_expiry=False)
+    assert len(deduped) == 1 and deduped[0].volume == 30_000
+
+
+def test_display_dedupe_tie_breaks_by_contract_symbol() -> None:
+    rows = (
+        contract("SPY260717C00755000", underlying="SPY", strike="755", volume=10_000, rank=1),
+        contract("SPY260717C00750000", underlying="SPY", strike="750", volume=10_000, rank=2),
+    )
+    shown = display_top_by_side(rows, "call", 2, sort_by_expiry=False)
+    assert [item.contract_symbol for item in shown] == ["SPY260717C00750000"]
 
 
 def test_focus_limits_each_underlying_to_two_contracts() -> None:
