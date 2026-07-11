@@ -141,7 +141,10 @@ def test_snapshot_json_round_trip_keeps_decimal_dates_and_enrichment() -> None:
     assert restored == original
     assert enrichment.estimated_premium(2_000) == Decimal("500000.00")
     assert enrichment.volume_oi_ratio(2_000) == Decimal("2")
-    assert replace(enrichment, open_interest=99).volume_oi_ratio(2_000) is None
+    # 设计 §5：OI > 0 且 OI 日期有效即可展示 V/OI；OI ≥ 100 只是 HIGH_TURNOVER 的门槛
+    assert replace(enrichment, open_interest=99).volume_oi_ratio(99) == Decimal("1")
+    assert replace(enrichment, open_interest=0).volume_oi_ratio(2_000) is None
+    assert replace(enrichment, open_interest_date=None).volume_oi_ratio(2_000) is None
 
 
 def test_scan_slot_is_stable_et_fifteen_minute_floor() -> None:
@@ -200,6 +203,47 @@ def test_high_turnover_cannot_trigger_without_rank_or_volume_change() -> None:
     prior = contract(volume=10_000, rank=1, enrichment=enrichment)
     current = replace(prior, volume=10_100)
     assert detect_material_changes(snapshot(prior), snapshot(current), OptionFlowPolicy()) == ()
+
+
+def test_high_turnover_flag_requires_open_interest_at_least_100() -> None:
+    thin = OptionEnrichment(open_interest=99, open_interest_date=SESSION)
+    prior = contract(volume=8_000, rank=12, enrichment=thin)
+    current = contract(volume=19_000, rank=4, enrichment=thin)
+    changes = detect_material_changes(snapshot(prior), snapshot(current), OptionFlowPolicy())
+    assert "HIGH_TURNOVER" not in changes[0].flags
+
+    deep = OptionEnrichment(open_interest=100, open_interest_date=SESSION)
+    changes = detect_material_changes(
+        snapshot(replace(prior, enrichment=deep)),
+        snapshot(replace(current, enrichment=deep)),
+        OptionFlowPolicy(),
+    )
+    assert "HIGH_TURNOVER" in changes[0].flags
+
+
+def test_card_gate_keeps_secondary_material_changes() -> None:
+    # 设计 §6：分数 >=50 是“出不出卡”的门槛；一旦出卡，
+    # 通过硬门槛的次级变化(分数 <50)也应留在聚焦列表里。
+    big_prior = contract(volume=8_000, rank=12)
+    big_now = contract(volume=19_000, rank=4)  # 30+25+35 ≥ 50
+    small_prior = contract(
+        "MSFT260717P00500000", underlying="MSFT", side="put", strike="500",
+        volume=9_000, rank=7,
+    )
+    small_now = replace(small_prior, rank=4)  # RANK_JUMP=3 → 15 分
+    changes = detect_material_changes(
+        snapshot(big_prior, small_prior),
+        snapshot(big_now, small_now),
+        OptionFlowPolicy(),
+    )
+    assert len(changes) == 2
+    assert changes[0].contract.underlying == "NVDA"
+    assert changes[1].contract.underlying == "MSFT"
+
+    alone = detect_material_changes(
+        snapshot(small_prior), snapshot(small_now), OptionFlowPolicy()
+    )
+    assert alone == ()
 
 
 def test_focus_limits_each_underlying_to_two_contracts() -> None:

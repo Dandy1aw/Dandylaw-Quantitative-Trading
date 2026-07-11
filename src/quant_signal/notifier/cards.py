@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Literal, Sequence
 from zoneinfo import ZoneInfo
 
 from quant_signal.notifier.base import Card, CardKind, CardSection
@@ -27,10 +27,9 @@ def option_flow_card(
     snapshot: "OptionFlowSnapshot",
     changes: "Sequence[OptionFlowChange]",
     phase: str,
-    now: datetime,
     *,
     previous: "OptionFlowSnapshot | None" = None,
-    enrichment_available: bool = True,
+    enrichment_status: Literal["ok", "failed", "off"] = "ok",
 ) -> Card:
     """Compact research card for Cboe-visible Call/Put activity."""
     from quant_signal.options_flow import top_by_side
@@ -38,11 +37,11 @@ def option_flow_card(
     phase_names = {"baseline": "首次榜", "change": "盘中异动", "close": "收盘榜"}
     phase_name = phase_names.get(phase, phase)
     observed = snapshot.captured_at.astimezone(_ET).strftime("%m/%d %H:%M ET")
-    enrichment_label = (
-        "Alpaca INDICATIVE · 约15分钟延迟"
-        if enrichment_available
-        else "Alpaca补全失败 · 本卡仅含Cboe成交量"
-    )
+    enrichment_label = {
+        "ok": "Alpaca INDICATIVE · 约15分钟延迟",
+        "failed": "Alpaca补全失败 · 本卡仅含Cboe成交量",
+        "off": "未配置Alpaca补全 · 本卡仅含Cboe成交量",
+    }[enrichment_status]
     identity = CardSection(
         "**数据身份**\n"
         f"{phase_name}｜{observed}｜覆盖 {snapshot.venue_coverage:.0%}\n"
@@ -56,6 +55,10 @@ def option_flow_card(
         "VOLUME_SURGE": "成交加速",
         "HIGH_TURNOVER": "高换手",
     }
+
+    def strike_text(value: Decimal) -> str:
+        # Decimal 的 :g 不去尾零，normalize() 又会把 210.000 变成 2.1E+2
+        return format(value.normalize(), "f")
 
     def money(value: Decimal) -> str:
         amount = float(value)
@@ -87,7 +90,7 @@ def option_flow_card(
                 else "首次可见"
             )
             focus_lines.append(
-                f"{item.underlying} {item.expiration:%m/%d} {item.strike:g}{marker}｜"
+                f"{item.underlying} {item.expiration:%m/%d} {strike_text(item.strike)}{marker}｜"
                 f"{labels}｜{prior_rank}→#{item.rank}｜"
                 f"{delta_label}｜分数 {change.score}{suffix}"
             )
@@ -113,7 +116,7 @@ def option_flow_card(
             dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
             lines.append(
                 f"{item.rank}. {item.underlying} {item.expiration:%m/%d} "
-                f"{item.strike:g}{marker} · {item.volume:,}张 · {delta_text} · {dte_text}"
+                f"{strike_text(item.strike)}{marker} · {item.volume:,}张 · {delta_text} · {dte_text}"
             )
         return CardSection("\n".join(lines))
 

@@ -139,7 +139,7 @@ option_flow:
   discovery_limit: 50
   venues: [cone, ctwo, opt, exo]
   excluded_index_roots: [SPX, SPXW, VIX, RUT, RUTW, NDX, XSP, OEX]
-  etf_roots: [SPY, QQQ, IWM]
+  etf_roots: [SPY, QQQ, IWM, TQQQ, SQQQ, SOXL, SOXS, TLT, GLD, HYG, XLF]
   min_volume: 5000
   surge_volume: 10000
   zero_dte_surge_volume: 20000

@@ -139,6 +139,16 @@ def test_material_change_pushes_after_cooldown(tmp_path: Path) -> None:
     assert "NFLX" in notifier.cards[-1].body_md
 
 
+def test_baseline_card_does_not_start_change_cooldown(tmp_path: Path) -> None:
+    # 冷却只约束“变化卡之间”的间隔；10:00 基线不该封锁 10:15 的实质变化。
+    source = OptionSource(changed_on={2})
+    engine, notifier = make_engine(tmp_path, option_source=source)
+    engine.run_option_flow(NOW)
+    engine.run_option_flow(NOW + timedelta(minutes=15))
+    assert len(notifier.cards) == 2
+    assert "NFLX" in notifier.cards[-1].body_md
+
+
 def test_daily_limit_reserves_one_slot_for_close(tmp_path: Path) -> None:
     source = OptionSource(changed_on={2})
     policy = OptionFlowSettings(enabled=True, max_alerts_per_day=2, min_volume=5_000)
@@ -174,6 +184,13 @@ def test_delivery_only_run_drains_outbox_without_fetching(tmp_path: Path) -> Non
     assert source.calls == fetches
     assert len(notifier.cards) == 2
     assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) == []
+
+
+def test_unconfigured_enricher_is_not_labeled_as_failure(tmp_path: Path) -> None:
+    engine, notifier = make_engine(tmp_path)  # option_enricher=None
+    engine.run_option_flow(NOW)
+    assert "未配置Alpaca补全" in notifier.cards[0].body_md
+    assert "失败" not in notifier.cards[0].body_md
 
 
 def test_enrichment_failure_degrades_card_but_source_failure_reaches_health(

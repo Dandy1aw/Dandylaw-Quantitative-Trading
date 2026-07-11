@@ -179,7 +179,9 @@ class CboeOptionFlowSource:
             except Exception as error:
                 raise OptionFlowFetchError(f"Cboe venue {venue} failed: {error}") from error
 
-        coverage = len(self._venues) / len(self._venues)
+        # 任一市场失败都已在上面 raise，走到这里覆盖率必然 100%；
+        # 若将来放宽成部分容忍，这里必须改回真实计算。
+        coverage = 1.0
         ranked = aggregate_and_rank(
             venue_rows,
             session=now.astimezone(_ET).date(),

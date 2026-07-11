@@ -59,7 +59,13 @@ class OptionEnrichment:
         ).quantize(Decimal("0.01"))
 
     def volume_oi_ratio(self, volume: int) -> Decimal | None:
-        if self.open_interest is None or self.open_interest < 100 or volume < 0:
+        # 展示条件：OI > 0 且 OI 日期有效；HIGH_TURNOVER 的 OI ≥ 100 门槛在异动判定处
+        if (
+            self.open_interest is None
+            or self.open_interest <= 0
+            or self.open_interest_date is None
+            or volume < 0
+        ):
             return None
         return Decimal(volume) / Decimal(self.open_interest)
 
@@ -284,7 +290,13 @@ def detect_material_changes(
             if item.enrichment is not None
             else None
         )
-        turnover = ratio is not None and ratio >= Decimal("2")
+        turnover = (
+            ratio is not None
+            and ratio >= Decimal("2")
+            and item.enrichment is not None
+            and item.enrichment.open_interest is not None
+            and item.enrichment.open_interest >= 100
+        )
         if not (new_top or rank_jump or surged):
             continue
         flags: list[str] = []
@@ -302,8 +314,6 @@ def detect_material_changes(
             + (min(35.0, 35.0 * delta / threshold) if delta is not None else 0.0)
             + 10 * int(turnover)
         )
-        if score < 50:
-            continue
         changes.append(
             OptionFlowChange(
                 contract=item,
@@ -315,6 +325,9 @@ def detect_material_changes(
             )
         )
 
+    # 分数 >=50 决定"是否出卡"；一旦出卡，通过硬门槛的次级变化也留在聚焦列表。
+    if not changes or max(change.score for change in changes) < 50:
+        return ()
     changes.sort(
         key=lambda change: (
             -change.score,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import structlog
 
@@ -115,7 +115,9 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
     _validate_snapshot(engine, snapshot)
     previous = engine.ledger.latest_option_flow_snapshot(snapshot.session_date)
 
-    enrichment_available = engine.option_flow_enricher is not None
+    enrichment_status: Literal["ok", "failed", "off"] = (
+        "ok" if engine.option_flow_enricher is not None else "off"
+    )
     if engine.option_flow_enricher is not None:
         displayed = (
             *top_by_side(snapshot, "call", cfg.top_n),
@@ -133,7 +135,7 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
                 ),
             )
         except Exception as error:  # noqa: BLE001 - enrichment is optional
-            enrichment_available = False
+            enrichment_status = "failed"
             log.warning("option_flow.enrichment_failed", error=str(error))
 
     policy = OptionFlowPolicy(
@@ -177,9 +179,8 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
             snapshot,
             changes,
             phase,
-            now,
             previous=previous,
-            enrichment_available=enrichment_available,
+            enrichment_status=enrichment_status,
         )
         if should_alert
         else None
@@ -207,5 +208,5 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
         alert_queued=card is not None and created,
         changes=len(changes),
         venue_coverage=snapshot.venue_coverage,
-        enrichment_available=enrichment_available,
+        enrichment=enrichment_status,
     )

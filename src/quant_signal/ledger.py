@@ -1008,10 +1008,12 @@ class SignalLedger:
         return int(row["n"]) if row is not None else 0
 
     def last_option_flow_alert_at(self, session: date) -> datetime | None:
+        # 冷却只约束变化卡之间的间隔；基线/收盘卡不占用冷却窗口
         with self._lock:
             row = self._con.execute(
                 "SELECT max(created_at) AS created_at FROM option_flow_outbox"
-                " WHERE session_date = ? AND status IN ('PENDING', 'SENT')",
+                " WHERE session_date = ? AND alert_type = 'change'"
+                " AND status IN ('PENDING', 'SENT')",
                 (session.isoformat(),),
             ).fetchone()
         value = row["created_at"] if row is not None else None

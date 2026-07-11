@@ -1,4 +1,4 @@
-from dataclasses import replace
+﻿from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -56,7 +56,7 @@ def snapshot() -> OptionFlowSnapshot:
 
 def test_option_flow_card_has_two_top10_sections_without_tables() -> None:
     current = snapshot()
-    card = option_flow_card(current, (), "baseline", NOW)
+    card = option_flow_card(current, (), "baseline")
 
     assert card.kind is CardKind.REPORT
     assert "Cboe四市场" in card.title
@@ -85,7 +85,7 @@ def test_change_card_renders_rank_delta_turnover_and_premium() -> None:
         rows=tuple(replace(item, volume=item.volume - 1_000) for item in current.rows),
     )
 
-    card = option_flow_card(current, (change,), "change", NOW, previous=previous)
+    card = option_flow_card(current, (change,), "change", previous=previous)
 
     assert card.kind is CardKind.SIGNAL
     assert "新进Top10" in card.body_md
@@ -109,7 +109,7 @@ def test_first_seen_contract_renders_indeterminate_delta() -> None:
     )
     previous = replace(current, rows=current.rows[1:])
 
-    card = option_flow_card(current, (change,), "change", NOW, previous=previous)
+    card = option_flow_card(current, (change,), "change", previous=previous)
 
     assert "首次可见" in card.body_md
     assert f"+{first.volume:,}/15m" not in card.body_md
@@ -118,7 +118,32 @@ def test_first_seen_contract_renders_indeterminate_delta() -> None:
 
 def test_card_marks_degraded_enrichment_without_guessing() -> None:
     card = option_flow_card(
-        snapshot(), (), "close", NOW, enrichment_available=False
+        snapshot(), (), "close", enrichment_status="failed"
     )
     assert "Alpaca补全失败" in card.body_md
     assert "V/OI 0" not in card.body_md
+
+
+def test_card_distinguishes_unconfigured_enrichment_from_failure() -> None:
+    card = option_flow_card(
+        snapshot(), (), "close", enrichment_status="off"
+    )
+    assert "未配置Alpaca补全" in card.body_md
+    assert "失败" not in card.body_md
+
+
+def test_strike_display_strips_trailing_zeros() -> None:
+    current = snapshot()
+    padded = replace(current.rows[0], strike=Decimal("201.000"))
+    fractional = replace(
+        current.rows[1],
+        strike=Decimal("61.020"),
+        contract_symbol="NVDA260717C00061020",
+    )
+    card = option_flow_card(
+        replace(current, rows=(padded, fractional) + current.rows[2:]),
+        (),
+        "baseline",
+    )
+    assert "201C" in card.body_md and "201.000" not in card.body_md
+    assert "61.02C" in card.body_md and "61.020" not in card.body_md

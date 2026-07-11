@@ -389,7 +389,8 @@ option_flow:                     # 期权异动提醒（Cboe 四市场，只观�
   discovery_limit: 50            # 每市场每侧抓前 50 做候选
   venues: [cone, ctwo, opt, exo] # C1 / C2 / BZX / EDGX
   excluded_index_roots: [SPX, SPXW, VIX, RUT, RUTW, NDX, XSP, OEX]
-  etf_roots: [SPY, QQQ, IWM]     # 这些根用 0DTE/ETF 更高的激增阈值
+  etf_roots: [SPY, QQQ, IWM, TQQQ, SQQQ, SOXL, SOXS, TLT, GLD, HYG, XLF]
+                                 # 这些根用 0DTE/ETF 更高的激增阈值
   min_volume: 5000               # 进榜最低可见张数
   surge_volume: 10000            # 15 分钟增量阈值（普通合约）
   zero_dte_surge_volume: 20000   # 0DTE/ETF 阈值
