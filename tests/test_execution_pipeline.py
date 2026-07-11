@@ -26,6 +26,11 @@ from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine
 from quant_signal.execution import PlanCandidate, PlanState, build_plan
 from quant_signal.ledger import SignalLedger
+from quant_signal.portfolio_import import (
+    ExtractedAccount,
+    PortfolioExtraction,
+    validate_extraction,
+)
 
 BRIEF_NOW = datetime(2026, 7, 10, 12, 15, tzinfo=timezone.utc)  # 08:15 ET
 WATCH_NOW = datetime(2026, 7, 10, 14, 30, tzinfo=timezone.utc)  # 10:30 ET
@@ -217,6 +222,28 @@ def seed_candidates(ledger: SignalLedger, extra: dict[str, object]) -> None:
     )
 
 
+def seed_screenshot_account(ledger: SignalLedger, *, observed_at: datetime) -> None:
+    extraction = PortfolioExtraction(
+        account=ExtractedAccount(
+            equity=Decimal("5995.52"),
+            market_value=Decimal("0"),
+            cash=Decimal("5995.52"),
+            buying_power=Decimal("5995.52"),
+            reported_position_count=0,
+            observed_at=observed_at,
+        ),
+        positions=(),
+    )
+    record = validate_extraction(
+        extraction,
+        image_sha256="a" * 64,
+        uploaded_at=observed_at,
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+    assert ledger.save_portfolio_import(record) is True
+
+
 def seed_active_plan(
     ledger: SignalLedger, state: PlanState = PlanState.IN_ENTRY_ZONE
 ) -> None:
@@ -286,6 +313,9 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
         ),
     )
     engine, notifier, ledger = make_engine(tmp_path, FakeAccountProvider(account))
+    seed_screenshot_account(
+        ledger, observed_at=BRIEF_NOW - timedelta(hours=100)
+    )
     seed_candidates(ledger, scan_extra())
 
     engine.run_execution_brief(BRIEF_NOW)
@@ -299,6 +329,8 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     assert "MSFT" in body  # 持仓
     assert "NVDA" in body  # 未成交订单
     assert "o-0" in body or "400" in body  # 最近成交
+    assert "账户快照已" not in body
+    assert "从未导入截图账户" not in body
     # 计划区: 限价/股数/金额/止损/止盈/有效期
     assert "102" in body and "95" in body and "115" in body
     assert "71" in body  # risk_qty=floor(500/7)
@@ -313,6 +345,102 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     assert active[0].suggested_qty == 71
     # 账户状态已落库
     assert ledger.latest_account_snapshot() is not None
+
+
+def test_daily_brief_does_not_warn_when_screenshot_account_is_fresh(
+    tmp_path: Path,
+) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        screenshot_max_age_hours=24,
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path, None, execution_plan=settings
+    )
+    seed_screenshot_account(
+        ledger, observed_at=BRIEF_NOW - timedelta(hours=24)
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "账户快照已" not in body
+    assert "从未导入截图账户" not in body
+
+
+def test_daily_brief_warns_when_screenshot_account_is_stale(tmp_path: Path) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        screenshot_max_age_hours=24,
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path, None, execution_plan=settings
+    )
+    seed_screenshot_account(
+        ledger,
+        observed_at=BRIEF_NOW - timedelta(hours=25, minutes=59),
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert (
+        "⚠️ 账户快照已 25 小时未更新（阈值 24h），"
+        "股数建议基于旧账本，请发送新截图"
+    ) in body
+
+
+def test_daily_brief_warns_when_screenshot_account_was_never_imported(
+    tmp_path: Path,
+) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        screenshot_max_age_hours=24,
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path, None, execution_plan=settings
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "⚠️ 从未导入截图账户，请发送账户截图" in body
+
+
+def test_daily_brief_warns_without_crashing_when_screenshot_time_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = ExecutionPlanSettings(
+        enabled=True,
+        account_provider="screenshot",
+        cash_reserve=0,
+        screenshot_max_age_hours=24,
+    )
+    engine, notifier, ledger = make_engine(
+        tmp_path, None, execution_plan=settings
+    )
+
+    def invalid_observed_account() -> dict[str, object]:
+        return {"observed_at": "not-a-timestamp"}
+
+    monkeypatch.setattr(
+        ledger, "latest_observed_account", invalid_observed_account
+    )
+    seed_candidates(ledger, scan_extra())
+
+    engine.run_execution_brief(BRIEF_NOW)
+
+    body = notifier.cards[0].body_md  # type: ignore[attr-defined]
+    assert "⚠️ 账户快照时间无效，请发送新截图" in body
 
 
 def test_daily_brief_without_account_shows_no_quantity(tmp_path: Path) -> None:

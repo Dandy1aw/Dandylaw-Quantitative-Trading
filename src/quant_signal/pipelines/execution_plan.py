@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Mapping
 from zoneinfo import ZoneInfo
 
@@ -270,6 +270,29 @@ def _ai_explanation(
     return body.strip()[:300] if body else None
 
 
+def _screenshot_account_warning(engine: Engine, now: datetime) -> str | None:
+    cfg = engine.settings.execution_plan
+    if cfg.account_provider != "screenshot":
+        return None
+    account = engine.ledger.latest_observed_account()
+    if account is None:
+        return "⚠️ 从未导入截图账户，请发送账户截图"
+    try:
+        observed_at = datetime.fromisoformat(str(account["observed_at"]))
+    except (KeyError, ValueError):
+        log.warning("execution_brief.screenshot_account_time_invalid")
+        return "⚠️ 账户快照时间无效，请发送新截图"
+    age = now.astimezone(timezone.utc) - observed_at.astimezone(timezone.utc)
+    if age <= timedelta(hours=cfg.screenshot_max_age_hours):
+        return None
+    age_hours = int(age.total_seconds() // 3600)
+    return (
+        f"⚠️ 账户快照已 {age_hours} 小时未更新"
+        f"（阈值 {cfg.screenshot_max_age_hours}h），"
+        "股数建议基于旧账本，请发送新截图"
+    )
+
+
 def run_daily(engine: Engine, now: datetime) -> None:
     cfg = engine.settings.execution_plan
     if not cfg.enabled:
@@ -325,7 +348,13 @@ def run_daily(engine: Engine, now: datetime) -> None:
         engine.ledger.upsert_execution_plan(plan)
     ai_summary = _ai_explanation(engine, now, plans, account_state)
     engine.notifier.send(
-        execution_plan_card(account_state, plans, now, ai_summary=ai_summary)
+        execution_plan_card(
+            account_state,
+            plans,
+            now,
+            ai_summary=ai_summary,
+            account_warning=_screenshot_account_warning(engine, now),
+        )
     )
     log.info(
         "execution_brief.done",

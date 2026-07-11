@@ -207,6 +207,7 @@ def execution_plan_card(
     now: datetime,
     *,
     ai_summary: str | None = None,
+    account_warning: str | None = None,
 ) -> Card:
     def money(value: Decimal | float | int | None) -> str:
         return "-" if value is None else f"${float(value):,.2f}"
@@ -215,7 +216,10 @@ def execution_plan_card(
     held: set[str] = set()
     sections: list[CardSection] = []
     if account is None:
-        sections.append(CardSection("**账户**\n⚠ 账户数据不足，未计算股数；仅展示观察价位。"))
+        lines = ["**账户**", "⚠ 账户数据不足，未计算股数；仅展示观察价位。"]
+        if account_warning:
+            lines.append(account_warning)
+        sections.append(CardSection("\n".join(lines)))
     else:
         snap = account.snapshot
         source_label = "截图账户" if snap.source == "screenshot" else "PAPER"
@@ -259,6 +263,8 @@ def execution_plan_card(
                 for order in account.recent_orders[:3]
             )
             lines.append(f"最近成交：{recent_text}")
+        if account_warning:
+            lines.append(account_warning)
         sections.append(CardSection("\n".join(lines)))
 
     actionable = [plan for plan in plans if plan.state.value != "BLOCKED"]
