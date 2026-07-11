@@ -254,6 +254,28 @@ def _codex_executable() -> str:
     return shutil.which("codex") or "codex"
 
 
+def _strict_output_schema() -> dict[str, Any]:
+    schema = PortfolioExtraction.model_json_schema()
+
+    def require_all_properties(node: Any) -> None:
+        if isinstance(node, dict):
+            pattern = node.get("pattern")
+            lookarounds = ("(?=", "(?!", "(?<=", "(?<!")
+            if isinstance(pattern, str) and any(mark in pattern for mark in lookarounds):
+                node.pop("pattern")
+            properties = node.get("properties")
+            if node.get("type") == "object" and isinstance(properties, dict):
+                node["required"] = list(properties)
+            for value in node.values():
+                require_all_properties(value)
+        elif isinstance(node, list):
+            for value in node:
+                require_all_properties(value)
+
+    require_all_properties(schema)
+    return schema
+
+
 class CodexPortfolioExtractor:
     def __init__(
         self,
@@ -282,7 +304,7 @@ class CodexPortfolioExtractor:
             schema_path = temp_dir / "schema.json"
             output_path = temp_dir / "output.json"
             schema_path.write_text(
-                json.dumps(PortfolioExtraction.model_json_schema(), ensure_ascii=False),
+                json.dumps(_strict_output_schema(), ensure_ascii=False),
                 encoding="utf-8",
             )
             args = [_codex_executable(), "exec"]

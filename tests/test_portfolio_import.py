@@ -16,6 +16,7 @@ from quant_signal.portfolio_import import (
     ExtractedPosition,
     ImportStatus,
     PortfolioExtraction,
+    _strict_output_schema,
     apply_validated_import,
     image_digest,
     validate_extraction,
@@ -208,6 +209,57 @@ def test_codex_extractor_uses_image_schema_ephemeral_and_output_file(tmp_path: P
     assert cwd != image.parent
     assert timeout == 180
     assert extraction.account.equity == Decimal("5995.52")
+
+
+def test_codex_output_schema_requires_every_object_property(tmp_path: Path) -> None:
+    image = tmp_path / "holding.jpg"
+    image.write_bytes(b"image")
+    captured_schema: dict[str, object] = {}
+
+    def fake_run(
+        args: list[str], *, input: str, cwd: Path, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        captured_schema.update(json.loads(schema_path.read_text(encoding="utf-8")))
+        output_path = Path(args[args.index("--output-last-message") + 1])
+        output_path.write_text(
+            json.dumps(screenshot_extraction().model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    CodexPortfolioExtractor(run=fake_run).extract([image])
+
+    object_schemas = [captured_schema, *captured_schema["$defs"].values()]
+    for schema in object_schemas:
+        assert set(schema["required"]) == set(schema["properties"])
+
+
+def test_codex_output_schema_omits_pydantic_decimal_patterns() -> None:
+    def dictionaries(value: object):
+        if isinstance(value, dict):
+            yield value
+            for nested in value.values():
+                yield from dictionaries(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from dictionaries(nested)
+
+    assert not any("pattern" in node for node in dictionaries(_strict_output_schema()))
+
+
+def test_codex_output_schema_preserves_supported_patterns(monkeypatch) -> None:
+    generated = {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string", "pattern": "^[A-Z.]+$"},
+        },
+    }
+    monkeypatch.setattr(PortfolioExtraction, "model_json_schema", lambda: generated)
+
+    schema = _strict_output_schema()
+
+    assert schema["properties"]["symbol"]["pattern"] == "^[A-Z.]+$"
 
 
 def test_codex_extractor_timeout_is_safe(tmp_path: Path) -> None:
