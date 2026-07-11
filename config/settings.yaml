@@ -155,7 +155,7 @@ option_flow:
 feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
   enabled: true
   allowed_open_ids: [ou_3953033b90bfd9b808b9309c668bb77c]
-  push_receive_id: ou_3953033b90bfd9b808b9309c668bb77c  # 全部推送改走自建应用单聊；清空则回退 webhook
+  push_receive_id: oc_f4622ab1b7ccab85b854b88c7f225689  # 全部推送发到群；清空则回退 webhook
   capital_limit: 6000
   max_financing_ratio: 0.20
   confirm_window_minutes: 15
