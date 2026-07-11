@@ -762,8 +762,8 @@ def test_pending_import_round_trip_and_overwrite(ledger: SignalLedger) -> None:
         )
 
     assert ledger.pop_pending_import() is None
-    ledger.save_pending_import(record("NVDA"), now=NOW)
-    ledger.save_pending_import(record("TSLA"), now=NOW)  # 新的覆盖旧的
+    assert ledger.save_pending_import(record("NVDA"), now=NOW) is False
+    assert ledger.save_pending_import(record("TSLA"), now=NOW) is True  # 新的覆盖旧的
     pending = ledger.pop_pending_import()
     assert pending is not None
     stored, stored_at = pending

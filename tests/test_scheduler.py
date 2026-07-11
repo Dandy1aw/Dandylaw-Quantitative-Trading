@@ -297,7 +297,8 @@ def test_build_scheduler_accepts_injected_runtime(
         settings=make_test_settings(
             execution_plan=ExecutionPlanSettings(enabled=False),
             option_flow=OptionFlowSettings(enabled=True),
-        )
+        ),
+        run_enrichment=lambda now: None,
     )
     sched = build_scheduler(
         engine=engine, ledger=None, store=None, notifier=FakeNotifier(),
@@ -307,6 +308,8 @@ def test_build_scheduler_accepts_injected_runtime(
     monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: False)
     jobs["option_flow"].func()  # 非交易日跳过=正常返回，注入的 runtime 应记到成功
     assert runtime.last_success("option_flow") is not None
+    jobs["enrichment"].func()
+    assert runtime.last_success("enrichment") is not None
 
 
 def test_job_runtime_snapshot_exposes_per_job_state() -> None:

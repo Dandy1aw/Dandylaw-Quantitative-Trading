@@ -595,19 +595,29 @@ class SignalLedger:
 
     def save_pending_import(
         self, record: "ValidatedPortfolioImport", now: datetime
-    ) -> None:
+    ) -> bool:
+        """Store the newest PARTIAL import and report whether one was replaced."""
         payload_json = record.model_dump_json()
         stored_at = now.astimezone(timezone.utc).isoformat()
         with self._lock:
-            self._con.execute(
-                "INSERT INTO feishu_pending_imports (id, payload_json, stored_at)"
-                " VALUES (1, ?, ?)"
-                " ON CONFLICT(id) DO UPDATE SET"
-                " payload_json = excluded.payload_json,"
-                " stored_at = excluded.stored_at",
-                (payload_json, stored_at),
-            )
-            self._con.commit()
+            try:
+                self._con.execute("BEGIN IMMEDIATE")
+                replaced = self._con.execute(
+                    "SELECT 1 FROM feishu_pending_imports WHERE id = 1"
+                ).fetchone() is not None
+                self._con.execute(
+                    "INSERT INTO feishu_pending_imports (id, payload_json, stored_at)"
+                    " VALUES (1, ?, ?)"
+                    " ON CONFLICT(id) DO UPDATE SET"
+                    " payload_json = excluded.payload_json,"
+                    " stored_at = excluded.stored_at",
+                    (payload_json, stored_at),
+                )
+                self._con.commit()
+                return replaced
+            except Exception:
+                self._con.rollback()
+                raise
 
     def pop_pending_import(
         self,

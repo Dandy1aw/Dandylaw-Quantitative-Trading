@@ -471,7 +471,9 @@ def build_scheduler(
             misfire_grace_time=600,
         )
     sched.add_job(
-        enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"
+        runtime.wrap("enrichment", enrichment),
+        CronTrigger(hour=8, minute=45, timezone=ET),
+        id="enrichment",
     )
 
     def performance() -> None:

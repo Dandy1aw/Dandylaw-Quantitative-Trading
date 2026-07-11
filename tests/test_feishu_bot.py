@@ -328,6 +328,19 @@ def test_partial_screenshot_confirmation_survives_service_rebuild(
     assert "没有待确认" in out.texts[-1][1]  # 一次性消费
 
 
+def test_new_partial_screenshot_receipt_explains_pending_overwrite(
+    tmp_path: Path,
+) -> None:
+    extractor = FakeExtractor(portfolio_extraction(reported=2))
+    service, out, _ = make_service(tmp_path, extractor=extractor)
+
+    service.handle(image_msg("om_partial_old"))
+    assert "覆盖" not in out.texts[-1][1]
+
+    service.handle(image_msg("om_partial_new"))
+    assert "已覆盖此前待确认的导入" in out.texts[-1][1]
+
+
 def test_partial_confirmation_expires(tmp_path: Path) -> None:
     from datetime import timedelta
 

@@ -473,13 +473,20 @@ class FeishuBotService:
             )
             return
         # PARTIAL：不自动应用，等待明确确认
-        self._ledger.save_pending_import(record, now)
+        replaced = self._ledger.save_pending_import(record, now)
         errors = "、".join(record.validation_errors)
+        lines = [
+            f"解析完成但校验不完整（PARTIAL）：{errors}。",
+            self._import_receipt(record, applied=False),
+        ]
+        if replaced:
+            lines.append("⚠️ 已覆盖此前待确认的导入。")
+        lines.append(
+            f"回复「确认导入」可在 {self._cfg.confirm_window_minutes} 分钟内强制应用（谨慎）。"
+        )
         self._transport.send_text(
             message.chat_id,
-            f"解析完成但校验不完整（PARTIAL）：{errors}。\n"
-            f"{self._import_receipt(record, applied=False)}\n"
-            f"回复「确认导入」可在 {self._cfg.confirm_window_minutes} 分钟内强制应用（谨慎）。",
+            "\n".join(lines),
         )
 
     def _handle_confirm(self, chat_id: str, now: datetime) -> None:
