@@ -5,6 +5,7 @@ from quant_signal.config import (
     ExecutionPlanSettings,
     IndexUniverseSettings,
     NotifySettings,
+    OptionFlowSettings,
     Settings,
     load_settings,
 )
@@ -34,6 +35,11 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.execution_plan.max_financing_ratio == 0.20
     assert s.execution_plan.cash_reserve == 0
     assert s.legacy_price_deviation.enabled is False
+    assert s.option_flow.enabled is True
+    assert s.option_flow.feed == "indicative"
+    assert s.option_flow.venues == ["cone", "ctwo", "opt", "exo"]
+    assert s.option_flow.top_n == 10
+    assert s.option_flow.max_alerts_per_day == 4
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
 
@@ -197,3 +203,39 @@ def test_execution_plan_risk_clusters_are_unique_and_normalized() -> None:
 
     with pytest.raises(ValidationError, match="risk_clusters"):
         ExecutionPlanSettings(risk_clusters={"a": ["MU"], "b": ["MU"]})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("top_n", 0),
+        ("discovery_limit", 9),
+        ("min_volume", -1),
+        ("rank_jump", 0),
+        ("cooldown_minutes", 14),
+        ("max_alerts_per_day", 1),
+        ("intraday_expiry_minutes", 14),
+        ("min_venue_coverage", 0.99),
+    ],
+)
+def test_option_flow_rejects_unsafe_policy(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        OptionFlowSettings(**{field: value})
+
+
+def test_option_flow_requires_complete_unique_venues_when_enabled() -> None:
+    with pytest.raises(ValidationError, match="venues"):
+        OptionFlowSettings(enabled=True, venues=["cone", "ctwo", "opt"])
+    with pytest.raises(ValidationError, match="venues"):
+        OptionFlowSettings(enabled=True, venues=["cone", "cone", "opt", "exo"])
+
+
+def test_option_flow_normalizes_roots_and_threshold_order() -> None:
+    settings = OptionFlowSettings(
+        excluded_index_roots=["spx", "vix"],
+        etf_roots=["spy", "qqq"],
+    )
+    assert settings.excluded_index_roots == ["SPX", "VIX"]
+    assert settings.etf_roots == ["SPY", "QQQ"]
+    with pytest.raises(ValidationError, match="zero_dte_surge_volume"):
+        OptionFlowSettings(surge_volume=20_000, zero_dte_surge_volume=19_999)
