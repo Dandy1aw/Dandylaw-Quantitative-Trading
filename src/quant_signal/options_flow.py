@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 import re
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 OptionSide = Literal["call", "put"]
@@ -110,6 +110,22 @@ class OptionFlowChange:
     rank_jump: int
     flags: tuple[str, ...]
     score: int
+
+
+class OptionFlowSource(Protocol):
+    """Provider boundary for one trustworthy option-volume snapshot."""
+
+    def fetch(self, now: datetime) -> OptionFlowSnapshot: ...
+
+
+class OptionFlowEnricher(Protocol):
+    """Optional delayed context keyed by OCC contract symbol."""
+
+    def enrich(
+        self,
+        rows: Sequence[OptionContractVolume],
+        now: datetime,
+    ) -> dict[str, OptionEnrichment]: ...
 
 
 def _standard_root(root: str) -> str | None:

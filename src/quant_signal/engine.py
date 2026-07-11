@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 import structlog
@@ -33,6 +33,7 @@ from quant_signal.pipelines.intraday import (
 from quant_signal.pipelines.dataqa import run as run_dataqa_pipeline
 from quant_signal.pipelines.market_scan import run as run_market_scan_pipeline
 from quant_signal.pipelines.negative_overreaction import run as run_negative_overreaction_pipeline
+from quant_signal.pipelines.option_flow import run as run_option_flow_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
@@ -48,9 +49,10 @@ from quant_signal.strategies.momentum_rotation import MomentumRotation
 from quant_signal.strategies.rsi_reversion import RsiReversion
 from quant_signal.strategies.trend_gate import TrendGateConfig
 
-if False:  # pragma: no cover - typing-only imports without a runtime cycle
+if TYPE_CHECKING:
     from quant_signal.datafeed.news import NewsSource
     from quant_signal.news_store import NewsStore
+    from quant_signal.options_flow import OptionFlowEnricher, OptionFlowSource
 
 log = structlog.get_logger()
 
@@ -72,12 +74,16 @@ class Engine:
         news_store: "NewsStore | None" = None,
         index_universe_provider: IndexUniverseProvider | None = None,
         account_provider: AccountProvider | None = None,
+        option_flow_source: "OptionFlowSource | None" = None,
+        option_flow_enricher: "OptionFlowEnricher | None" = None,
     ) -> None:
         # 财报日历/基本面为可选注入：不注入(如测试)则完全跳过标注，零网络依赖
         self.earnings_source = earnings_source
         self.fundamentals_source = fundamentals_source
         self.news_source = news_source
         self.news_store = news_store
+        self.option_flow_source = option_flow_source
+        self.option_flow_enricher = option_flow_enricher
         self.settings = settings
         self.store = store
         self.source = source
@@ -346,3 +352,6 @@ class Engine:
 
     def run_execution_watch(self, now: datetime) -> None:
         run_execution_watch_pipeline(self, now)
+
+    def run_option_flow(self, now: datetime, *, force_summary: bool = False) -> None:
+        run_option_flow_pipeline(self, now, force_summary=force_summary)
