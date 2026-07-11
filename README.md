@@ -13,6 +13,7 @@
 - [核心概念](#核心概念)
 - [策略](#策略)
 - [指数发现池与 PAPER 执行建议](#指数发现池与-paper-执行建议)
+- [美股期权异动提醒（Cboe 四市场）](#美股期权异动提醒cboe-四市场)
 - [调度：一天跑哪些任务](#调度一天跑哪些任务)
 - [配置参考（settings.yaml）](#配置参考settingsyaml)
 - [命令行工具](#命令行工具)
@@ -54,7 +55,7 @@
                     └───────────────┘
 ```
 
-单进程 monorepo，APScheduler 驱动 14 个定时任务（详见下文）。数据源
+单进程 monorepo，APScheduler 驱动 17 个定时任务（详见下文）。数据源
 （yfinance / Alpaca）与通知器（Console / 飞书）都是可切换的抽象：
 
 - 每个标的按 `tickers.<symbol>.currency` 自动派生数据源：非 USD 固定走 yfinance，USD 跟随
@@ -242,6 +243,39 @@ v0.5 起系统从"价格到点提醒器"升级为只读交易执行建议系统�
 STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（feature flag
 `legacy_price_deviation.enabled` 可回滚）。
 
+## 美股期权异动提醒（Cboe 四市场）
+
+只观察、不下单的期权热度频道（`option_flow.enabled` 开关），回答三个问题：
+当前哪些标准美股期权合约进入 Call/Put 成交量 Top10、哪些合约相较上一轮出现
+实质变化、数据覆盖与延迟边界是什么。
+
+1. **发现源**（`datafeed/cboe_options.py`）：聚合 Cboe 四个期权交易所
+   （C1/C2/BZX/EDGX）官网榜单的可见合约成交量，按
+   `(root, expiry, strike, call/put)` 合并后分别取 Call/Put Top10。四市场
+   缺一、解析不完整或任一侧候选不足 10 只一律 fail closed，不推残缺榜
+2. **范围过滤**：只保留标准个股/ETF 期权——指数根（SPX/VIX/NDX 等）与
+   公司行动调整合约（根代码含数字）不进榜；到期早于扫描交易日的剔除；
+   0DTE 保留但显式标记
+3. **可选补全**（`datafeed/alpaca_options.py`）：Alpaca Indicative feed
+   （约 15 分钟延迟，非 OPRA NBBO）补充最新成交价/买卖价/IV/Greeks/OI，
+   只用于解释，**不能反向改变 Cboe 原始排名**；补全失败不影响榜单
+4. **异动硬门槛**（`options_flow.py`）：每 15 分钟与上一轮 50 名候选比较，
+   新进 Top10 / 排名跳升 ≥3 / 15 分钟增量 ≥1 万张（ETF 与 0DTE 要 ≥2 万张）
+   才算实质变化；Volume/OI 高换手只做辅助排序，永不单独触发。异动聚焦最多
+   5 张合约、同一标的最多 2 张。上一轮候选中不存在的合约，其全天累计量
+   **不会**被当作 15 分钟增量（显示"首次可见"，不触发成交激增）
+5. **降噪**：当日第一份有效扫描发基线榜；盘中只有实质变化才发（冷却 60
+   分钟）；16:20 ET 固定发收盘榜；每日最多 4 张。盘中卡 45 分钟未发出
+   即过期取消，不在下午补发上午旧排名
+6. **专用 durable outbox**（sqlite `option_flow_scans/rows/outbox`）：扫描
+   与待发卡同一事务原子落库，时间槽幂等（任务重跑不重复保存/推送），
+   发送失败按退避重试；与执行计划的 plan outbox 完全隔离，账户截图更新
+   不会误取消期权榜
+
+卡片明确标注"Cboe 四市场可见量合计（下限近似）"，不声称全市场
+consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠ 看跌
+（可能是平仓/备兑/保护/价差/做市对冲），不构成交易建议。
+
 ## 调度：一天跑哪些任务
 
 | Job ID | 时间 | 门控 | 做什么 |
@@ -254,6 +288,9 @@ STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（f
 | `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
 | `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已开盘 | 20日突破策略，监控 `watchlist` |
 | `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
+| `option_flow` | 10:00–15:45 ET 每15分钟 | NYSE 交易日历 | Cboe 四市场期权 Call/Put Top10 扫描，基线/实质变化才推送 |
+| `option_flow_close` | 16:20 ET | NYSE 交易日历 | 期权收盘榜（force_summary，让 ≈15 分钟延迟的补全覆盖收盘） |
+| `option_flow_drain` | 16:35–21:35 ET 每小时 | NYSE 交易日历 | 只重试期权 outbox 未发出的卡（不抓数据），保证收盘榜在过期窗口内有真实重试 |
 | `postmarket` | 16:30 ET | NYSE 交易日历 | 当日信号日报（数量、理论收益） |
 | `negative_overreaction` | 16:45 ET | NYSE 交易日历 | 利空错杀观察（新闻分类+企稳确认，仅观察不建仓） |
 | `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉 + 台账/行情备份（保留14天） |
@@ -345,6 +382,24 @@ execution_plan:                  # PAPER 执行建议（v0.5）
   max_stop_distance: 0.20        # >20% → STOP_TOO_WIDE
   account_max_age_seconds: 60    # 账户快照超龄不出股数
 
+option_flow:                     # 期权异动提醒（Cboe 四市场，只观察不下单）
+  enabled: true
+  feed: indicative               # 生产只允许 indicative；OPRA 开通后显式切换，不做静默降级
+  top_n: 10
+  discovery_limit: 50            # 每市场每侧抓前 50 做候选
+  venues: [cone, ctwo, opt, exo] # C1 / C2 / BZX / EDGX
+  excluded_index_roots: [SPX, SPXW, VIX, RUT, RUTW, NDX, XSP, OEX]
+  etf_roots: [SPY, QQQ, IWM]     # 这些根用 0DTE/ETF 更高的激增阈值
+  min_volume: 5000               # 进榜最低可见张数
+  surge_volume: 10000            # 15 分钟增量阈值（普通合约）
+  zero_dte_surge_volume: 20000   # 0DTE/ETF 阈值
+  rank_jump: 3                   # 排名跳升阈值
+  cooldown_minutes: 60           # 盘中变化卡冷却
+  max_alerts_per_day: 4          # 含基线与收盘榜
+  intraday_expiry_minutes: 45    # 盘中卡过期取消
+  closing_expiry_hours: 12       # 收盘榜过期时间
+  min_venue_coverage: 1.0        # 四市场缺一即 fail closed
+
 legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回滚
   enabled: false
 ```
@@ -387,6 +442,10 @@ uv run quant-signal
 2. **早报/日报卡片**：markdown 表格，早报含"标的/方向/参考价/现价/原因"，最多
    展示 5 条（BUY 按动量排名优先，超出的在末尾注明"还有 N 条见台账"）
 3. **告警卡片**：红色 header，用于心跳失败和限流汇总
+4. **期权热度卡片**：标题"🔥 美股期权热度 · Cboe四市场"，纯结构化分段
+   （数据身份/异动聚焦/CALL Top10/PUT Top10/解释边界），不用 markdown
+   表格以保证手机端可读；标题措辞避免"主力买入/扫货/强烈看涨"等当前
+   数据无法证明的说法
 
 飞书 lark_md 卡片在手机端排版有限——列数建议不超过 4-5 列，标的名称建议只显示
 ticker（全名太长会挤压其他列）。
@@ -438,6 +497,10 @@ uv run mypy src/          # 类型检查（strict 模式，research/ 目录不�
   账户镜像下单，计划最多走到 ACTIONABLE，不会有后续持仓事件
 - **指数成分快照没有历史时点库**：缓存只存最新一次成功快照，用当前成分回放
   历史必然带幸存者偏差，回放报告已显式标注，不作为正式 alpha 证据
+- **期权榜只覆盖 Cboe 四市场可见量**：不含 Nasdaq/NYSE/MIAX/BOX/MEMX 等
+  期权交易所成交，且每市场只暴露前 50，属于下限近似；Alpaca Indicative
+  补全约延迟 15 分钟且非 OPRA NBBO。Cboe 页面 JSON 是网站接口而非承诺
+  稳定的商业 API，接口变更时该频道会 fail closed 停发而不是发错数据
 
 ## 风险与合规提示
 
@@ -456,9 +519,9 @@ quant-signal/
 │   └── .env                    # 凭证（不提交 git）
 ├── src/quant_signal/
 │   ├── main.py                 # 入口：uv run quant-signal
-│   ├── scheduler.py            # 9 个定时任务的注册与门控逻辑
+│   ├── scheduler.py            # 17 个定时任务的注册与门控逻辑
 │   ├── engine.py                # 依赖装配与兼容入口
-│   ├── pipelines/               # premarket/intraday/deviation/enrichment 工作流
+│   ├── pipelines/               # premarket/intraday/execution_plan/option_flow 等工作流
 │   ├── config.py                # 配置加载（yaml + .env）
 │   ├── calendar.py               # NYSE 交易日历
 │   ├── ledger.py                 # sqlite 信号台账 + 虚拟持仓 + 参考价查询
@@ -466,12 +529,18 @@ quant-signal/
 │   ├── seed_holdings.py           # 初始化虚拟持仓 CLI
 │   ├── report.py                  # 日报统计
 │   ├── watch_monitor.py           # 持仓偏离检测（纯函数）
+│   ├── options_flow.py            # 期权榜领域模型：OCC symbol/聚合排名/异动判定
+│   ├── index_universe.py           # 指数发现池（纳指100+标普500 成分）
+│   ├── account.py                  # 只读 Alpaca paper 账户适配器（仅 GET）
+│   ├── execution.py                # 确定性 sizing + 执行计划状态机
 │   ├── enrichment.py              # UZI-Skill headless 调用（尽力而为）
 │   ├── logging_setup.py           # structlog 初始化
 │   ├── datafeed/
 │   │   ├── base.py                # DataSource 协议 + 工厂函数
 │   │   ├── yf_source.py           # yfinance 实现
 │   │   ├── alpaca_source.py       # Alpaca REST 实现
+│   │   ├── cboe_options.py        # Cboe 四市场期权榜发现（网站 JSON 接口）
+│   │   ├── alpaca_options.py      # Alpaca Indicative 期权补全（OI/报价/Greeks）
 │   │   ├── fx.py                  # 实时汇率查询
 │   │   └── store.py               # duckdb 行情读写
 │   ├── strategies/
