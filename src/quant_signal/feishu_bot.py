@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 import queue
 import threading
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -278,7 +278,7 @@ class FeishuBotService:
             self._transport.send_text(chat_id, "今日暂无期权扫描数据。")
             return
         cfg = self._settings.option_flow
-        enrichment = (
+        enrichment: Literal["ok", "off"] = (
             "ok" if any(row.enrichment is not None for row in snapshot.rows) else "off"
         )
         card = option_flow_card(
@@ -403,3 +403,145 @@ class FeishuBotService:
         if applied:
             lines.insert(0, "账户快照已更新，现有执行计划已按 ACCOUNT_CHANGED 失效重算。")
         return "\n".join(lines)
+
+
+# ---- lark-oapi 边界：事件解包（纯 dict，可单测） ----
+
+
+def message_from_event(payload: object) -> BotMessage | None:
+    """把 im.message.receive_v1 事件 JSON 解包成 BotMessage；缺字段返回 None。"""
+    if not isinstance(payload, dict):
+        return None
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return None
+    message = event.get("message")
+    sender = event.get("sender")
+    if not isinstance(message, dict) or not isinstance(sender, dict):
+        return None
+    sender_id = sender.get("sender_id")
+    open_id = sender_id.get("open_id") if isinstance(sender_id, dict) else None
+    fields = (
+        message.get("message_id"),
+        message.get("chat_id"),
+        message.get("chat_type"),
+        message.get("message_type"),
+        message.get("content"),
+        open_id,
+    )
+    if not all(isinstance(value, str) and value for value in fields):
+        return None
+    message_id, chat_id, chat_type, message_type, content, sender_open_id = fields
+    return BotMessage(
+        message_id=str(message_id),
+        chat_id=str(chat_id),
+        chat_type=str(chat_type),
+        message_type=str(message_type),
+        content_json=str(content),
+        sender_open_id=str(sender_open_id),
+    )
+
+
+# ---- lark-oapi 边界：生产实现（无单测，靠真实验收） ----
+
+
+class LarkTransport:
+    """自建应用 REST：发单聊消息、下载图片。凭据不进日志。"""
+
+    def __init__(self, app_id: str, app_secret: str) -> None:
+        import lark_oapi as lark
+
+        self._client = (
+            lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
+        )
+
+    def _send(self, chat_id: str, msg_type: str, content: str) -> bool:
+        from lark_oapi.api.im.v1 import (
+            CreateMessageRequest,
+            CreateMessageRequestBody,
+        )
+
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type(msg_type)
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        response = self._client.im.v1.message.create(request)
+        if not response.success():
+            log.warning(
+                "feishu_bot.send_failed", code=response.code, msg=response.msg
+            )
+            return False
+        return True
+
+    def send_text(self, chat_id: str, text: str) -> bool:
+        return self._send(
+            chat_id, "text", json.dumps({"text": text}, ensure_ascii=False)
+        )
+
+    def send_card(self, chat_id: str, card: Card) -> bool:
+        from quant_signal.notifier.feishu import _to_feishu_payload
+
+        payload = _to_feishu_payload(card)["card"]
+        return self._send(
+            chat_id, "interactive", json.dumps(payload, ensure_ascii=False)
+        )
+
+    def download_image(self, message_id: str, image_key: str) -> bytes:
+        from lark_oapi.api.im.v1 import GetMessageResourceRequest
+
+        request = (
+            GetMessageResourceRequest.builder()
+            .message_id(message_id)
+            .file_key(image_key)
+            .type("image")
+            .build()
+        )
+        response = self._client.im.v1.message_resource.get(request)
+        if not response.success() or response.file is None:
+            raise RuntimeError(f"下载图片失败: {response.code} {response.msg}")
+        data = response.file.read()
+        return bytes(data)
+
+
+def run_ws_forever(service: FeishuBotService, app_id: str, app_secret: str) -> None:
+    """长连接事件循环：SDK 自带重连之外的兜底重启（退避），永不外抛。"""
+    import time as time_module
+
+    import lark_oapi as lark
+
+    def on_message(data: object) -> None:
+        try:
+            payload = json.loads(lark.JSON.marshal(data))
+            message = message_from_event(payload)
+            if message is not None:
+                service.submit(message)
+        except Exception:  # noqa: BLE001 - 单条事件解析失败不影响连接
+            log.exception("feishu_bot.event_error")
+
+    handler = (
+        lark.EventDispatcherHandler.builder("", "")
+        .register_p2_im_message_receive_v1(on_message)
+        .build()
+    )
+    delay = 5.0
+    while True:
+        try:
+            client = lark.ws.Client(
+                app_id,
+                app_secret,
+                event_handler=handler,
+                log_level=lark.LogLevel.WARNING,
+            )
+            client.start()
+        except Exception:  # noqa: BLE001 - ws 崩溃走退避重启
+            log.exception("feishu_bot.ws_crashed")
+        time_module.sleep(delay)
+        delay = min(delay * 2, 300.0)

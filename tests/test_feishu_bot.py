@@ -325,6 +325,63 @@ def test_extraction_failure_reports_and_leaves_no_state(tmp_path: Path) -> None:
     assert ledger.latest_observed_account() is None
 
 
+def event_payload(
+    *,
+    chat_type: str = "p2p",
+    message_type: str = "text",
+    content: str = '{"text":"帮助"}',
+) -> dict:
+    return {
+        "schema": "2.0",
+        "header": {"event_id": "ev_1", "event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {
+                "sender_id": {"open_id": "ou_owner"},
+                "sender_type": "user",
+            },
+            "message": {
+                "message_id": "om_evt",
+                "chat_id": "oc_chat",
+                "chat_type": chat_type,
+                "message_type": message_type,
+                "content": content,
+            },
+        },
+    }
+
+
+def test_message_from_event_parses_text_and_image() -> None:
+    from quant_signal.feishu_bot import message_from_event
+
+    message = message_from_event(event_payload())
+    assert message is not None
+    assert message.message_id == "om_evt"
+    assert message.chat_type == "p2p"
+    assert message.sender_open_id == "ou_owner"
+    assert parse_text(message.content_json) == "帮助"
+
+    image = message_from_event(
+        event_payload(message_type="image", content='{"image_key":"img_1"}')
+    )
+    assert image is not None and image.message_type == "image"
+
+    group = message_from_event(event_payload(chat_type="group"))
+    assert group is not None and group.chat_type == "group"
+
+
+def test_message_from_event_rejects_malformed_payloads() -> None:
+    from quant_signal.feishu_bot import message_from_event
+
+    assert message_from_event({}) is None
+    assert message_from_event({"event": {}}) is None
+    broken = event_payload()
+    del broken["event"]["message"]["message_id"]
+    assert message_from_event(broken) is None
+    no_sender = event_payload()
+    del no_sender["event"]["sender"]
+    assert message_from_event(no_sender) is None
+
+
 def test_service_never_raises_and_reports_failure(tmp_path: Path) -> None:
     class ExplodingLedger:
         def try_mark_feishu_message(self, message_id: str, *, now: datetime) -> bool:

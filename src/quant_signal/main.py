@@ -62,6 +62,35 @@ def main() -> None:
         option_flow_source=option_flow_source,
         option_flow_enricher=option_flow_enricher,
     )
+    if settings.feishu_bot.enabled:
+        if settings.feishu_app_id and settings.feishu_app_secret:
+            import threading
+
+            from quant_signal.feishu_bot import (
+                FeishuBotService,
+                LarkTransport,
+                run_ws_forever,
+            )
+
+            bot = FeishuBotService(
+                ledger,
+                settings,
+                LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
+            )
+            bot.start()
+            threading.Thread(
+                target=run_ws_forever,
+                args=(bot, settings.feishu_app_id, settings.feishu_app_secret),
+                name="feishu-bot-ws",
+                daemon=True,
+            ).start()
+            log.info("feishu_bot.started")
+        else:
+            log.warning(
+                "feishu_bot.credentials_missing",
+                hint="config/.env 需要 FEISHU_APP_ID/FEISHU_APP_SECRET",
+            )
+
     sched = build_scheduler(engine, ledger, store, notifier)
     sched.start()
     log.info(

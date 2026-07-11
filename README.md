@@ -14,6 +14,7 @@
 - [策略](#策略)
 - [指数发现池与 PAPER 执行建议](#指数发现池与-paper-执行建议)
 - [美股期权异动提醒（Cboe 四市场）](#美股期权异动提醒cboe-四市场)
+- [飞书机器人交互（可选）](#飞书机器人交互可选)
 - [调度：一天跑哪些任务](#调度一天跑哪些任务)
 - [配置参考（settings.yaml）](#配置参考settingsyaml)
 - [命令行工具](#命令行工具)
@@ -276,6 +277,33 @@ STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（f
 consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠ 看跌
 （可能是平仓/备兑/保护/价差/做市对冲），不构成交易建议。
 
+## 飞书机器人交互（可选）
+
+`feishu_bot.enabled` 打开后，系统通过**企业自建应用**机器人的长连接（WebSocket，
+无需公网 IP）接收你的**单聊**消息，实现双向交互；现有群 webhook 推送通道不受
+影响，两者独立共存。
+
+**能做什么**：
+
+- 发送券商持仓截图 → Codex 解析 → 对账校验 → 更新账户快照（复用
+  `portfolio_import` 全部安全门槛）。`VALIDATED` 自动应用；`PARTIAL` 列出校验
+  错误并等待 15 分钟内回复「确认导入」；`REJECTED` 绝不应用
+- 文本指令：`状态`（系统概况）/ `持仓`（截图账户+持仓）/ `计划`（活跃执行
+  计划）/ `期权`（最新期权榜，读台账不新抓）/ `帮助`
+
+**一次性配置**（代码无法代劳）：
+
+1. [飞书开放平台](https://open.feishu.cn)创建**企业自建应用**，启用机器人能力
+2. 权限：`im:message`、`im:message.p2p_msg`、`im:resource`
+3. 事件订阅选**长连接**模式，订阅 `im.message.receive_v1`，发布应用
+4. `config/.env` 填 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
+5. `settings.yaml` 设 `feishu_bot.enabled: true` 并重启；先随便发一条消息，
+   机器人会回你的 open_id，把它填进 `feishu_bot.allowed_open_ids` 再重启
+
+**安全边界**：群聊消息一律忽略；白名单外的发送者只会收到自己的 open_id 回显，
+任何操作都不执行；事件按 message_id 幂等去重（飞书 at-least-once 投递）；
+图片临时文件用完即删、凭据与图片字节不进日志；机器人线程崩溃不影响调度器。
+
 ## 调度：一天跑哪些任务
 
 | Job ID | 时间 | 门控 | 做什么 |
@@ -403,6 +431,14 @@ option_flow:                     # 期权异动提醒（Cboe 四市场，只观�
 
 legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回滚
   enabled: false
+
+feishu_bot:                      # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
+  enabled: false
+  allowed_open_ids: []           # 白名单为空时只回显 open_id，不执行任何操作
+  capital_limit: 6000
+  max_financing_ratio: 0.20
+  confirm_window_minutes: 15     # PARTIAL 导入确认窗口
+  codex_timeout_seconds: 180
 ```
 
 ## 命令行工具
@@ -531,6 +567,8 @@ quant-signal/
 │   ├── report.py                  # 日报统计
 │   ├── watch_monitor.py           # 持仓偏离检测（纯函数）
 │   ├── options_flow.py            # 期权榜领域模型：OCC symbol/聚合排名/异动判定
+│   ├── feishu_bot.py              # 自建应用机器人：长连接指令交互+截图导入
+│   ├── portfolio_import.py        # 券商截图解析(Codex)+对账校验+导入
 │   ├── index_universe.py           # 指数发现池（纳指100+标普500 成分）
 │   ├── account.py                  # 只读 Alpaca paper 账户适配器（仅 GET）
 │   ├── execution.py                # 确定性 sizing + 执行计划状态机
