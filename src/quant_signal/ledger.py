@@ -190,6 +190,10 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
     ON notification_outbox(status, next_retry_at);
+CREATE TABLE IF NOT EXISTS feishu_processed_messages (
+    message_id TEXT PRIMARY KEY,
+    processed_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS option_flow_scans (
     slot TEXT PRIMARY KEY,
     session_date TEXT NOT NULL,
@@ -1006,6 +1010,17 @@ class SignalLedger:
                 (session.isoformat(),),
             ).fetchone()
         return int(row["n"]) if row is not None else 0
+
+    def try_mark_feishu_message(self, message_id: str, *, now: datetime) -> bool:
+        """事件 at-least-once 投递的幂等闸：首次 True，重复 False。"""
+        with self._lock:
+            cursor = self._con.execute(
+                "INSERT OR IGNORE INTO feishu_processed_messages"
+                " (message_id, processed_at) VALUES (?, ?)",
+                (message_id, now.astimezone(timezone.utc).isoformat()),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
 
     def last_option_flow_alert_at(self, session: date) -> datetime | None:
         # 冷却只约束变化卡之间的间隔；基线/收盘卡不占用冷却窗口

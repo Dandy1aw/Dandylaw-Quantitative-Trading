@@ -612,6 +612,12 @@ def test_option_outbox_retries_then_marks_sent(ledger: SignalLedger) -> None:
     assert ledger.last_option_flow_alert_at(snap.session_date) == NOW
 
 
+def test_feishu_message_dedupe_is_first_writer_wins(ledger: SignalLedger) -> None:
+    assert ledger.try_mark_feishu_message("om_1", now=NOW) is True
+    assert ledger.try_mark_feishu_message("om_1", now=NOW) is False
+    assert ledger.try_mark_feishu_message("om_2", now=NOW) is True
+
+
 def test_account_change_does_not_cancel_option_outbox(ledger: SignalLedger) -> None:
     snap = option_snapshot()
     ledger.save_option_flow_scan(
