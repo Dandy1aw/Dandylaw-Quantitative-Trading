@@ -28,9 +28,9 @@
 **Interfaces:**
 - Produces: `FeishuBotSettings(enabled: bool=False, allowed_open_ids: list[str]=[], capital_limit: Decimal=6000, max_financing_ratio: Decimal=0.20, confirm_window_minutes: int=15, codex_timeout_seconds: float=180)`；`Settings.feishu_bot`；`Settings.feishu_app_id/feishu_app_secret`（来自 env `FEISHU_APP_ID`/`FEISHU_APP_SECRET`）
 
-- [ ] Step 1: 失败测试（默认值、env 加载、open_ids 去空白）
-- [ ] Step 2: RED → 实现 → GREEN
-- [ ] Step 3: commit `feat: configure feishu bot settings`
+- [x] Step 1: 失败测试（默认值、env 加载、open_ids 去空白）
+- [x] Step 2: RED → 实现 → GREEN
+- [x] Step 3: commit `feat: configure feishu bot settings`
 
 ### Task 2: 消息模型与路由纯函数
 
@@ -62,8 +62,8 @@ def parse_image_key(content_json: str) -> str | None
 ```
 - 路由规则：group→IGNORE；不在白名单→ECHO_OPEN_ID；image→IMPORT_IMAGE；text 按表匹配（帮助/help、状态/status、持仓/holdings、计划/plans、期权/options、确认导入）；其余 UNKNOWN
 
-- [ ] Step 1: 失败测试覆盖上述全部分支 + content JSON 解析容错（坏 JSON → IGNORE/UNKNOWN 不抛异常）
-- [ ] Step 2: RED → 实现 → GREEN → commit `feat: route feishu bot messages`
+- [x] Step 1: 失败测试覆盖上述全部分支 + content JSON 解析容错（坏 JSON → IGNORE/UNKNOWN 不抛异常）
+- [x] Step 2: RED → 实现 → GREEN → commit `feat: route feishu bot messages`
 
 ### Task 3: 幂等表
 
@@ -74,8 +74,8 @@ def parse_image_key(content_json: str) -> str | None
 **Interfaces:**
 - Produces: `SignalLedger.try_mark_feishu_message(message_id: str, *, now: datetime) -> bool`（首次 True，重复 False；表 `feishu_processed_messages(message_id TEXT PRIMARY KEY, processed_at TEXT NOT NULL)`）
 
-- [ ] Step 1: 失败测试（首次 True/重复 False/不同 id 互不影响）
-- [ ] Step 2: RED → 实现（INSERT OR IGNORE + rowcount）→ GREEN → commit `feat: dedupe feishu bot messages`
+- [x] Step 1: 失败测试（首次 True/重复 False/不同 id 互不影响）
+- [x] Step 2: RED → 实现（INSERT OR IGNORE + rowcount）→ GREEN → commit `feat: dedupe feishu bot messages`
 
 ### Task 4: FeishuBotService 指令处理
 
@@ -100,8 +100,8 @@ class FeishuBotService:
 ```
 - `handle` 流程：幂等检查→route→分派。STATUS/HOLDINGS/PLANS 用台账数据渲染文本；OPTIONS 读 `latest_option_flow_snapshot(今天ET)` 渲染 `option_flow_card`（无数据回"今日暂无扫描"）；异常捕获后回"处理失败:{类型}"并记日志，绝不外抛。
 
-- [ ] Step 1: 失败测试（fake transport 记录回复）：help/status/holdings/plans/options/unknown/白名单外/重复消息
-- [ ] Step 2: RED → 实现 → GREEN → commit `feat: handle feishu bot commands`
+- [x] Step 1: 失败测试（fake transport 记录回复）：help/status/holdings/plans/options/unknown/白名单外/重复消息
+- [x] Step 2: RED → 实现 → GREEN → commit `feat: handle feishu bot commands`
 
 ### Task 5: 截图导入流程（含 PARTIAL 确认）
 
@@ -113,12 +113,12 @@ class FeishuBotService:
 - Consumes: `CodexPortfolioExtractor`(可注入 fake)、`validate_extraction`、`apply_validated_import`、`image_digest`
 - Produces: `handle` 对 IMPORT_IMAGE/CONFIRM_IMPORT 的实现；内存态 `self._pending_partial: tuple[ValidatedPortfolioImport, datetime] | None`
 
-- [ ] Step 1: 失败测试：
+- [x] Step 1: 失败测试：
   - VALIDATED → 自动应用（fake ledger 断言 save 调用）+ 回执含权益/标的
   - PARTIAL → 不应用 + 回执含 errors；15 分钟内"确认导入"→应用；过期→拒绝
   - REJECTED → 不应用；extractor 抛异常 → 回"解析失败"不留状态
   - 图片临时文件在处理后被删除
-- [ ] Step 2: RED → 实现（下载→NamedTemporaryFile→extract→validate→分派；finally 删除文件）→ GREEN → commit `feat: import portfolio screenshots via feishu`
+- [x] Step 2: RED → 实现（下载→NamedTemporaryFile→extract→validate→分派；finally 删除文件）→ GREEN → commit `feat: import portfolio screenshots via feishu`
 
 ### Task 6: lark-oapi 封装 + main 装配 + 文档
 
@@ -131,15 +131,15 @@ class FeishuBotService:
 - Consumes: Task 4/5 的 service
 - Produces: main.py 在 `settings.feishu_bot.enabled and app_id and secret` 时 `service.start()` + daemon 线程跑 `run_ws_forever`（supervisor 循环 + 退避，异常只记日志）
 
-- [ ] Step 1: `uv add lark-oapi` 并锁定版本
-- [ ] Step 2: `message_from_event` 失败测试（真实事件 JSON 结构样例：p2p 文本、图片、群聊、缺字段）→ RED → 实现 → GREEN
-- [ ] Step 3: `LarkTransport`：`lark.Client` 发消息(interactive card 复用 `notifier.feishu._to_feishu_payload`)、`GetMessageResourceRequest` 下载；`run_ws_forever`：`lark.ws.Client(...,event_handler=dispatcher)` + while True 重启退避（本步无单测，SDK 边界，靠真实验收）
-- [ ] Step 4: main.py 装配 + README「飞书机器人交互」章节（自建应用配置步骤照抄 spec §2）
-- [ ] Step 5: 全量 pytest + mypy → commit `feat: run feishu bot over lark long connection`
+- [x] Step 1: `uv add lark-oapi` 并锁定版本
+- [x] Step 2: `message_from_event` 失败测试（真实事件 JSON 结构样例：p2p 文本、图片、群聊、缺字段）→ RED → 实现 → GREEN
+- [x] Step 3: `LarkTransport`：`lark.Client` 发消息(interactive card 复用 `notifier.feishu._to_feishu_payload`)、`GetMessageResourceRequest` 下载；`run_ws_forever`：`lark.ws.Client(...,event_handler=dispatcher)` + while True 重启退避（本步无单测，SDK 边界，靠真实验收）
+- [x] Step 4: main.py 装配 + README「飞书机器人交互」章节（自建应用配置步骤照抄 spec §2）
+- [x] Step 5: 全量 pytest + mypy → commit `feat: run feishu bot over lark long connection`
 
 ### Task 7: 全量验证与真实验收清单
 
-- [ ] `pytest -q` 全绿、`mypy src/` 全绿
-- [ ] `enabled=false`（默认）时：调度器启动日志无 bot 线程、行为与现状完全一致
-- [ ] 文档给出用户手动验收步骤：配置自建应用→填凭据→enabled:true→重启→发"状态"收到回复→发截图收到解析回执→CLI 查询账户已更新
-- [ ] commit + push
+- [x] `pytest -q` 全绿、`mypy src/` 全绿
+- [x] `enabled=false`（默认）时：调度器启动日志无 bot 线程、行为与现状完全一致
+- [x] 文档给出用户手动验收步骤：配置自建应用→填凭据→enabled:true→重启→发"状态"收到回复→发截图收到解析回执→CLI 查询账户已更新
+- [x] commit + push

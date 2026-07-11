@@ -27,7 +27,7 @@
 - Produces: `display_top_by_side(rows: OptionFlowSnapshot | Sequence[OptionContractVolume], side: str, n: int, *, dedupe: bool = True, sort_by_expiry: bool = True) -> tuple[OptionContractVolume, ...]`
 - Produces: `folded_count(rows, side, item, top_n) -> int`（同标的在原始每侧前 top_n 中被折叠的其他合约数）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def test_display_dedupes_underlying_and_sorts_by_expiry() -> None:
@@ -57,8 +57,8 @@ def test_display_switches_can_be_disabled_independently() -> None:
     assert len(deduped) == 1 and deduped[0].volume == 30_000
 ```
 
-- [ ] **Step 2: 跑测试确认 RED**（`display_top_by_side` 未定义）
-- [ ] **Step 3: 实现**
+- [x] **Step 2: 跑测试确认 RED**（`display_top_by_side` 未定义）
+- [x] **Step 3: 实现**
 
 ```python
 def display_top_by_side(
@@ -86,7 +86,7 @@ def display_top_by_side(
 
 （注意 dedupe 比较用 `(volume, symbol)` 保证量相同取字典序小的确定性；tie-break 写测试覆盖。）
 
-- [ ] **Step 4: 跑测试 GREEN；commit** `feat: add option flow display selector`
+- [x] **Step 4: 跑测试 GREEN；commit** `feat: add option flow display selector`
 
 ### Task 2: 卡片改用展示选择 + 折叠标注
 
@@ -100,10 +100,10 @@ def display_top_by_side(
 - Consumes: Task 1 的 `display_top_by_side`
 - Produces: `option_flow_card(..., display_dedupe: bool = True, display_sort_by_expiry: bool = True)` 新关键字参数
 
-- [ ] **Step 1: 失败测试**——同标的只出现一次、行首 `#原始排名` 非连续、`(+N)` 折叠标注、近月排前、开关关闭回退旧顺序
-- [ ] **Step 2: RED**
-- [ ] **Step 3: 实现**：`rank_section` 用 `display_top_by_side(snapshot, side, 10, dedupe=..., sort_by_expiry=...)`；行格式 `#{item.rank} {UL} {expiry} {strike}{C/P} · {vol}张 · {delta} · {DTE}{折叠}`，折叠= 同标的另有合约在原始前10时 ` (+N)`
-- [ ] **Step 4: GREEN；commit** `feat: dedupe and expiry-sort option board display`
+- [x] **Step 1: 失败测试**——同标的只出现一次、行首 `#原始排名` 非连续、`(+N)` 折叠标注、近月排前、开关关闭回退旧顺序
+- [x] **Step 2: RED**
+- [x] **Step 3: 实现**：`rank_section` 用 `display_top_by_side(snapshot, side, 10, dedupe=..., sort_by_expiry=...)`；行格式 `#{item.rank} {UL} {expiry} {strike}{C/P} · {vol}张 · {delta} · {DTE}{折叠}`，折叠= 同标的另有合约在原始前10时 ` (+N)`
+- [x] **Step 4: GREEN；commit** `feat: dedupe and expiry-sort option board display`
 
 ### Task 3: pipeline enrichment 目标集合 + 全量验证
 
@@ -114,8 +114,8 @@ def display_top_by_side(
 **Interfaces:**
 - Consumes: Task 1/2 的函数与配置
 
-- [ ] **Step 1: 失败测试**——fake enricher 记录被 enrich 的合约集合，断言 = 展示集合（含去重后顶上来的行）
-- [ ] **Step 2: RED**
-- [ ] **Step 3: 实现**：`displayed = display_top_by_side(snapshot, "call", top_n, ...) + display_top_by_side(snapshot, "put", ...)`；`option_flow_card` 传显示开关。质量校验 `_validate_snapshot` 不动。
-- [ ] **Step 4: GREEN**
-- [ ] **Step 5: 全量** `pytest -q` + `mypy src/` 全绿；commit `feat: enrich exactly the displayed option rows`
+- [x] **Step 1: 失败测试**——fake enricher 记录被 enrich 的合约集合，断言 = 展示集合（含去重后顶上来的行）
+- [x] **Step 2: RED**
+- [x] **Step 3: 实现**：`displayed = display_top_by_side(snapshot, "call", top_n, ...) + display_top_by_side(snapshot, "put", ...)`；`option_flow_card` 传显示开关。质量校验 `_validate_snapshot` 不动。
+- [x] **Step 4: GREEN**
+- [x] **Step 5: 全量** `pytest -q` + `mypy src/` 全绿；commit `feat: enrich exactly the displayed option rows`
