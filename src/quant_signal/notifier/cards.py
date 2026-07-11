@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
 _DIRECTION_EMOJI = {"buy": "📈", "sell": "📉", "reduce": "⚖️"}
+_SELL_RELIABILITY_NOTE = "⚠️ SELL 信号历史胜率偏低（回测 32–42%，牛市窗口），仅供参考"
 
 
 def option_flow_card(
@@ -173,6 +174,8 @@ def signal_card(s: Signal, delayed: bool = False) -> Card:
     lines += [f"**策略**: {s.strategy_id}", f"**时间**: {sgt} (SGT)"]
     if delayed:
         lines.append("⚠️ 数据延迟约15分钟，仅供观察")
+    if s.direction == Direction.SELL:
+        lines.append(_SELL_RELIABILITY_NOTE)
     return Card(
         kind=CardKind.SIGNAL,
         title=f"{emoji} {s.ticker} {s.direction.value.upper()}",
@@ -564,6 +567,8 @@ def _confluence_card(rows: list[dict[str, object]]) -> Card:
             f"| {r['ticker']} | {str(r['direction']).upper()} | {r['hit']} |"
             f" {float(r['price']):.2f} |"  # type: ignore[arg-type]
         )
+    if any(row["direction"] == Direction.SELL.value for row in rows):
+        lines.extend(["", _SELL_RELIABILITY_NOTE])
     return Card(kind=CardKind.REPORT, title="🔥 【重要】多策略共振", body_md="\n".join(lines))
 
 
@@ -621,6 +626,8 @@ def _market_card(
                 f" {live_str} | {band_str} | {tp_str} | {sl_str} | {reason} |"
             )
         parts.append("\n".join(lines))
+    if any(signal.direction == Direction.SELL for signal in signals):
+        parts.append(_SELL_RELIABILITY_NOTE)
     return report_card(f"📋 盘前早报 · {market}", "\n\n".join(parts))
 
 

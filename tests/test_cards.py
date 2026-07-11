@@ -1,11 +1,12 @@
 from datetime import datetime, timezone
 
 from quant_signal.notifier import cards as cards_module
-from quant_signal.notifier.cards import premarket_cards
+from quant_signal.notifier.cards import premarket_cards, report_card, signal_card
 from quant_signal.strategies.base import Direction, Signal
 
 TS = datetime(2026, 1, 2, tzinfo=timezone.utc)
 INTL = {"7709.HK": "HKD", "000660.KS": "KRW"}
+SELL_RELIABILITY_NOTE = "⚠️ SELL 信号历史胜率偏低（回测 32–42%，牛市窗口），仅供参考"
 
 
 def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None, momentum=None):  # type: ignore[no-untyped-def]
@@ -22,6 +23,65 @@ def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None, mome
 
 def _card_by(cards, needle):  # type: ignore[no-untyped-def]
     return next(c for c in cards if needle in c.title)
+
+
+def test_signal_card_labels_sell_once_after_delayed_warning() -> None:
+    signal = _sig("MU", Direction.SELL, "momentum_rotation")
+
+    card = signal_card(signal, delayed=True)
+
+    assert card.body_md.count(SELL_RELIABILITY_NOTE) == 1
+    assert "⚠️ 数据延迟约15分钟，仅供观察" in card.body_md
+    assert card.body_md.endswith(SELL_RELIABILITY_NOTE)
+    assert card.sections == ()
+
+
+def test_signal_card_does_not_label_buy() -> None:
+    card = signal_card(_sig("MU", Direction.BUY, "momentum_rotation"))
+
+    assert SELL_RELIABILITY_NOTE not in card.body_md
+
+
+def test_premarket_market_card_appends_one_note_after_multiple_sell_rows() -> None:
+    signals = [
+        _sig("MU", Direction.SELL, "momentum_rotation"),
+        _sig("GLD", Direction.SELL, "macd_cross"),
+    ]
+
+    card = _card_by(premarket_cards(signals, INTL, {"MU": None, "GLD": None}), "美股组")
+
+    assert card.body_md.count(SELL_RELIABILITY_NOTE) == 1
+    assert card.body_md.index("| MU | SELL |") < card.body_md.index(SELL_RELIABILITY_NOTE)
+    assert card.body_md.index("| GLD | SELL |") < card.body_md.index(SELL_RELIABILITY_NOTE)
+    assert card.body_md.endswith(SELL_RELIABILITY_NOTE)
+    assert card.sections == ()
+
+
+def test_premarket_market_card_does_not_label_buy_only_rows() -> None:
+    signals = [_sig("MU", Direction.BUY, "momentum_rotation")]
+
+    card = _card_by(premarket_cards(signals, INTL, {"MU": None}), "美股组")
+
+    assert SELL_RELIABILITY_NOTE not in card.body_md
+
+
+def test_premarket_confluence_sell_card_appends_one_note() -> None:
+    signals = [
+        _sig("MU", Direction.SELL, "momentum_rotation"),
+        _sig("MU", Direction.SELL, "macd_cross"),
+    ]
+
+    card = _card_by(premarket_cards(signals, INTL, {"MU": None}), "【重要】")
+
+    assert card.body_md.count(SELL_RELIABILITY_NOTE) == 1
+    assert card.body_md.index("| MU | SELL |") < card.body_md.index(SELL_RELIABILITY_NOTE)
+    assert card.body_md.endswith(SELL_RELIABILITY_NOTE)
+
+
+def test_generic_report_card_does_not_infer_sell_reliability_note() -> None:
+    card = report_card("📋 无关日报", "| 标的 | 方向 |\n|---|---|\n| MU | SELL |")
+
+    assert SELL_RELIABILITY_NOTE not in card.body_md
 
 
 def test_splits_markets_us_first_and_skips_empty() -> None:
