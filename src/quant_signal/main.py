@@ -62,6 +62,9 @@ def main() -> None:
         option_flow_source=option_flow_source,
         option_flow_enricher=option_flow_enricher,
     )
+    from quant_signal.scheduler import JobRuntime
+
+    runtime = JobRuntime()
     if settings.feishu_bot.enabled:
         if settings.feishu_app_id and settings.feishu_app_secret:
             import threading
@@ -76,6 +79,7 @@ def main() -> None:
                 ledger,
                 settings,
                 LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
+                runtime=runtime,
             )
             bot.start()
             threading.Thread(
@@ -91,7 +95,7 @@ def main() -> None:
                 hint="config/.env 需要 FEISHU_APP_ID/FEISHU_APP_SECRET",
             )
 
-    sched = build_scheduler(engine, ledger, store, notifier)
+    sched = build_scheduler(engine, ledger, store, notifier, runtime=runtime)
     sched.start()
     log.info(
         "scheduler.started",

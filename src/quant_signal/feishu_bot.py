@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         PortfolioExtraction,
         ValidatedPortfolioImport,
     )
+    from quant_signal.scheduler import JobRuntime
 
 log = structlog.get_logger()
 _ET = ZoneInfo("America/New_York")
@@ -38,6 +39,9 @@ _HELP_TEXT = (
     "持仓 / holdings — 最新截图账户与持仓\n"
     "计划 / plans — 活跃执行计划\n"
     "期权 / options — 最新期权热度榜(不新抓)\n"
+    "信号 / signals — 今日各策略信号\n"
+    "扫描 / scan — 最新指数池 Top20 观察榜\n"
+    "健康 / health — 定时任务运行状态\n"
     "发送券商持仓截图 — 解析并更新账户快照\n"
     "确认导入 — 应用最近一次校验不完整(PARTIAL)的导入"
 )
@@ -62,6 +66,9 @@ class BotIntent(str, Enum):
     HOLDINGS = "holdings"
     PLANS = "plans"
     OPTIONS = "options"
+    SIGNALS = "signals"
+    SCAN = "scan"
+    HEALTH = "health"
     IMPORT_IMAGE = "import_image"
     CONFIRM_IMPORT = "confirm_import"
     UNKNOWN = "unknown"
@@ -78,6 +85,12 @@ _TEXT_COMMANDS = {
     "plans": BotIntent.PLANS,
     "期权": BotIntent.OPTIONS,
     "options": BotIntent.OPTIONS,
+    "信号": BotIntent.SIGNALS,
+    "signals": BotIntent.SIGNALS,
+    "扫描": BotIntent.SCAN,
+    "scan": BotIntent.SCAN,
+    "健康": BotIntent.HEALTH,
+    "health": BotIntent.HEALTH,
     "确认导入": BotIntent.CONFIRM_IMPORT,
 }
 
@@ -156,12 +169,14 @@ class FeishuBotService:
         *,
         extractor: PortfolioExtractor | None = None,
         clock: Callable[[], datetime] | None = None,
+        runtime: "JobRuntime | None" = None,
     ) -> None:
         self._ledger = ledger
         self._settings = settings
         self._cfg = settings.feishu_bot
         self._transport = transport
         self._extractor = extractor
+        self._runtime = runtime
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._started_at = self._clock()
         self._pending_partial: "tuple[ValidatedPortfolioImport, datetime] | None" = None
@@ -239,6 +254,12 @@ class FeishuBotService:
             self._transport.send_text(message.chat_id, self._plans_text())
         elif intent is BotIntent.OPTIONS:
             self._reply_options(message.chat_id, now)
+        elif intent is BotIntent.SIGNALS:
+            self._transport.send_text(message.chat_id, self._signals_text(now))
+        elif intent is BotIntent.SCAN:
+            self._transport.send_text(message.chat_id, self._scan_text())
+        elif intent is BotIntent.HEALTH:
+            self._transport.send_text(message.chat_id, self._health_text(now))
         elif intent is BotIntent.IMPORT_IMAGE:
             self._handle_import(message, now)
         elif intent is BotIntent.CONFIRM_IMPORT:
@@ -298,6 +319,64 @@ class FeishuBotService:
         lines = ["活跃执行计划:"]
         for plan in plans:
             lines.append(f"· {plan.ticker} — {plan.state.value}")
+        return "\n".join(lines)
+
+    def _signals_text(self, now: datetime) -> str:
+        session = now.astimezone(_ET).date()
+        rows = self._ledger.signals_on(session)
+        if not rows:
+            return "今日无信号。"
+        by_strategy: dict[str, list[str]] = {}
+        for row in rows:
+            strategy = str(row.get("strategy_id"))
+            pushed = "已推" if row.get("pushed") else "未推"
+            by_strategy.setdefault(strategy, []).append(
+                f"· {row.get('ticker')} {str(row.get('direction')).upper()}"
+                f" @ {row.get('price')}（{pushed}）"
+            )
+        lines = [f"今日信号（{session:%m/%d}）:"]
+        for strategy, items in by_strategy.items():
+            lines.append(f"[{strategy}]")
+            lines.extend(items)
+        return "\n".join(lines)
+
+    def _scan_text(self) -> str:
+        rows = self._ledger.latest_scan_candidates()
+        if not rows:
+            return "暂无扫描数据。"
+        lines = [f"指数池观察榜（{rows[0].get('scan_date')}）:"]
+        for row in rows[:20]:
+            lines.append(
+                f"{row.get('rank')}. {row.get('ticker')}"
+                f" · 得分 {row.get('score')} · {row.get('price')}"
+            )
+        return "\n".join(lines)
+
+    def _health_text(self, now: datetime) -> str:
+        if self._runtime is None:
+            return "运行状态不可用（未接入 JobRuntime）。"
+        snapshot = self._runtime.snapshot()
+        if not snapshot:
+            return "尚无任务运行记录（进程可能刚启动）。"
+        lines = ["定时任务运行状态:"]
+        for job_id, state in snapshot.items():
+            running_since = state.get("running_since")
+            if isinstance(running_since, datetime):
+                minutes = (now - running_since).total_seconds() / 60
+                marker = " ⚠️卡死?" if minutes > 10 else ""
+                lines.append(f"· {job_id}: 运行中 {minutes:.0f} 分钟{marker}")
+                continue
+            last_success = state.get("last_success")
+            duration = state.get("last_duration")
+            when = (
+                f"{last_success.astimezone(_ET):%m/%d %H:%M ET}"
+                if isinstance(last_success, datetime)
+                else "无成功记录"
+            )
+            duration_text = (
+                f"，耗时 {duration:.0f}s" if isinstance(duration, float) else ""
+            )
+            lines.append(f"· {job_id}: 最近成功 {when}{duration_text}")
         return "\n".join(lines)
 
     def _reply_options(self, chat_id: str, now: datetime) -> None:

@@ -379,6 +379,72 @@ def event_payload(
     }
 
 
+def test_signals_command_lists_today_by_strategy(tmp_path: Path) -> None:
+    from quant_signal.strategies.base import Direction, Signal
+
+    service, out, ledger = make_service(tmp_path)
+    ledger.insert(
+        Signal(
+            ticker="NVDA",
+            direction=Direction.BUY,
+            price=180.5,
+            reason="动量第1",
+            strategy_id="momentum_rotation",
+            ts=NOW,
+        ),
+        pushed=True,
+        now=NOW,
+    )
+    service.handle(msg(content={"text": "信号"}))
+    reply = out.texts[0][1]
+    assert "NVDA" in reply and "momentum_rotation" in reply
+
+    empty_service, empty_out, _ = make_service(tmp_path / "empty")
+    empty_service.handle(msg(content={"text": "signals"}))
+    assert "今日无信号" in empty_out.texts[0][1]
+
+
+def test_scan_command_shows_latest_watchboard(tmp_path: Path) -> None:
+    service, out, ledger = make_service(tmp_path)
+    ledger.replace_scan_candidates(
+        NOW.date(),
+        [
+            {"ticker": "SMCI", "rank": 1, "score": 0.91, "price": 31.5},
+            {"ticker": "MARA", "rank": 2, "score": 0.88, "price": 13.0},
+        ],
+        as_of=NOW,
+    )
+    service.handle(msg(content={"text": "扫描"}))
+    reply = out.texts[0][1]
+    assert "SMCI" in reply and "MARA" in reply
+
+    empty_service, empty_out, _ = make_service(tmp_path / "empty")
+    empty_service.handle(msg(content={"text": "scan"}))
+    assert "暂无扫描数据" in empty_out.texts[0][1]
+
+
+def test_health_command_renders_runtime_or_degrades(tmp_path: Path) -> None:
+    from quant_signal.scheduler import JobRuntime
+
+    runtime = JobRuntime(now_fn=lambda: NOW)
+    runtime.wrap("market_scan", lambda: None)()
+
+    ledger = SignalLedger(tmp_path / "signals.db")
+    settings = make_test_settings(
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+    )
+    out = FakeTransport()
+    service = FeishuBotService(
+        ledger, settings, out, clock=lambda: NOW, runtime=runtime
+    )
+    service.handle(msg(content={"text": "健康"}))
+    assert "market_scan" in out.texts[0][1]
+
+    bare, bare_out, _ = make_service(tmp_path / "bare")
+    bare.handle(msg(content={"text": "health"}))
+    assert "运行状态不可用" in bare_out.texts[0][1]
+
+
 def test_options_query_falls_back_to_last_trading_day(tmp_path: Path) -> None:
     from datetime import timedelta
 
