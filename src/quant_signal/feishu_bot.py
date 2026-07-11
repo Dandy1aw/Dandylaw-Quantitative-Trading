@@ -291,10 +291,115 @@ class FeishuBotService:
         )
         self._transport.send_card(chat_id, card)
 
-    # ---- 截图导入（Task 5 实现） ----
+    # ---- 截图导入 ----
 
     def _handle_import(self, message: BotMessage, now: datetime) -> None:
-        self._transport.send_text(message.chat_id, "已收到截图。")
+        import tempfile
+
+        from quant_signal.portfolio_import import (
+            CodexPortfolioExtractor,
+            image_digest,
+            validate_extraction,
+        )
+
+        image_key = parse_image_key(message.content_json)
+        if image_key is None:
+            self._transport.send_text(message.chat_id, "图片消息缺少 image_key，无法处理。")
+            return
+        self._transport.send_text(
+            message.chat_id, "已收到截图，解析中（约1-3分钟）…"
+        )
+        data = self._transport.download_image(message.message_id, image_key)
+        extractor = self._extractor or CodexPortfolioExtractor(
+            timeout_seconds=self._cfg.codex_timeout_seconds
+        )
+        handle, raw_path = tempfile.mkstemp(prefix="feishu-import-", suffix=".png")
+        path = Path(raw_path)
+        try:
+            import os
+
+            with os.fdopen(handle, "wb") as file:
+                file.write(data)
+            extraction = extractor.extract([path])
+            record = validate_extraction(
+                extraction,
+                image_sha256=image_digest([path]),
+                uploaded_at=now,
+                capital_limit=self._cfg.capital_limit,
+                max_financing_ratio=self._cfg.max_financing_ratio,
+            )
+        except Exception as error:  # noqa: BLE001 - 解析失败必须回执且不留状态
+            log.warning("feishu_bot.extract_failed", error=str(error))
+            self._transport.send_text(
+                message.chat_id, f"解析失败：{type(error).__name__}: {error}"
+            )
+            return
+        finally:
+            path.unlink(missing_ok=True)
+
+        from quant_signal.portfolio_import import ImportStatus, apply_validated_import
+
+        if record.status is ImportStatus.REJECTED:
+            errors = "、".join(record.validation_errors) or "未知原因"
+            self._transport.send_text(
+                message.chat_id, f"导入被拒绝（REJECTED）：{errors}。账户未更新。"
+            )
+            return
+        if record.status is ImportStatus.VALIDATED:
+            applied = apply_validated_import(self._ledger, record, now=now)
+            if not applied:
+                self._transport.send_text(
+                    message.chat_id, "该截图此前已导入过，账户未变化。"
+                )
+                return
+            self._transport.send_text(
+                message.chat_id, self._import_receipt(record, applied=True)
+            )
+            return
+        # PARTIAL：不自动应用，等待明确确认
+        self._pending_partial = (record, now)
+        errors = "、".join(record.validation_errors)
+        self._transport.send_text(
+            message.chat_id,
+            f"解析完成但校验不完整（PARTIAL）：{errors}。\n"
+            f"{self._import_receipt(record, applied=False)}\n"
+            f"回复「确认导入」可在 {self._cfg.confirm_window_minutes} 分钟内强制应用（谨慎）。",
+        )
 
     def _handle_confirm(self, chat_id: str, now: datetime) -> None:
-        self._transport.send_text(chat_id, "当前没有待确认的导入。")
+        from datetime import timedelta
+
+        from quant_signal.portfolio_import import apply_validated_import
+
+        pending = self._pending_partial
+        if pending is None:
+            self._transport.send_text(chat_id, "当前没有待确认的导入。")
+            return
+        record, stored_at = pending
+        self._pending_partial = None
+        window = timedelta(minutes=self._cfg.confirm_window_minutes)
+        if now - stored_at > window:
+            self._transport.send_text(
+                chat_id, "待确认导入已过期，请重新发送截图。"
+            )
+            return
+        applied = apply_validated_import(self._ledger, record, now=now)
+        if applied:
+            self._transport.send_text(
+                chat_id, f"已应用 PARTIAL 导入。\n{self._import_receipt(record, applied=True)}"
+            )
+        else:
+            self._transport.send_text(chat_id, "应用失败：该截图此前已导入过。")
+
+    def _import_receipt(
+        self, record: "ValidatedPortfolioImport", *, applied: bool
+    ) -> str:
+        account = record.extraction.account
+        symbols = "、".join(row.symbol for row in record.positions) or "无"
+        lines = [
+            f"权益: {account.equity} {account.currency}｜现金: {account.cash}",
+            f"持仓({len(record.positions)}): {symbols}",
+        ]
+        if applied:
+            lines.insert(0, "账户快照已更新，现有执行计划已按 ACCOUNT_CHANGED 失效重算。")
+        return "\n".join(lines)

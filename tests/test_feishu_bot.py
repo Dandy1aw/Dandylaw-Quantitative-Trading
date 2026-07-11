@@ -200,6 +200,131 @@ def test_service_options_without_scan_then_with_scan(tmp_path: Path) -> None:
     assert "Cboe四市场" in out.cards[0][1].title
 
 
+def portfolio_extraction(
+    *, reported: int = 1, equity: str = "1000"
+) -> object:
+    from quant_signal.portfolio_import import (
+        ExtractedAccount,
+        ExtractedPosition,
+        PortfolioExtraction,
+    )
+
+    return PortfolioExtraction(
+        account=ExtractedAccount(
+            equity=Decimal(equity),
+            market_value=Decimal("600"),
+            cash=Decimal("400"),
+            buying_power=Decimal("400"),
+            reported_position_count=reported,
+        ),
+        positions=(
+            ExtractedPosition(
+                symbol="NVDA",
+                qty=Decimal("2"),
+                avg_entry_price=Decimal("250"),
+                current_price=Decimal("300"),
+                market_value=Decimal("600"),
+                weight_pct=Decimal("60.00"),
+            ),
+        ),
+    )
+
+
+class FakeExtractor:
+    def __init__(self, extraction: object = None, error: Exception | None = None) -> None:
+        self.extraction = extraction
+        self.error = error
+        self.seen_paths: list[Path] = []
+
+    def extract(self, images):  # type: ignore[no-untyped-def]
+        self.seen_paths.extend(images)
+        if self.error is not None:
+            raise self.error
+        return self.extraction
+
+
+def image_msg(message_id: str = "om_img") -> BotMessage:
+    return msg(
+        message_id=message_id,
+        message_type="image",
+        content={"image_key": "img_v3_key"},
+    )
+
+
+def test_validated_screenshot_is_applied_automatically(tmp_path: Path) -> None:
+    extractor = FakeExtractor(portfolio_extraction())
+    service, out, ledger = make_service(tmp_path, extractor=extractor)
+    service.handle(image_msg())
+
+    assert out.downloads == [("om_img", "img_v3_key")]
+    assert "解析中" in out.texts[0][1]
+    account = ledger.latest_observed_account()
+    assert account is not None and account["equity"] == "1000"
+    receipt = out.texts[-1][1]
+    assert "NVDA" in receipt and "1000" in receipt
+    assert extractor.seen_paths and not extractor.seen_paths[0].exists()  # 临时文件已删
+
+
+def test_partial_screenshot_needs_confirmation(tmp_path: Path) -> None:
+    extractor = FakeExtractor(portfolio_extraction(reported=2))  # 数量不一致 → PARTIAL
+    service, out, ledger = make_service(tmp_path, extractor=extractor)
+    service.handle(image_msg())
+
+    assert ledger.latest_observed_account() is None  # 未应用
+    receipt = out.texts[-1][1]
+    assert "POSITION_COUNT_MISMATCH" in receipt and "确认导入" in receipt
+
+    service.handle(msg(message_id="om_confirm", content={"text": "确认导入"}))
+    assert ledger.latest_observed_account() is not None
+    assert "已应用" in out.texts[-1][1]
+
+    service.handle(msg(message_id="om_confirm2", content={"text": "确认导入"}))
+    assert "没有待确认" in out.texts[-1][1]  # 一次性消费
+
+
+def test_partial_confirmation_expires(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    times = [NOW]
+    ledger = SignalLedger(tmp_path / "signals.db")
+    settings = make_test_settings(
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+    )
+    out = FakeTransport()
+    service = FeishuBotService(
+        ledger,
+        settings,
+        out,
+        extractor=FakeExtractor(portfolio_extraction(reported=2)),
+        clock=lambda: times[-1],
+    )
+    service.handle(image_msg())
+    times.append(NOW + timedelta(minutes=16))  # 超过 15 分钟窗口
+    service.handle(msg(message_id="om_late", content={"text": "确认导入"}))
+    assert "过期" in out.texts[-1][1]
+    assert ledger.latest_observed_account() is None
+
+
+def test_rejected_screenshot_is_never_applied(tmp_path: Path) -> None:
+    extraction = portfolio_extraction(equity="5000")  # 对账不平 → REJECTED
+    extractor = FakeExtractor(extraction)
+    service, out, ledger = make_service(tmp_path, extractor=extractor)
+    service.handle(image_msg())
+    assert ledger.latest_observed_account() is None
+    assert "拒绝" in out.texts[-1][1]
+
+    service.handle(msg(message_id="om_c", content={"text": "确认导入"}))
+    assert "没有待确认" in out.texts[-1][1]  # REJECTED 不进入待确认
+
+
+def test_extraction_failure_reports_and_leaves_no_state(tmp_path: Path) -> None:
+    extractor = FakeExtractor(error=RuntimeError("codex down"))
+    service, out, ledger = make_service(tmp_path, extractor=extractor)
+    service.handle(image_msg())
+    assert "解析失败" in out.texts[-1][1]
+    assert ledger.latest_observed_account() is None
+
+
 def test_service_never_raises_and_reports_failure(tmp_path: Path) -> None:
     class ExplodingLedger:
         def try_mark_feishu_message(self, message_id: str, *, now: datetime) -> bool:
