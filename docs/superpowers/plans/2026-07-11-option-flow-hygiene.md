@@ -18,18 +18,18 @@
 
 ### Task 1: calendar.session_close_utc
 
-- [ ] RED: 正常日 16:00 ET、2026-11-27 半日市 13:00 ET、周末 None
-- [ ] 实现（lru_cache per year，取 schedule.market_close）
-- [ ] GREEN → commit `feat: expose session close times`
+- [x] RED: 正常日 16:00 ET、2026-11-27 半日市 13:00 ET、周末 None
+- [x] 实现（lru_cache per year，取 schedule.market_close）
+- [x] GREEN → commit `feat: expose session close times`
 
 ### Task 2: 调度门控
 
-- [ ] RED: 盘中任务收盘后跳过；close 任务 cron 含 13:20+16:20；正常日 13:20 不执行/16:20 执行、半日市反之（monkeypatch session_close_utc）
-- [ ] 实现：`option_flow` 体内 after-close skip；`option_flow_close` 双时点 + `close+15min~close+55min` 窗口校验
-- [ ] GREEN → commit `feat: respect early closes in option jobs`
+- [x] RED: 盘中任务收盘后跳过；close 任务 cron 含 13:20+16:20；正常日 13:20 不执行/16:20 执行、半日市反之（monkeypatch session_close_utc）
+- [x] 实现：`option_flow` 体内 after-close skip；`option_flow_close` 双时点 + `close+15min~close+55min` 窗口校验
+- [x] GREEN → commit `feat: respect early closes in option jobs`
 
 ### Task 3: 保留清理
 
-- [ ] RED: `prune_option_flow(before)` 级联删除 scans/rows/outbox 并返回删除数、边界保留；`feishu_processed_messages` 清理；config retention_days<30 拒绝
-- [ ] 实现：config `option_flow.retention_days=120`；ledger 方法；maintenance 调用并记日志
-- [ ] GREEN → 全量 pytest+mypy → commit `feat: prune option flow history`
+- [x] RED: `prune_option_flow(before)` 级联删除 scans/rows/outbox 并返回删除数、边界保留；`feishu_processed_messages` 清理；config retention_days<30 拒绝
+- [x] 实现：config `option_flow.retention_days=120`；ledger 方法；maintenance 调用并记日志
+- [x] GREEN → 全量 pytest+mypy → commit `feat: prune option flow history`

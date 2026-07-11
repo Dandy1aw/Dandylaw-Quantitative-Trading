@@ -18,12 +18,12 @@
 
 ### Task 1: 账户快照超龄提醒
 
-- [ ] RED: 行动卡在快照新鲜/超龄/从未导入三种情形下的提醒文案
-- [ ] 实现：execution_brief 组卡处按 observed_at 计算年龄追加 ⚠️ 行
-- [ ] GREEN → commit `feat: warn on stale screenshot accounts`
+- [x] RED: 行动卡在快照新鲜/超龄/从未导入三种情形下的提醒文案
+- [x] 实现：execution_brief 组卡处按 observed_at 计算年龄追加 ⚠️ 行
+- [x] GREEN → commit `feat: warn on stale screenshot accounts`
 
 ### Task 2: SELL 低胜率脚注
 
-- [ ] RED: signal_card SELL 有脚注/BUY 无；早报含 SELL 一条脚注、多 SELL 不重复、纯 BUY 无
-- [ ] 实现：cards.py 常量 `_SELL_RELIABILITY_NOTE` + signal_card/早报表格脚注
-- [ ] GREEN → 全量 pytest+mypy → commit `feat: label sell signals as low reliability`
+- [x] RED: signal_card SELL 有脚注/BUY 无；早报含 SELL 一条脚注、多 SELL 不重复、纯 BUY 无
+- [x] 实现：cards.py 常量 `_SELL_RELIABILITY_NOTE` + signal_card/早报表格脚注
+- [x] GREEN → 全量 pytest+mypy → commit `feat: label sell signals as low reliability`
