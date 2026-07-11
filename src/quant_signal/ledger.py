@@ -21,9 +21,10 @@ from quant_signal.notifier.base import Card, card_from_dict, card_to_dict
 from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
+    from quant_signal.options_flow import OptionFlowSnapshot
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -189,6 +190,48 @@ CREATE TABLE IF NOT EXISTS notification_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
     ON notification_outbox(status, next_retry_at);
+CREATE TABLE IF NOT EXISTS option_flow_scans (
+    slot TEXT PRIMARY KEY,
+    session_date TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    venue_coverage REAL NOT NULL,
+    scan_type TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_option_flow_scans_session
+    ON option_flow_scans(session_date, captured_at DESC);
+CREATE TABLE IF NOT EXISTS option_flow_rows (
+    slot TEXT NOT NULL,
+    side TEXT NOT NULL,
+    contract_symbol TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    volume INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY(slot, side, contract_symbol),
+    FOREIGN KEY(slot) REFERENCES option_flow_scans(slot)
+);
+CREATE INDEX IF NOT EXISTS idx_option_flow_rows_rank
+    ON option_flow_rows(slot, side, rank);
+CREATE TABLE IF NOT EXISTS option_flow_outbox (
+    event_key TEXT PRIMARY KEY,
+    slot TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_error TEXT,
+    sent_at TEXT,
+    UNIQUE(slot, alert_type),
+    FOREIGN KEY(slot) REFERENCES option_flow_scans(slot)
+);
+CREATE INDEX IF NOT EXISTS idx_option_flow_outbox_due
+    ON option_flow_outbox(status, next_retry_at, expires_at);
 """
 
 
@@ -842,3 +885,196 @@ class SignalLedger:
                 (plan_id, plan_version, event_type),
             ).fetchone()
         return row is not None
+
+    def save_option_flow_scan(
+        self,
+        snapshot: "OptionFlowSnapshot",
+        scan_type: str,
+        card: Card | None,
+        *,
+        now: datetime,
+        expires_at: datetime | None = None,
+    ) -> bool:
+        """Atomically persist one idempotent scan and its optional notification."""
+        from quant_signal.options_flow import snapshot_to_dict
+
+        if card is not None and expires_at is None:
+            raise ValueError("expires_at is required when queueing an option alert")
+        serialized = snapshot_to_dict(snapshot)
+        raw_rows = serialized.get("rows")
+        if not isinstance(raw_rows, list):
+            raise ValueError("option snapshot rows are invalid")
+        created = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO option_flow_scans"
+                    " (slot, session_date, captured_at, provider, venue_coverage,"
+                    " scan_type, row_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        snapshot.slot,
+                        snapshot.session_date.isoformat(),
+                        snapshot.captured_at.astimezone(timezone.utc).isoformat(),
+                        snapshot.provider,
+                        snapshot.venue_coverage,
+                        scan_type,
+                        len(snapshot.rows),
+                        created,
+                    ),
+                )
+                for raw in raw_rows:
+                    if not isinstance(raw, Mapping):
+                        raise ValueError("option snapshot row is invalid")
+                    self._con.execute(
+                        "INSERT INTO option_flow_rows"
+                        " (slot, side, contract_symbol, rank, volume, payload_json)"
+                        " VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            snapshot.slot,
+                            str(raw["side"]),
+                            str(raw["contract_symbol"]),
+                            int(raw["rank"]),
+                            int(raw["volume"]),
+                            json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                        ),
+                    )
+                if card is not None:
+                    assert expires_at is not None
+                    event_key = f"option-flow:{snapshot.slot}:{scan_type}"
+                    payload = json.dumps(
+                        card_to_dict(card), ensure_ascii=False, sort_keys=True
+                    )
+                    self._con.execute(
+                        "INSERT INTO option_flow_outbox"
+                        " (event_key, slot, session_date, alert_type, status, payload_json,"
+                        " created_at, attempts, next_retry_at, expires_at)"
+                        " VALUES (?, ?, ?, ?, 'PENDING', ?, ?, 0, ?, ?)",
+                        (
+                            event_key,
+                            snapshot.slot,
+                            snapshot.session_date.isoformat(),
+                            scan_type,
+                            payload,
+                            created,
+                            created,
+                            expires_at.astimezone(timezone.utc).isoformat(),
+                        ),
+                    )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def latest_option_flow_snapshot(
+        self, session: date | None = None
+    ) -> "OptionFlowSnapshot | None":
+        from quant_signal.options_flow import snapshot_from_dict
+
+        query = "SELECT * FROM option_flow_scans"
+        params: tuple[object, ...] = ()
+        if session is not None:
+            query += " WHERE session_date = ?"
+            params = (session.isoformat(),)
+        query += " ORDER BY captured_at DESC, slot DESC LIMIT 1"
+        with self._lock:
+            header = self._con.execute(query, params).fetchone()
+            if header is None:
+                return None
+            rows = self._con.execute(
+                "SELECT payload_json FROM option_flow_rows WHERE slot = ?"
+                " ORDER BY CASE side WHEN 'call' THEN 0 ELSE 1 END, rank, contract_symbol",
+                (header["slot"],),
+            ).fetchall()
+        payload = {
+            "slot": str(header["slot"]),
+            "captured_at": str(header["captured_at"]),
+            "provider": str(header["provider"]),
+            "venue_coverage": float(header["venue_coverage"]),
+            "rows": [json.loads(str(row["payload_json"])) for row in rows],
+        }
+        return snapshot_from_dict(payload)
+
+    def option_flow_alert_count(self, session: date) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT count(*) AS n FROM option_flow_outbox"
+                " WHERE session_date = ? AND status IN ('PENDING', 'SENT')",
+                (session.isoformat(),),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def last_option_flow_alert_at(self, session: date) -> datetime | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT max(created_at) AS created_at FROM option_flow_outbox"
+                " WHERE session_date = ? AND status IN ('PENDING', 'SENT')",
+                (session.isoformat(),),
+            ).fetchone()
+        value = row["created_at"] if row is not None else None
+        return datetime.fromisoformat(str(value)) if value is not None else None
+
+    def due_option_flow_alerts(self, now: datetime) -> list[dict[str, object]]:
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            self._con.execute(
+                "UPDATE option_flow_outbox SET status = 'EXPIRED',"
+                " last_error = 'STALE_OPTION_FLOW_ALERT'"
+                " WHERE status = 'PENDING' AND expires_at < ?",
+                (timestamp,),
+            )
+            rows = self._con.execute(
+                "SELECT * FROM option_flow_outbox"
+                " WHERE status = 'PENDING' AND next_retry_at <= ? AND expires_at >= ?"
+                " ORDER BY created_at, event_key",
+                (timestamp, timestamp),
+            ).fetchall()
+            self._con.commit()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            item["card"] = card_from_dict(json.loads(str(item.pop("payload_json"))))
+            output.append(item)
+        return output
+
+    def mark_option_flow_alert_failed(
+        self,
+        event_key: str,
+        error: str,
+        *,
+        now: datetime,
+        retry_at: datetime,
+    ) -> None:
+        del now
+        with self._lock:
+            self._con.execute(
+                "UPDATE option_flow_outbox SET attempts = attempts + 1,"
+                " last_error = ?, next_retry_at = ?"
+                " WHERE event_key = ? AND status = 'PENDING'",
+                (
+                    error[:1000],
+                    retry_at.astimezone(timezone.utc).isoformat(),
+                    event_key,
+                ),
+            )
+            self._con.commit()
+
+    def mark_option_flow_alert_sent(self, event_key: str, *, now: datetime) -> None:
+        with self._lock:
+            self._con.execute(
+                "UPDATE option_flow_outbox SET status = 'SENT', sent_at = ?,"
+                " last_error = NULL WHERE event_key = ? AND status = 'PENDING'",
+                (now.astimezone(timezone.utc).isoformat(), event_key),
+            )
+            self._con.commit()
+
+    def option_flow_alert_status(self, slot: str, alert_type: str) -> str | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT status FROM option_flow_outbox WHERE slot = ? AND alert_type = ?",
+                (slot, alert_type),
+            ).fetchone()
+        return str(row["status"]) if row is not None else None

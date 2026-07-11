@@ -17,6 +17,11 @@ from quant_signal.account import (
 from quant_signal.execution import ExecutionPlan, PlanState
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind, CardSection
+from quant_signal.options_flow import (
+    OptionContractVolume,
+    OptionFlowSnapshot,
+    scan_slot,
+)
 from quant_signal.strategies.base import Direction, Signal, dedup_key
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -41,6 +46,31 @@ def sig(
 @pytest.fixture
 def ledger(tmp_path: Path) -> SignalLedger:
     return SignalLedger(tmp_path / "signals.db")
+
+
+def option_snapshot(at: datetime = NOW) -> OptionFlowSnapshot:
+    row = OptionContractVolume(
+        contract_symbol="AAPL260717C00300000",
+        underlying="AAPL",
+        side="call",
+        expiration=date(2026, 7, 17),
+        strike=Decimal("300"),
+        volume=10_000,
+        rank=1,
+        venues=("cone", "opt"),
+        captured_at=at,
+    )
+    return OptionFlowSnapshot(
+        slot=scan_slot(at),
+        captured_at=at,
+        provider="cboe-four-venues",
+        venue_coverage=1.0,
+        rows=(row,),
+    )
+
+
+def option_card() -> Card:
+    return Card(CardKind.REPORT, "美股期权热度 · Cboe四市场", "CALL Top10")
 
 
 def test_insert_and_query_day(ledger: SignalLedger) -> None:
@@ -513,3 +543,83 @@ def test_plan_event_outbox_retries_until_delivery(ledger: SignalLedger) -> None:
     ledger.mark_plan_event_sent(event_key, now=NOW + timedelta(minutes=1))
     assert ledger.event_was_delivered("p1", 1, "ACTIONABLE") is True
     assert ledger.due_plan_events(NOW + timedelta(minutes=2)) == []
+
+
+def test_option_scan_and_card_are_atomic_idempotent_and_reconstructable(
+    ledger: SignalLedger,
+) -> None:
+    snap = option_snapshot()
+    expires = NOW + timedelta(minutes=45)
+
+    assert ledger.save_option_flow_scan(
+        snap, "baseline", option_card(), now=NOW, expires_at=expires
+    )
+    assert not ledger.save_option_flow_scan(
+        snap, "baseline", option_card(), now=NOW, expires_at=expires
+    )
+
+    assert ledger.latest_option_flow_snapshot(snap.session_date) == snap
+    due = ledger.due_option_flow_alerts(NOW)
+    assert len(due) == 1
+    assert due[0]["card"] == option_card()
+    assert ledger.option_flow_alert_count(snap.session_date) == 1
+
+
+def test_quiet_option_scan_is_saved_without_outbox(ledger: SignalLedger) -> None:
+    snap = option_snapshot()
+    assert ledger.save_option_flow_scan(snap, "quiet", None, now=NOW)
+    assert ledger.latest_option_flow_snapshot(snap.session_date) == snap
+    assert ledger.due_option_flow_alerts(NOW) == []
+
+
+def test_expired_option_alert_is_cancelled_not_delivered(ledger: SignalLedger) -> None:
+    snap = option_snapshot()
+    ledger.save_option_flow_scan(
+        snap,
+        "change",
+        option_card(),
+        now=NOW,
+        expires_at=NOW,
+    )
+
+    assert ledger.due_option_flow_alerts(NOW + timedelta(seconds=1)) == []
+    assert ledger.option_flow_alert_status(snap.slot, "change") == "EXPIRED"
+
+
+def test_option_outbox_retries_then_marks_sent(ledger: SignalLedger) -> None:
+    snap = option_snapshot()
+    ledger.save_option_flow_scan(
+        snap,
+        "change",
+        option_card(),
+        now=NOW,
+        expires_at=NOW + timedelta(minutes=45),
+    )
+    event = ledger.due_option_flow_alerts(NOW)[0]
+    ledger.mark_option_flow_alert_failed(
+        str(event["event_key"]),
+        "temporary",
+        now=NOW,
+        retry_at=NOW + timedelta(minutes=5),
+    )
+    assert ledger.due_option_flow_alerts(NOW + timedelta(minutes=4)) == []
+    retry = ledger.due_option_flow_alerts(NOW + timedelta(minutes=5))[0]
+    ledger.mark_option_flow_alert_sent(
+        str(retry["event_key"]), now=NOW + timedelta(minutes=5)
+    )
+    assert ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) == []
+    assert ledger.option_flow_alert_status(snap.slot, "change") == "SENT"
+    assert ledger.last_option_flow_alert_at(snap.session_date) == NOW
+
+
+def test_account_change_does_not_cancel_option_outbox(ledger: SignalLedger) -> None:
+    snap = option_snapshot()
+    ledger.save_option_flow_scan(
+        snap,
+        "change",
+        option_card(),
+        now=NOW,
+        expires_at=NOW + timedelta(minutes=45),
+    )
+    ledger.invalidate_active_plans("ACCOUNT_CHANGED", now=NOW)
+    assert len(ledger.due_option_flow_alerts(NOW)) == 1
