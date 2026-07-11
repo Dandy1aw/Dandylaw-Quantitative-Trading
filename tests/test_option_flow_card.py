@@ -96,6 +96,26 @@ def test_change_card_renders_rank_delta_turnover_and_premium() -> None:
     assert "+1,000/15m" in card.body_md
 
 
+def test_first_seen_contract_renders_indeterminate_delta() -> None:
+    current = snapshot()
+    first = current.rows[0]
+    change = OptionFlowChange(
+        contract=first,
+        previous_rank=None,
+        volume_delta=None,
+        rank_jump=0,
+        flags=("NEW_TOP10",),
+        score=55,
+    )
+    previous = replace(current, rows=current.rows[1:])
+
+    card = option_flow_card(current, (change,), "change", NOW, previous=previous)
+
+    assert "首次可见" in card.body_md
+    assert f"+{first.volume:,}/15m" not in card.body_md
+    assert "基线" not in card.body_md
+
+
 def test_card_marks_degraded_enrichment_without_guessing() -> None:
     card = option_flow_card(
         snapshot(), (), "close", NOW, enrichment_available=False

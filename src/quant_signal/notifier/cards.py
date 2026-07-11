@@ -81,10 +81,15 @@ def option_flow_card(
                     context.append(f"估算权利金 {money(premium)}")
             suffix = f"｜{'｜'.join(context)}" if context else ""
             marker = "C" if item.side == "call" else "P"
+            delta_label = (
+                f"+{change.volume_delta:,}/15m"
+                if change.volume_delta is not None
+                else "首次可见"
+            )
             focus_lines.append(
                 f"{item.underlying} {item.expiration:%m/%d} {item.strike:g}{marker}｜"
                 f"{labels}｜{prior_rank}→#{item.rank}｜"
-                f"+{change.volume_delta:,}/15m｜分数 {change.score}{suffix}"
+                f"{delta_label}｜分数 {change.score}{suffix}"
             )
     else:
         focus_lines.append("暂无可比较的实质变化；保留原始Top10作为市场温度。")
@@ -103,7 +108,7 @@ def option_flow_card(
         for item in top_by_side(snapshot, side, 10):  # type: ignore[arg-type]
             old = prior_by_symbol.get(item.contract_symbol)
             delta = max(item.volume - old.volume, 0) if old is not None else None
-            delta_text = f"+{delta:,}/15m" if delta is not None else "基线"
+            delta_text = f"+{delta:,}/15m" if delta is not None else "首次可见"
             dte = (item.expiration - snapshot.session_date).days
             dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
             lines.append(

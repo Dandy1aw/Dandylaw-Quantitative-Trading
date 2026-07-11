@@ -33,6 +33,7 @@ from quant_signal.pipelines.intraday import (
 from quant_signal.pipelines.dataqa import run as run_dataqa_pipeline
 from quant_signal.pipelines.market_scan import run as run_market_scan_pipeline
 from quant_signal.pipelines.negative_overreaction import run as run_negative_overreaction_pipeline
+from quant_signal.pipelines.option_flow import deliver as deliver_option_flow_alerts
 from quant_signal.pipelines.option_flow import run as run_option_flow_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
@@ -355,3 +356,6 @@ class Engine:
 
     def run_option_flow(self, now: datetime, *, force_summary: bool = False) -> None:
         run_option_flow_pipeline(self, now, force_summary=force_summary)
+
+    def run_option_flow_delivery(self, now: datetime) -> None:
+        deliver_option_flow_alerts(self, now)

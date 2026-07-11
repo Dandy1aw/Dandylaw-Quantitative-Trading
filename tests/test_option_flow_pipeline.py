@@ -160,6 +160,22 @@ def test_failed_send_is_retried_from_option_outbox(tmp_path: Path) -> None:
     assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=15)) == []
 
 
+def test_delivery_only_run_drains_outbox_without_fetching(tmp_path: Path) -> None:
+    # 收盘卡 16:20 发送失败后，傍晚的 drain 任务只重试 outbox，不再抓取数据。
+    notifier = Notifier([False])
+    source = OptionSource()
+    engine, _ = make_engine(tmp_path, option_source=source, notifier=notifier)
+    engine.run_option_flow(NOW)
+    fetches = source.calls
+    assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) != []
+
+    engine.run_option_flow_delivery(NOW + timedelta(minutes=6))
+
+    assert source.calls == fetches
+    assert len(notifier.cards) == 2
+    assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) == []
+
+
 def test_enrichment_failure_degrades_card_but_source_failure_reaches_health(
     tmp_path: Path,
 ) -> None:

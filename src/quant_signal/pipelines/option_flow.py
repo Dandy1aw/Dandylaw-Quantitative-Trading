@@ -26,8 +26,21 @@ class OptionFlowDataQualityError(RuntimeError):
     """The provider response is incomplete and must not produce an alert."""
 
 
+def deliver(engine: "Engine", now: datetime) -> None:
+    """Retry-only drain for evening jobs: no provider fetch, no new scans."""
+    if now.tzinfo is None:
+        raise ValueError("option flow delivery time must be timezone-aware")
+    if not engine.settings.option_flow.enabled:
+        return
+    _deliver_option_alerts(engine, now)
+
+
 def _deliver_option_alerts(engine: "Engine", now: datetime) -> None:
-    """Drain only the dedicated option outbox; failed sends remain retryable."""
+    """Drain only the dedicated option outbox; failed sends remain retryable.
+
+    at-least-once 语义：send 成功但 mark_sent 前崩溃会在下轮重发一次，
+    有 expires_at 兜底，属于有意取舍，勿改成 at-most-once。
+    """
     for event in engine.ledger.due_option_flow_alerts(now):
         event_key = str(event["event_key"])
         card = event.get("card")

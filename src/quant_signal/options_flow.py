@@ -106,7 +106,8 @@ class OptionFlowPolicy:
 class OptionFlowChange:
     contract: OptionContractVolume
     previous_rank: int | None
-    volume_delta: int
+    # None = 上一轮候选中不存在，15 分钟增量不可知（不等于全天累计量）
+    volume_delta: int | None
     rank_jump: int
     flags: tuple[str, ...]
     score: int
@@ -270,14 +271,14 @@ def detect_material_changes(
         old_rank = old.rank if old is not None else None
         new_top = old is None or old.rank > policy.top_n
         jump = max((old.rank - item.rank) if old is not None else 0, 0)
-        delta = max(item.volume - (old.volume if old is not None else 0), 0)
+        delta = max(item.volume - old.volume, 0) if old is not None else None
         threshold = (
             policy.zero_dte_surge_volume
             if item.expiration == session or item.underlying in policy.etf_roots
             else policy.surge_volume
         )
         rank_jump = jump >= policy.rank_jump
-        surged = delta >= threshold
+        surged = delta is not None and delta >= threshold
         ratio = (
             item.enrichment.volume_oi_ratio(item.volume)
             if item.enrichment is not None
@@ -298,7 +299,7 @@ def detect_material_changes(
         score = round(
             30 * int(new_top)
             + min(25, 5 * jump)
-            + min(35.0, 35.0 * delta / threshold)
+            + (min(35.0, 35.0 * delta / threshold) if delta is not None else 0.0)
             + 10 * int(turnover)
         )
         if score < 50:
@@ -317,7 +318,7 @@ def detect_material_changes(
     changes.sort(
         key=lambda change: (
             -change.score,
-            -change.volume_delta,
+            -(change.volume_delta or 0),
             change.contract.contract_symbol,
         )
     )

@@ -389,6 +389,13 @@ def build_scheduler(
                 datetime.now(timezone.utc), force_summary=True
             )
 
+        def option_flow_drain() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="option_flow_drain")
+                return
+            engine.run_option_flow_delivery(datetime.now(timezone.utc))
+
         # 累计成交量在开盘半小时后更有解释力；每15分钟扫描，避免普通噪音刷屏。
         sched.add_job(
             runtime.wrap("option_flow", option_flow),
@@ -408,6 +415,16 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=1800,
+        )
+        # 16:20 发送失败的收盘卡在 12 小时过期窗口内需要真实重试机会：
+        # 傍晚每小时只排空 outbox，不再抓取数据。
+        sched.add_job(
+            runtime.wrap("option_flow_drain", option_flow_drain),
+            CronTrigger(hour="16-21", minute=35, timezone=ET),
+            id="option_flow_drain",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
         )
     sched.add_job(
         enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"

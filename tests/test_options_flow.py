@@ -180,6 +180,21 @@ def test_zero_dte_and_etf_use_higher_surge_threshold() -> None:
     assert changes[0].flags == ("RANK_JUMP", "VOLUME_SURGE")
 
 
+def test_unseen_contract_delta_is_indeterminate_not_a_surge() -> None:
+    # 上一轮 50 名候选里不存在的合约，其全天累计量不可当作 15 分钟增量：
+    # 不得触发 VOLUME_SURGE，NEW_TOP10 单独(30分)不足以出卡。
+    prior = contract(
+        "AAPL260717C00300000", underlying="AAPL", strike="300", volume=9_000, rank=1
+    )
+    unseen = contract(volume=250_000, rank=2)
+    changes = detect_material_changes(
+        snapshot(prior),
+        snapshot(replace(prior, volume=9_100), unseen),
+        OptionFlowPolicy(),
+    )
+    assert changes == ()
+
+
 def test_high_turnover_cannot_trigger_without_rank_or_volume_change() -> None:
     enrichment = OptionEnrichment(open_interest=100, open_interest_date=SESSION)
     prior = contract(volume=10_000, rank=1, enrichment=enrichment)
