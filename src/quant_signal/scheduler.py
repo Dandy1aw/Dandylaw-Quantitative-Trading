@@ -13,7 +13,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from quant_signal.calendar import is_trading_day, previous_trading_day
+from quant_signal.calendar import (
+    is_trading_day,
+    previous_trading_day,
+    session_close_utc,
+)
 
 log = structlog.get_logger()
 ET = ZoneInfo("America/New_York")
@@ -397,12 +401,24 @@ def build_scheduler(
             if not is_trading_day(now_et.date()):
                 log.info("skip.non_trading_day", job="option_flow")
                 return
+            close_utc = session_close_utc(now_et.date())
+            if close_utc is not None and now_et > close_utc:
+                log.info("skip.after_close", job="option_flow")
+                return
             engine.run_option_flow(datetime.now(timezone.utc))
 
         def option_flow_close() -> None:
             now_et = _now_et()
             if not is_trading_day(now_et.date()):
                 log.info("skip.non_trading_day", job="option_flow_close")
+                return
+            close_utc = session_close_utc(now_et.date())
+            if close_utc is None or not (
+                close_utc + timedelta(minutes=15)
+                <= now_et
+                <= close_utc + timedelta(minutes=55)
+            ):
+                log.info("skip.outside_close_window", job="option_flow_close")
                 return
             engine.run_option_flow(
                 datetime.now(timezone.utc), force_summary=True
@@ -429,7 +445,7 @@ def build_scheduler(
         # 收盘后单独保留一个名额，输出当日最终可见榜单。
         sched.add_job(
             runtime.wrap("option_flow_close", option_flow_close),
-            CronTrigger(hour=16, minute=20, timezone=ET),
+            CronTrigger(hour="13,16", minute=20, timezone=ET),
             id="option_flow_close",
             max_instances=1,
             coalesce=True,

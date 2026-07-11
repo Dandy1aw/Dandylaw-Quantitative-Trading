@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import threading
 import time
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -29,6 +30,32 @@ class FakeNotifier:
     def send(self, card: object) -> bool:
         self.cards.append(card)
         return self.success
+
+
+class _OptionFlowEngine:
+    def __init__(self) -> None:
+        from conftest import make_test_settings
+        from quant_signal.config import (
+            ExecutionPlanSettings,
+            NotifySettings,
+            OptionFlowSettings,
+        )
+
+        self.settings = make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            notify=NotifySettings(action_card_only=True),
+            option_flow=OptionFlowSettings(enabled=True),
+        )
+        self.calls: list[bool] = []
+        self.drains = 0
+
+    def run_option_flow(
+        self, now: datetime, *, force_summary: bool = False
+    ) -> None:
+        self.calls.append(force_summary)
+
+    def run_option_flow_delivery(self, now: datetime) -> None:
+        self.drains += 1
 
 
 def test_scheduler_registers_all_jobs() -> None:
@@ -101,7 +128,7 @@ def test_option_flow_jobs_registered_only_when_enabled() -> None:
     assert intraday.misfire_grace_time == 600
 
     closing = jobs["option_flow_close"]
-    assert "hour='16'" in str(closing.trigger)
+    assert "hour='13,16'" in str(closing.trigger)
     assert "minute='20'" in str(closing.trigger)
     assert str(closing.trigger.timezone) == "America/New_York"
     assert closing.max_instances == 1
@@ -120,32 +147,13 @@ def test_option_flow_jobs_registered_only_when_enabled() -> None:
 def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from conftest import make_test_settings
-    from quant_signal.config import (
-        ExecutionPlanSettings,
-        NotifySettings,
-        OptionFlowSettings,
-    )
+    et = ZoneInfo("America/New_York")
+    now = {"value": datetime(2026, 7, 10, 15, 45, tzinfo=et)}
+    close = datetime(2026, 7, 10, 16, 0, tzinfo=et).astimezone(timezone.utc)
+    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now["value"])
+    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
 
-    class Engine:
-        def __init__(self) -> None:
-            self.settings = make_test_settings(
-                execution_plan=ExecutionPlanSettings(enabled=False),
-                notify=NotifySettings(action_card_only=True),
-                option_flow=OptionFlowSettings(enabled=True),
-            )
-            self.calls: list[bool] = []
-            self.drains = 0
-
-        def run_option_flow(
-            self, now: datetime, *, force_summary: bool = False
-        ) -> None:
-            self.calls.append(force_summary)
-
-        def run_option_flow_delivery(self, now: datetime) -> None:
-            self.drains += 1
-
-    engine = Engine()
+    engine = _OptionFlowEngine()
     sched = build_scheduler(
         engine=engine, ledger=None, store=None, notifier=FakeNotifier()
     )
@@ -159,10 +167,120 @@ def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
 
     monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
     jobs["option_flow"].func()
+    now["value"] = datetime(2026, 7, 10, 16, 20, tzinfo=et)
     jobs["option_flow_close"].func()
     jobs["option_flow_drain"].func()
     assert engine.calls == [False, True]
     assert engine.drains == 1
+
+
+@pytest.mark.parametrize(
+    ("now_et", "should_run"),
+    [
+        (datetime(2026, 7, 10, 13, 0), True),
+        (datetime(2026, 7, 10, 13, 0, 1), False),
+    ],
+    ids=["at-close", "after-close"],
+)
+def test_option_flow_skips_only_after_session_close(
+    monkeypatch: pytest.MonkeyPatch,
+    now_et: datetime,
+    should_run: bool,
+) -> None:
+    et = ZoneInfo("America/New_York")
+    now_et = now_et.replace(tzinfo=et)
+    close = datetime(2026, 7, 10, 13, 0, tzinfo=et).astimezone(timezone.utc)
+    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now_et)
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
+
+    engine = _OptionFlowEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    jobs["option_flow"].func()
+
+    assert engine.calls == ([False] if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("close_hour", "trigger_hour", "should_run"),
+    [
+        (16, 13, False),
+        (16, 16, True),
+        (13, 13, True),
+        (13, 16, False),
+    ],
+    ids=[
+        "full-day-1320-skips",
+        "full-day-1620-runs",
+        "half-day-1320-runs",
+        "half-day-1620-skips",
+    ],
+)
+def test_option_flow_close_matches_session_close(
+    monkeypatch: pytest.MonkeyPatch,
+    close_hour: int,
+    trigger_hour: int,
+    should_run: bool,
+) -> None:
+    et = ZoneInfo("America/New_York")
+    now_et = datetime(2026, 7, 10, trigger_hour, 20, tzinfo=et)
+    close = datetime(2026, 7, 10, close_hour, 0, tzinfo=et).astimezone(
+        timezone.utc
+    )
+    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now_et)
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
+
+    engine = _OptionFlowEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    jobs["option_flow_close"].func()
+
+    assert engine.calls == ([True] if should_run else [])
+
+
+@pytest.mark.parametrize(
+    ("offset", "should_run"),
+    [
+        (timedelta(minutes=15) - timedelta(seconds=1), False),
+        (timedelta(minutes=15), True),
+        (timedelta(minutes=55), True),
+        (timedelta(minutes=55) + timedelta(seconds=1), False),
+    ],
+    ids=["before-window", "lower-bound", "upper-bound", "after-window"],
+)
+def test_option_flow_close_uses_inclusive_post_close_window(
+    monkeypatch: pytest.MonkeyPatch,
+    offset: timedelta,
+    should_run: bool,
+) -> None:
+    close = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: close + offset)
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
+
+    engine = _OptionFlowEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    jobs["option_flow_close"].func()
+
+    assert engine.calls == ([True] if should_run else [])
 
 
 def test_build_scheduler_accepts_injected_runtime(
