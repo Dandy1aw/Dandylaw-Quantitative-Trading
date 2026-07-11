@@ -153,8 +153,8 @@ option_flow:
   display_sort_by_expiry: true      # 展示按到期日升序(近月优先)
 
 feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
-  enabled: false
-  allowed_open_ids: []            # 白名单为空时只回显 open_id，不执行任何操作
+  enabled: true
+  allowed_open_ids: [ou_3953033b90bfd9b808b9309c668bb77c]
   capital_limit: 6000
   max_financing_ratio: 0.20
   confirm_window_minutes: 15
