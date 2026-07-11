@@ -1,4 +1,4 @@
-# Options Flow Alerts Implementation Plan
+﻿# Options Flow Alerts Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -16,7 +16,7 @@
 - Create: `src/quant_signal/options_flow.py`
 - Create: `tests/test_options_flow.py`
 
-- [ ] **Step 1: Write failing tests for standard contract parsing and four-venue aggregation**
+- [x] **Step 1: Write failing tests for standard contract parsing and four-venue aggregation**
 
 ```python
 def test_aggregate_visible_venue_volume_and_build_occ_symbol() -> None:
@@ -39,12 +39,12 @@ def test_adjusted_and_expired_contracts_are_rejected() -> None:
     assert aggregate_and_rank(rows, top_n=10, discovery_limit=50, session=date(2026, 7, 10)) == ()
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run: `pytest tests/test_options_flow.py -q`  
 Expected: import failure because `quant_signal.options_flow` does not exist.
 
-- [ ] **Step 3: Implement immutable models and deterministic ranking**
+- [x] **Step 3: Implement immutable models and deterministic ranking**
 
 ```python
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ class OptionContractVolume:
 
 Implement `occ_symbol()`, `aggregate_and_rank()`, JSON serialization helpers, stable tie-breaking by volume descending then contract symbol, and `top_by_side()`.
 
-- [ ] **Step 4: Add RED tests for rank jump, volume surge, 0DTE threshold, and duplicate-slot identity**
+- [x] **Step 4: Add RED tests for rank jump, volume surge, 0DTE threshold, and duplicate-slot identity**
 
 ```python
 def test_detect_changes_requires_material_evidence() -> None:
@@ -91,11 +91,11 @@ def test_zero_dte_uses_higher_surge_threshold() -> None:
     assert detect_material_changes(previous, current, policy()) == ()
 ```
 
-- [ ] **Step 5: Implement `OptionFlowPolicy`, `OptionFlowChange`, `scan_slot()`, and `detect_material_changes()`**
+- [x] **Step 5: Implement `OptionFlowPolicy`, `OptionFlowChange`, `scan_slot()`, and `detect_material_changes()`**
 
 Use hard gates from the design: new Top10, rank jump >=3, ordinary delta >=10,000, 0DTE/ETF delta >=20,000; `HIGH_TURNOVER` never triggers alone. Cap focus to two contracts per underlying after score sorting.
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 Run: `pytest tests/test_options_flow.py -q`  
 Expected: PASS.
@@ -111,7 +111,7 @@ git commit -m "feat: model option flow rankings"
 - Create: `src/quant_signal/datafeed/cboe_options.py`
 - Create: `tests/test_cboe_options.py`
 
-- [ ] **Step 1: Write RED tests for venue parsing, category selection, retries, and fail-closed coverage**
+- [x] **Step 1: Write RED tests for venue parsing, category selection, retries, and fail-closed coverage**
 
 ```python
 def test_fetch_aggregates_all_required_venues() -> None:
@@ -132,16 +132,16 @@ def test_missing_venue_fails_closed() -> None:
         CboeOptionFlowSource(client=client, sleep=lambda _: None).fetch(NOW)
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_cboe_options.py -q`  
 Expected: module import failure.
 
-- [ ] **Step 3: Implement the provider**
+- [x] **Step 3: Implement the provider**
 
 Use one persistent `httpx.Client`, separate connect/read/write/pool timeouts, and venues `cone/ctwo/opt/exo`. Parse `equity` for `cone`, `all` elsewhere. Retry `ConnectTimeout`, `ReadTimeout`, `ConnectError`, `RemoteProtocolError`, 5xx and 429 (honor `Retry-After`); do not retry other 4xx. Reject malformed categories, fewer than ten valid rows per side, partial venue coverage, negative volume, or invalid dates/strikes.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_cboe_options.py tests/test_options_flow.py -q`  
 Expected: PASS.
@@ -157,7 +157,7 @@ git commit -m "feat: discover active options from Cboe venues"
 - Create: `src/quant_signal/datafeed/alpaca_options.py`
 - Create: `tests/test_alpaca_options.py`
 
-- [ ] **Step 1: Write RED tests for 100-symbol batching, nullable fields, OI dates, and no OPRA downgrade**
+- [x] **Step 1: Write RED tests for 100-symbol batching, nullable fields, OI dates, and no OPRA downgrade**
 
 ```python
 def test_enrich_joins_snapshot_and_contract_metadata() -> None:
@@ -177,16 +177,16 @@ def test_opra_403_is_not_silently_downgraded() -> None:
         AlpacaOptionEnricher("k", "s", feed="opra", client=client).enrich((contract(),), NOW)
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_alpaca_options.py -q`  
 Expected: module import failure.
 
-- [ ] **Step 3: Implement snapshot and metadata enrichment**
+- [x] **Step 3: Implement snapshot and metadata enrichment**
 
 Fetch `/v1beta1/options/snapshots` in batches of at most 100 and `/v2/options/contracts/{symbol}` from paper API only for metadata absent from the in-memory daily cache. Preserve missing trade, quote, Greeks, IV, OI, OI date, and multiplier as `None`; calculate premium and Volume/OI only in the domain model when required inputs are present. Use the same bounded TLS retry rules as Task 2.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_alpaca_options.py tests/test_options_flow.py -q`  
 Expected: PASS.
@@ -204,7 +204,7 @@ git commit -m "feat: enrich option flow with Alpaca indicative data"
 - Modify: `tests/test_config.py`
 - Modify: `tests/test_deploy.py`
 
-- [ ] **Step 1: Add RED configuration tests**
+- [x] **Step 1: Add RED configuration tests**
 
 ```python
 def test_production_options_flow_policy_is_explicit() -> None:
@@ -222,16 +222,16 @@ def test_options_flow_rejects_unsafe_policy(field: str, value: object) -> None:
         OptionFlowSettings(**{field: value})
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_config.py tests/test_deploy.py -q`  
 Expected: missing `OptionFlowSettings` / `option_flow`.
 
-- [ ] **Step 3: Implement `OptionFlowSettings` and YAML**
+- [x] **Step 3: Implement `OptionFlowSettings` and YAML**
 
 Add all fields from the design with Pydantic bounds; require exactly four unique supported venue codes when enabled and require `min_venue_coverage == 1.0` for production fail-closed behavior. Normalize excluded roots to uppercase. `Settings.option_flow` defaults disabled for isolated tests; production YAML explicitly enables it.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_config.py tests/test_deploy.py -q`  
 Expected: PASS.
@@ -247,7 +247,7 @@ git commit -m "feat: configure delayed options flow alerts"
 - Modify: `src/quant_signal/ledger.py`
 - Modify: `tests/test_ledger.py`
 
-- [ ] **Step 1: Write RED ledger tests**
+- [x] **Step 1: Write RED ledger tests**
 
 ```python
 def test_option_scan_and_card_are_saved_atomically_and_idempotently(ledger: SignalLedger) -> None:
@@ -268,16 +268,16 @@ def test_account_change_does_not_cancel_option_outbox(ledger: SignalLedger) -> N
     assert len(ledger.due_option_flow_alerts(NOW)) == 1
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_ledger.py -q`  
 Expected: missing option-flow ledger methods.
 
-- [ ] **Step 3: Add schema v5 and atomic methods**
+- [x] **Step 3: Add schema v5 and atomic methods**
 
 Create `option_flow_scans`, `option_flow_rows`, and `option_flow_outbox`. Implement one transaction for scan rows plus optional queued card, stable event key `option-flow:{slot}:{alert_type}`, latest same-session scan reconstruction, pending/sent daily count, last alert time, due/expire, mark failed with retry, and mark sent. Never change `invalidate_active_plans()` to touch the new table.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_ledger.py tests/test_backup.py -q`  
 Expected: PASS and schema version 5.
@@ -293,7 +293,7 @@ git commit -m "feat: persist option flow scans and alerts"
 - Modify: `src/quant_signal/notifier/cards.py`
 - Create: `tests/test_option_flow_card.py`
 
-- [ ] **Step 1: Write RED card tests**
+- [x] **Step 1: Write RED card tests**
 
 ```python
 def test_option_flow_card_has_two_top10_sections_without_tables() -> None:
@@ -306,16 +306,16 @@ def test_option_flow_card_has_two_top10_sections_without_tables() -> None:
     assert "Call成交不等于看涨" in card.body_md
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_option_flow_card.py -q`  
 Expected: missing `option_flow_card`.
 
-- [ ] **Step 3: Implement five-section compact card**
+- [x] **Step 3: Implement five-section compact card**
 
 Render data identity, at most five focus items, ten Call lines, ten Put lines, and interpretation/footer. Show delta/rank/DTE on ranking lines; show premium and Volume/OI only when present. Label Cboe visible-volume sum as a lower-bound approximation and Alpaca as Indicative. Keep body under 3,500 characters.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_option_flow_card.py tests/test_feishu.py -q`  
 Expected: PASS.
@@ -334,7 +334,7 @@ git commit -m "feat: render mobile option flow card"
 - Create: `tests/test_option_flow_pipeline.py`
 - Modify: `tests/test_engine.py`
 
-- [ ] **Step 1: Write RED pipeline tests for baseline, silence, material change, close, and retry**
+- [x] **Step 1: Write RED pipeline tests for baseline, silence, material change, close, and retry**
 
 ```python
 def test_first_scan_queues_and_sends_one_baseline(tmp_path: Path) -> None:
@@ -358,20 +358,20 @@ def test_failed_send_is_retried_from_option_outbox(tmp_path: Path) -> None:
     assert engine.ledger.due_option_flow_alerts(NOW + timedelta(minutes=15)) == []
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_option_flow_pipeline.py tests/test_engine.py -q`  
 Expected: missing pipeline/facade.
 
-- [ ] **Step 3: Implement pipeline**
+- [x] **Step 3: Implement pipeline**
 
 At each run: expire and retry due cards; fetch and validate all four venues; load prior same-day scan; optionally enrich only the 20 displayed contracts; choose `baseline`, `change`, `close`, or no-card using cooldown/daily limit; atomically save; deliver due cards and mark result. Source and parsing failures must re-raise to JobHealth. Enrichment failure logs a warning and degrades to Cboe-only with an explicit card label.
 
-- [ ] **Step 4: Wire Engine and main**
+- [x] **Step 4: Wire Engine and main**
 
 Add optional `option_flow_source` and `option_enricher` constructor parameters plus `run_option_flow(now, force_summary=False)`. In `main.py`, instantiate providers only when enabled; never print credentials.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 Run: `pytest tests/test_option_flow_pipeline.py tests/test_engine.py -q`  
 Expected: PASS.
@@ -387,7 +387,7 @@ git commit -m "feat: run durable option flow pipeline"
 - Modify: `src/quant_signal/scheduler.py`
 - Modify: `tests/test_scheduler.py`
 
-- [ ] **Step 1: Write RED scheduler tests**
+- [x] **Step 1: Write RED scheduler tests**
 
 ```python
 def test_options_jobs_are_registered_only_when_enabled() -> None:
@@ -400,16 +400,16 @@ def test_options_jobs_are_registered_only_when_enabled() -> None:
     assert "minute='20'" in str(jobs["option_flow_close"].trigger)
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `pytest tests/test_scheduler.py -q`  
 Expected: option jobs absent.
 
-- [ ] **Step 3: Implement trading-day-gated jobs**
+- [x] **Step 3: Implement trading-day-gated jobs**
 
 Register `runtime.wrap("option_flow", ...)` and `runtime.wrap("option_flow_close", ...)` only when enabled. Both use ET, `max_instances=1`, `coalesce=True`, and explicit misfire grace; close calls `force_summary=True`. Do not suppress them under `action_card_only`.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: `pytest tests/test_scheduler.py -q`  
 Expected: PASS.
@@ -425,7 +425,7 @@ git commit -m "feat: schedule option flow alerts"
 - Verify: `docs/superpowers/specs/2026-07-11-options-flow-alerts-design.md`
 - Verify: `docs/superpowers/plans/2026-07-11-options-flow-alerts.md`
 
-- [ ] **Step 1: Run focused and full verification**
+- [x] **Step 1: Run focused and full verification**
 
 ```powershell
 .\.venv\Scripts\pytest.exe tests\test_options_flow.py tests\test_cboe_options.py tests\test_alpaca_options.py tests\test_option_flow_card.py tests\test_option_flow_pipeline.py tests\test_ledger.py tests\test_scheduler.py -q
@@ -436,18 +436,18 @@ git diff --check
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Run a real read-only provider smoke test**
+- [x] **Step 2: Run a real read-only provider smoke test**
 
 Fetch four Cboe venues and enrich only the resulting top 20 using current Alpaca `indicative`. Assert four venues, ten valid calls, ten valid puts, no adjusted roots, and no OPRA fallback. Do not write the production DB and do not output credentials.
 
-- [ ] **Step 3: Run isolated SQLite/Feishu E2E**
+- [x] **Step 3: Run isolated SQLite/Feishu E2E**
 
 Use a temporary SQLite DB, prefix the one test card title with `[E2E TEST]`, verify source → rank → atomic outbox → send → `SENT`, and delete the temporary directory. Do not insert test rows into production.
 
-- [ ] **Step 4: Request independent code review and close Critical/Important findings**
+- [x] **Step 4: Request independent code review and close Critical/Important findings**
 
 Review data truthfulness, venue coverage, expiry/OCC parsing, retry behavior, outbox crash windows, stale-card expiry, mobile density, and existing account/execution isolation.
 
-- [ ] **Step 5: Merge, tag, restart, and verify production**
+- [x] **Step 5: Merge, tag, restart, and verify production**
 
 Create an annotated release tag, restart `quant-signal`, confirm both option jobs appear in scheduler startup logs, latest `.err.log` is empty, production account still has no AAPL and no pending plan outbox, and no option alert is sent outside a trading day.
