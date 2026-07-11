@@ -179,7 +179,6 @@ class FeishuBotService:
         self._runtime = runtime
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._started_at = self._clock()
-        self._pending_partial: "tuple[ValidatedPortfolioImport, datetime] | None" = None
         self._queue: "queue.Queue[BotMessage]" = queue.Queue()
 
     # ---- worker 入口 ----
@@ -474,7 +473,7 @@ class FeishuBotService:
             )
             return
         # PARTIAL：不自动应用，等待明确确认
-        self._pending_partial = (record, now)
+        self._ledger.save_pending_import(record, now)
         errors = "、".join(record.validation_errors)
         self._transport.send_text(
             message.chat_id,
@@ -488,12 +487,11 @@ class FeishuBotService:
 
         from quant_signal.portfolio_import import apply_validated_import
 
-        pending = self._pending_partial
+        pending = self._ledger.pop_pending_import()
         if pending is None:
             self._transport.send_text(chat_id, "当前没有待确认的导入。")
             return
         record, stored_at = pending
-        self._pending_partial = None
         window = timedelta(minutes=self._cfg.confirm_window_minutes)
         if now - stored_at > window:
             self._transport.send_text(

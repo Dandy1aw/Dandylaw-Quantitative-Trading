@@ -294,7 +294,9 @@ def test_validated_screenshot_is_applied_automatically(tmp_path: Path) -> None:
     assert extractor.seen_paths and not extractor.seen_paths[0].exists()  # 临时文件已删
 
 
-def test_partial_screenshot_needs_confirmation(tmp_path: Path) -> None:
+def test_partial_screenshot_confirmation_survives_service_rebuild(
+    tmp_path: Path,
+) -> None:
     extractor = FakeExtractor(portfolio_extraction(reported=2))  # 数量不一致 → PARTIAL
     service, out, ledger = make_service(tmp_path, extractor=extractor)
     service.handle(image_msg())
@@ -303,11 +305,26 @@ def test_partial_screenshot_needs_confirmation(tmp_path: Path) -> None:
     receipt = out.texts[-1][1]
     assert "POSITION_COUNT_MISMATCH" in receipt and "确认导入" in receipt
 
-    service.handle(msg(message_id="om_confirm", content={"text": "确认导入"}))
-    assert ledger.latest_observed_account() is not None
+    restarted_ledger = SignalLedger(tmp_path / "signals.db")
+    restarted_service = FeishuBotService(
+        restarted_ledger,
+        make_test_settings(
+            feishu_bot=FeishuBotSettings(
+                enabled=True, allowed_open_ids=["ou_owner"]
+            )
+        ),
+        out,
+        clock=lambda: NOW,
+    )
+    restarted_service.handle(
+        msg(message_id="om_confirm", content={"text": "确认导入"})
+    )
+    assert restarted_ledger.latest_observed_account() is not None
     assert "已应用" in out.texts[-1][1]
 
-    service.handle(msg(message_id="om_confirm2", content={"text": "确认导入"}))
+    restarted_service.handle(
+        msg(message_id="om_confirm2", content={"text": "确认导入"})
+    )
     assert "没有待确认" in out.texts[-1][1]  # 一次性消费
 
 
@@ -315,7 +332,8 @@ def test_partial_confirmation_expires(tmp_path: Path) -> None:
     from datetime import timedelta
 
     times = [NOW]
-    ledger = SignalLedger(tmp_path / "signals.db")
+    db_path = tmp_path / "signals.db"
+    ledger = SignalLedger(db_path)
     settings = make_test_settings(
         feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
     )
@@ -329,9 +347,19 @@ def test_partial_confirmation_expires(tmp_path: Path) -> None:
     )
     service.handle(image_msg())
     times.append(NOW + timedelta(minutes=16))  # 超过 15 分钟窗口
-    service.handle(msg(message_id="om_late", content={"text": "确认导入"}))
+
+    restarted_ledger = SignalLedger(db_path)
+    restarted_service = FeishuBotService(
+        restarted_ledger,
+        settings,
+        out,
+        clock=lambda: times[-1],
+    )
+    restarted_service.handle(
+        msg(message_id="om_late", content={"text": "确认导入"})
+    )
     assert "过期" in out.texts[-1][1]
-    assert ledger.latest_observed_account() is None
+    assert restarted_ledger.latest_observed_account() is None
 
 
 def test_rejected_screenshot_is_never_applied(tmp_path: Path) -> None:

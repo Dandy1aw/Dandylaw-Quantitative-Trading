@@ -421,7 +421,7 @@ def test_existing_database_upgrades_without_losing_signals(tmp_path: Path) -> No
     ledger = SignalLedger(db_path)
     assert [row["ticker"] for row in ledger.signals_on(NOW.date())] == ["SPY"]
     assert ledger.get_holdings("m") == ["SPY"]
-    assert ledger.schema_version() >= 2
+    assert ledger.schema_version() >= 6
     ledger.upsert_execution_plan(make_execution_plan())
     assert len(ledger.active_execution_plans()) == 1
 
@@ -610,6 +610,48 @@ def test_option_outbox_retries_then_marks_sent(ledger: SignalLedger) -> None:
     assert ledger.due_option_flow_alerts(NOW + timedelta(minutes=6)) == []
     assert ledger.option_flow_alert_status(snap.slot, "change") == "SENT"
     assert ledger.last_option_flow_alert_at(snap.session_date) == NOW
+
+
+def test_pending_import_round_trip_and_overwrite(ledger: SignalLedger) -> None:
+    from decimal import Decimal
+
+    from quant_signal.portfolio_import import (
+        ExtractedAccount,
+        ExtractedPosition,
+        PortfolioExtraction,
+        validate_extraction,
+    )
+
+    def record(symbol: str):  # type: ignore[no-untyped-def]
+        extraction = PortfolioExtraction(
+            account=ExtractedAccount(
+                equity=Decimal("1000"),
+                market_value=Decimal("600"),
+                cash=Decimal("400"),
+                buying_power=Decimal("400"),
+                reported_position_count=2,  # 数量不符 → PARTIAL
+            ),
+            positions=(
+                ExtractedPosition(symbol=symbol, market_value=Decimal("600")),
+            ),
+        )
+        return validate_extraction(
+            extraction,
+            image_sha256=f"sha-{symbol}",
+            uploaded_at=NOW,
+            capital_limit=Decimal("6000"),
+            max_financing_ratio=Decimal("0.20"),
+        )
+
+    assert ledger.pop_pending_import() is None
+    ledger.save_pending_import(record("NVDA"), now=NOW)
+    ledger.save_pending_import(record("TSLA"), now=NOW)  # 新的覆盖旧的
+    pending = ledger.pop_pending_import()
+    assert pending is not None
+    stored, stored_at = pending
+    assert stored.positions[0].symbol == "TSLA"
+    assert stored_at == NOW
+    assert ledger.pop_pending_import() is None  # 读取即删除
 
 
 def test_feishu_message_dedupe_is_first_writer_wins(ledger: SignalLedger) -> None:

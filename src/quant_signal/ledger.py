@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from quant_signal.options_flow import OptionFlowSnapshot
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -193,6 +193,11 @@ CREATE INDEX IF NOT EXISTS idx_notification_outbox_due
 CREATE TABLE IF NOT EXISTS feishu_processed_messages (
     message_id TEXT PRIMARY KEY,
     processed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feishu_pending_imports (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload_json TEXT NOT NULL,
+    stored_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS option_flow_scans (
     slot TEXT PRIMARY KEY,
@@ -587,6 +592,46 @@ class SignalLedger:
         with self._lock:
             rows = self._con.execute(query + " ORDER BY order_id", params).fetchall()
         return [dict(r) for r in rows]
+
+    def save_pending_import(
+        self, record: "ValidatedPortfolioImport", now: datetime
+    ) -> None:
+        payload_json = record.model_dump_json()
+        stored_at = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO feishu_pending_imports (id, payload_json, stored_at)"
+                " VALUES (1, ?, ?)"
+                " ON CONFLICT(id) DO UPDATE SET"
+                " payload_json = excluded.payload_json,"
+                " stored_at = excluded.stored_at",
+                (payload_json, stored_at),
+            )
+            self._con.commit()
+
+    def pop_pending_import(
+        self,
+    ) -> tuple["ValidatedPortfolioImport", datetime] | None:
+        from quant_signal.portfolio_import import ValidatedPortfolioImport
+
+        with self._lock:
+            try:
+                row = self._con.execute(
+                    "DELETE FROM feishu_pending_imports WHERE id = 1"
+                    " RETURNING payload_json, stored_at"
+                ).fetchone()
+                if row is None:
+                    self._con.commit()
+                    return None
+                record = ValidatedPortfolioImport.model_validate_json(
+                    str(row["payload_json"])
+                )
+                stored_at = datetime.fromisoformat(str(row["stored_at"]))
+                self._con.commit()
+                return record, stored_at
+            except Exception:
+                self._con.rollback()
+                raise
 
     def save_portfolio_import(self, record: "ValidatedPortfolioImport") -> bool:
         """Persist one idempotent screenshot result and atomically activate valid layers."""
