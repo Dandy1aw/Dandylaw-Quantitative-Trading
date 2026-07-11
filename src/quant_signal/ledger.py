@@ -22,9 +22,10 @@ from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
     from quant_signal.options_flow import OptionFlowSnapshot
+    from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -241,6 +242,19 @@ CREATE TABLE IF NOT EXISTS option_flow_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_option_flow_outbox_due
     ON option_flow_outbox(status, next_retry_at, expires_at);
+CREATE TABLE IF NOT EXISTS option_intel_daily (
+    session_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    spot TEXT NOT NULL,
+    atm_iv REAL,
+    realized_vol_20d REAL,
+    expected_move_pct REAL,
+    expected_move_expiry TEXT,
+    pc_volume_ratio REAL,
+    pc_oi_ratio REAL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY(session_date, symbol)
+);
 """
 
 
@@ -384,6 +398,57 @@ class SignalLedger:
                 [(strategy_id, t) for t in tickers],
             )
             self._con.commit()
+
+    def all_held_tickers(self) -> list[str]:
+        """全部策略的虚拟持仓并集（期权情报层的覆盖来源之一）。"""
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT DISTINCT ticker FROM holdings ORDER BY ticker"
+            ).fetchall()
+        return [r["ticker"] for r in rows]
+
+    def save_option_intel_daily(self, intel: OptionIntel, *, now: datetime) -> None:
+        """同 (session, symbol) 覆盖写入——任务重跑以最后一次为准。"""
+        with self._lock:
+            self._con.execute(
+                "INSERT OR REPLACE INTO option_intel_daily"
+                " (session_date, symbol, spot, atm_iv, realized_vol_20d,"
+                " expected_move_pct, expected_move_expiry, pc_volume_ratio,"
+                " pc_oi_ratio, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    intel.session.isoformat(),
+                    intel.symbol,
+                    str(intel.spot),
+                    intel.atm_iv,
+                    intel.realized_vol_20d,
+                    intel.expected_move_pct,
+                    intel.expected_move_expiry.isoformat()
+                    if intel.expected_move_expiry is not None
+                    else None,
+                    intel.pc_volume_ratio,
+                    intel.pc_oi_ratio,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+
+    def option_intel_history(self, symbol: str) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM option_intel_daily WHERE symbol = ?"
+                " ORDER BY session_date",
+                (symbol,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune_option_intel(self, before: datetime) -> int:
+        cutoff = before.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            cursor = self._con.execute(
+                "DELETE FROM option_intel_daily WHERE captured_at < ?", (cutoff,)
+            )
+            self._con.commit()
+        return cursor.rowcount
 
     def replace_scan_candidates(
         self,

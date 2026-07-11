@@ -193,6 +193,18 @@ class OptionFlowSettings(BaseModel):
         return self
 
 
+class OptionIntelSettings(BaseModel):
+    """持仓期权情报层（只观察，不推荐任何期权交易）。默认关闭。"""
+
+    enabled: bool = False
+    max_expiry_days: int = Field(default=60, ge=7, le=120)
+    min_expected_move_dte: int = Field(default=7, ge=1, le=30)
+    top_oi_strikes: int = Field(default=3, ge=1, le=5)
+    iv_rv_warn_ratio: float = Field(default=1.5, gt=1.0)
+    retention_days: int = Field(default=400, ge=90)
+    max_tickers: int = Field(default=12, ge=1, le=30)
+
+
 class LegacyPriceDeviationSettings(BaseModel):
     enabled: bool = False
 
@@ -245,6 +257,7 @@ class Settings(BaseModel):
     index_universe: IndexUniverseSettings = IndexUniverseSettings()
     execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
     option_flow: OptionFlowSettings = OptionFlowSettings()
+    option_intel: OptionIntelSettings = OptionIntelSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     feishu_bot: FeishuBotSettings = FeishuBotSettings()
     # 凭证来自 .env，不出现在 yaml
