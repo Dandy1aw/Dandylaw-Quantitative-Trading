@@ -1,3 +1,6 @@
+from decimal import Decimal
+from pathlib import Path
+
 from pydantic import ValidationError
 
 from quant_signal.config import (
@@ -228,6 +231,38 @@ def test_option_flow_requires_complete_unique_venues_when_enabled() -> None:
         OptionFlowSettings(enabled=True, venues=["cone", "ctwo", "opt"])
     with pytest.raises(ValidationError, match="venues"):
         OptionFlowSettings(enabled=True, venues=["cone", "cone", "opt", "exo"])
+
+
+def test_feishu_bot_settings_defaults_and_normalization() -> None:
+    from quant_signal.config import FeishuBotSettings
+
+    settings = FeishuBotSettings()
+    assert settings.enabled is False
+    assert settings.allowed_open_ids == []
+    assert settings.capital_limit == Decimal("6000")
+    assert settings.max_financing_ratio == Decimal("0.20")
+    assert settings.confirm_window_minutes == 15
+    assert settings.codex_timeout_seconds == 180
+
+    tuned = FeishuBotSettings(allowed_open_ids=[" ou_abc ", "", "ou_def"])
+    assert tuned.allowed_open_ids == ["ou_abc", "ou_def"]
+
+
+def test_feishu_bot_credentials_come_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "secret_test")
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text(
+        "data_source: yfinance\ndb_dir: data\ntickers:\n"
+        "  SPY: {asset_type: ETF, currency: USD}\nstrategies: {}\n",
+        encoding="utf-8",
+    )
+    settings = load_settings(cfg)
+    assert settings.feishu_app_id == "cli_test"
+    assert settings.feishu_app_secret == "secret_test"
+    assert settings.feishu_bot.enabled is False
 
 
 def test_option_flow_display_switches_default_on() -> None:

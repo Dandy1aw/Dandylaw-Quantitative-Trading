@@ -152,5 +152,13 @@ option_flow:
   display_dedupe_underlying: true   # 每侧同标的只显示最高量合约
   display_sort_by_expiry: true      # 展示按到期日升序(近月优先)
 
+feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
+  enabled: false
+  allowed_open_ids: []            # 白名单为空时只回显 open_id，不执行任何操作
+  capital_limit: 6000
+  max_financing_ratio: 0.20
+  confirm_window_minutes: 15
+  codex_timeout_seconds: 180
+
 legacy_price_deviation:
   enabled: false

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
 
@@ -203,6 +204,24 @@ class TickerSettings(BaseModel):
     leverage: float = 1.0
 
 
+class FeishuBotSettings(BaseModel):
+    """自建应用机器人交互（长连接接收单聊消息）。默认关闭。"""
+
+    enabled: bool = False
+    allowed_open_ids: list[str] = Field(default_factory=list)
+    capital_limit: Decimal = Field(default=Decimal("6000"), gt=0)
+    max_financing_ratio: Decimal = Field(default=Decimal("0.20"), ge=0)
+    confirm_window_minutes: int = Field(default=15, ge=1, le=120)
+    codex_timeout_seconds: float = Field(default=180, gt=0)
+
+    @model_validator(mode="after")
+    def normalize_open_ids(self) -> Self:
+        self.allowed_open_ids = [
+            open_id.strip() for open_id in self.allowed_open_ids if open_id.strip()
+        ]
+        return self
+
+
 class Settings(BaseModel):
     data_source: Literal["yfinance", "alpaca"] = "yfinance"
     db_dir: str = "data"
@@ -223,10 +242,13 @@ class Settings(BaseModel):
     execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
     option_flow: OptionFlowSettings = OptionFlowSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
+    feishu_bot: FeishuBotSettings = FeishuBotSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
     alpaca_secret: str = ""
     feishu_webhook: str = ""
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
 
     @model_validator(mode="after")
     def validate_universe_classification(self) -> Self:
@@ -281,4 +303,6 @@ def load_settings(path: Path | None = None) -> Settings:
     raw["alpaca_key"] = os.environ.get("ALPACA_KEY", "")
     raw["alpaca_secret"] = os.environ.get("ALPACA_SECRET", "")
     raw["feishu_webhook"] = os.environ.get("FEISHU_WEBHOOK", "")
+    raw["feishu_app_id"] = os.environ.get("FEISHU_APP_ID", "")
+    raw["feishu_app_secret"] = os.environ.get("FEISHU_APP_SECRET", "")
     return Settings(**raw)
