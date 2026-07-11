@@ -280,6 +280,9 @@ def build_scheduler(
     execution_enabled = (
         bool(settings.execution_plan.enabled) if settings is not None else True
     )
+    option_flow_enabled = (
+        bool(settings.option_flow.enabled) if settings is not None else False
+    )
 
     health = JobHealth()
     sched.add_listener(
@@ -366,6 +369,45 @@ def build_scheduler(
             CronTrigger(hour="9-15", minute="1-56/5", timezone=ET),
             id="execution_watch",
             misfire_grace_time=240,
+        )
+
+    if option_flow_enabled:
+
+        def option_flow() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="option_flow")
+                return
+            engine.run_option_flow(datetime.now(timezone.utc))
+
+        def option_flow_close() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="option_flow_close")
+                return
+            engine.run_option_flow(
+                datetime.now(timezone.utc), force_summary=True
+            )
+
+        # 累计成交量在开盘半小时后更有解释力；每15分钟扫描，避免普通噪音刷屏。
+        sched.add_job(
+            runtime.wrap("option_flow", option_flow),
+            CronTrigger(
+                hour="10-15", minute="0,15,30,45", timezone=ET
+            ),
+            id="option_flow",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=600,
+        )
+        # 收盘后单独保留一个名额，输出当日最终可见榜单。
+        sched.add_job(
+            runtime.wrap("option_flow_close", option_flow_close),
+            CronTrigger(hour=16, minute=20, timezone=ET),
+            id="option_flow_close",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=1800,
         )
     sched.add_job(
         enrichment, CronTrigger(hour=8, minute=45, timezone=ET), id="enrichment"
