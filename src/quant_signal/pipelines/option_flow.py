@@ -188,6 +188,8 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
         phase = "change"
         should_alert = True
 
+    from quant_signal.pipelines.option_intel import held_symbols
+
     card = (
         option_flow_card(
             snapshot,
@@ -197,6 +199,7 @@ def run(engine: "Engine", now: datetime, *, force_summary: bool = False) -> None
             enrichment_status=enrichment_status,
             display_dedupe=cfg.display_dedupe_underlying,
             display_sort_by_expiry=cfg.display_sort_by_expiry,
+            held_underlyings=frozenset(held_symbols(engine)),
         )
         if should_alert
         else None

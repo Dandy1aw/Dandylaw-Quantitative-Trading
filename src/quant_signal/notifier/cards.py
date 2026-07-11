@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Sequence
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ if TYPE_CHECKING:
         OptionFlowChange,
         OptionFlowSnapshot,
     )
+    from quant_signal.options_intel import OptionIntel
 
 _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
@@ -33,6 +34,7 @@ def option_flow_card(
     enrichment_status: Literal["ok", "failed", "off"] = "ok",
     display_dedupe: bool = True,
     display_sort_by_expiry: bool = True,
+    held_underlyings: frozenset[str] = frozenset(),
 ) -> Card:
     """Compact research card for Cboe-visible Call/Put activity."""
     from quant_signal.options_flow import display_top_by_side, top_by_side
@@ -50,11 +52,12 @@ def option_flow_card(
         "failed": "Alpaca补全失败 · 本卡仅含Cboe成交量",
         "off": "未配置Alpaca补全 · 本卡仅含Cboe成交量",
     }[enrichment_status]
+    held_legend = "\n📌 = 你的持仓标的" if held_underlyings else ""
     identity = CardSection(
         "**数据身份**\n"
         f"{phase_name}｜{observed}｜覆盖 {snapshot.venue_coverage:.0%}\n"
         "Cboe C1/C2/BZX/EDGX 四市场｜可见榜单量下限近似\n"
-        f"补全：{enrichment_label}"
+        f"补全：{enrichment_label}{held_legend}"
     )
 
     flag_names = {
@@ -97,8 +100,9 @@ def option_flow_card(
                 if change.volume_delta is not None
                 else "首次可见"
             )
+            held_mark = "📌 " if item.underlying in held_underlyings else ""
             focus_lines.append(
-                f"{item.underlying} {item.expiration:%m/%d} {strike_text(item.strike)}{marker}｜"
+                f"{held_mark}{item.underlying} {item.expiration:%m/%d} {strike_text(item.strike)}{marker}｜"
                 f"{labels}｜{prior_rank}→#{item.rank}｜"
                 f"{delta_label}｜分数 {change.score}{suffix}"
             )
@@ -133,8 +137,9 @@ def option_flow_card(
             dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
             folded = siblings.get(item.underlying, 0) - 1 if display_dedupe else 0
             fold_text = f" (+{folded})" if folded > 0 else ""
+            held_mark = "📌 " if item.underlying in held_underlyings else ""
             lines.append(
-                f"#{item.rank} {item.underlying} {item.expiration:%m/%d} "
+                f"#{item.rank} {held_mark}{item.underlying} {item.expiration:%m/%d} "
                 f"{strike_text(item.strike)}{marker} · {item.volume:,}张 · "
                 f"{delta_text} · {dte_text}{fold_text}"
             )
@@ -159,6 +164,88 @@ def option_flow_card(
         title="🔥 美股期权热度 · Cboe四市场",
         body_md=body,
         sections=sections,
+    )
+
+
+def option_intel_card(
+    intels: "Sequence[OptionIntel]",
+    *,
+    session: "date",
+    iv_rv_warn_ratio: float = 1.5,
+) -> Card:
+    """持仓期权情报：期权市场定价作为持股决策语境，只观察不交易。"""
+
+    def pct(value: float | None) -> str:
+        return f"{value:.0%}" if value is not None else "-"
+
+    def strike_text(value: Decimal) -> str:
+        return format(value.normalize(), "f")
+
+    sections: list[CardSection] = []
+    for intel in intels:
+        header = f"**{intel.symbol}** ${float(intel.spot):,.2f}"
+        if intel.earnings_date is not None:
+            days = (intel.earnings_date - intel.session).days
+            if days >= 0:
+                header += f" · 📅 {days}天后财报({intel.earnings_date:%m-%d})"
+        if intel.data_note is not None:
+            sections.append(CardSection(f"{header} · {intel.data_note}"))
+            continue
+
+        if intel.expected_move_pct is not None and intel.expected_move_expiry is not None:
+            move = (
+                f"预期波动: ±{intel.expected_move_pct:.1%} "
+                f"到 {intel.expected_move_expiry:%m-%d}"
+            )
+            if intel.earnings_move_pct is not None and intel.earnings_move_expiry is not None:
+                move += (
+                    f"｜跨财报 ±{intel.earnings_move_pct:.1%} "
+                    f"到 {intel.earnings_move_expiry:%m-%d}"
+                )
+        else:
+            move = "预期波动: -"
+
+        iv_line = f"ATM IV {pct(intel.atm_iv)} vs 20日实际波动 {pct(intel.realized_vol_20d)}"
+        if intel.atm_iv is not None and intel.realized_vol_20d:
+            ratio = intel.atm_iv / intel.realized_vol_20d
+            iv_line += f" ({ratio:.1f}x)"
+            if ratio >= iv_rv_warn_ratio:
+                iv_line += " ⚠IV偏高(事件定价)"
+
+        pc_volume = (
+            f"{intel.pc_volume_ratio:.2f}" if intel.pc_volume_ratio is not None else "-"
+        )
+        pc_oi = f"{intel.pc_oi_ratio:.2f}" if intel.pc_oi_ratio is not None else "-"
+        pc_line = f"Put/Call: 量比 {pc_volume} · OI比 {pc_oi}"
+
+        if intel.top_oi_strikes:
+            oi_items = " ".join(
+                f"{strike_text(item.strike)}{'C' if item.side == 'call' else 'P'}"
+                f"({item.expiration:%m/%d})"
+                for item in intel.top_oi_strikes
+            )
+            oi_line = f"大OI: {oi_items}"
+        else:
+            oi_line = "大OI: -"
+
+        sections.append(
+            CardSection("\n".join((header, move, iv_line, pc_line, oi_line)))
+        )
+
+    boundary = CardSection(
+        "**解释边界**\n"
+        "数据为 Alpaca indicative feed（约15分钟延迟，非 OPRA NBBO）。\n"
+        "预期波动是期权市场定价的隐含区间，不是预测；Put/Call 高低不等于看空/看多\n"
+        "（可能是对冲、平仓或价差）。大OI行权价仅为市场仓位参考。\n"
+        "> 仅供观察，不构成投资建议；本系统不推荐任何期权交易。"
+    )
+    all_sections = (*sections, boundary)
+    body = "\n\n".join(section.content_md for section in all_sections)
+    return Card(
+        kind=CardKind.REPORT,
+        title=f"🧭 持仓期权情报 · {session:%Y-%m-%d}",
+        body_md=body,
+        sections=all_sections,
     )
 
 

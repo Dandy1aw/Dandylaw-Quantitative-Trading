@@ -49,6 +49,20 @@ def main() -> None:
                 feed=settings.option_flow.feed,
             )
 
+    option_chain_source = None
+    if settings.option_intel.enabled or settings.feishu_bot.enabled:
+        if settings.alpaca_key and settings.alpaca_secret:
+            from quant_signal.datafeed.alpaca_options import AlpacaOptionChainSource
+
+            option_chain_source = AlpacaOptionChainSource(
+                settings.alpaca_key, settings.alpaca_secret
+            )
+        elif settings.option_intel.enabled:
+            log.warning(
+                "option_intel.credentials_missing",
+                hint="config/.env 需要 ALPACA_KEY/ALPACA_SECRET",
+            )
+
     engine = Engine(
         settings, store, get_source(settings), ledger, notifier,
         earnings_source=YFinanceEarnings(),
@@ -61,6 +75,7 @@ def main() -> None:
         news_store=NewsStore(settings.db_path / "news.db"),
         option_flow_source=option_flow_source,
         option_flow_enricher=option_flow_enricher,
+        option_chain_source=option_chain_source,
     )
     from quant_signal.scheduler import JobRuntime
 
@@ -80,6 +95,7 @@ def main() -> None:
                 settings,
                 LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
                 runtime=runtime,
+                engine=engine,
             )
             bot.start()
             threading.Thread(

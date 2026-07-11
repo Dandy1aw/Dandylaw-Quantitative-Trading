@@ -12,6 +12,7 @@ from datetime import date
 from decimal import Decimal
 import math
 import statistics
+from typing import Protocol
 
 from quant_signal.options_flow import OptionSide
 
@@ -33,6 +34,21 @@ class OptionChainContract:
     implied_volatility: float | None
     day_volume: int
     open_interest: int | None
+
+
+@dataclass(frozen=True)
+class OptionChainFetchResult:
+    contracts: tuple[OptionChainContract, ...]
+    # True = 分页超出上限,链不完整——展示层须如实标注,不得当完整数据用
+    truncated: bool
+
+
+class OptionChainProvider(Protocol):
+    """Provider boundary for one underlying's option chain."""
+
+    def fetch_chain(
+        self, underlying: str, *, session: date, max_expiry_days: int
+    ) -> OptionChainFetchResult: ...
 
 
 @dataclass(frozen=True)

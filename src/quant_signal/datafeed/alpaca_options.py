@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from quant_signal.options_flow import OptionContractVolume, OptionEnrichment, OptionSide
-from quant_signal.options_intel import OptionChainContract
+from quant_signal.options_intel import OptionChainContract, OptionChainFetchResult
 
 _SNAPSHOTS = "https://data.alpaca.markets/v1beta1/options/snapshots"
 _CONTRACT = "https://paper-api.alpaca.markets/v2/options/contracts"
@@ -275,13 +275,6 @@ def _parse_occ(symbol: str) -> tuple[str, date, OptionSide, Decimal] | None:
         return None
     side: OptionSide = "call" if marker == "C" else "put"
     return root, expiration, side, Decimal(raw_strike) / Decimal("1000")
-
-
-@dataclass(frozen=True)
-class OptionChainFetchResult:
-    contracts: tuple[OptionChainContract, ...]
-    # True = 分页超出 max_pages 上限,链不完整——展示层须如实标注,不得当完整数据用
-    truncated: bool
 
 
 class AlpacaOptionChainSource:

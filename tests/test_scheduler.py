@@ -283,6 +283,81 @@ def test_option_flow_close_uses_inclusive_post_close_window(
     assert engine.calls == ([True] if should_run else [])
 
 
+class _OptionIntelEngine:
+    def __init__(self) -> None:
+        from conftest import make_test_settings
+        from quant_signal.config import (
+            ExecutionPlanSettings,
+            NotifySettings,
+            OptionIntelSettings,
+        )
+
+        self.settings = make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            notify=NotifySettings(action_card_only=True),
+            option_intel=OptionIntelSettings(enabled=True),
+        )
+        self.calls = 0
+
+    def run_option_intel(self, now: datetime) -> None:
+        self.calls += 1
+
+
+@pytest.mark.parametrize(
+    ("close_hour", "trigger_hour", "should_run"),
+    [
+        (16, 16, True),   # 正常日 16:40 在收盘后 25-70 分钟窗口内
+        (16, 13, False),  # 正常日 13:40 尚未收盘
+        (13, 13, True),   # 半日市 13:40 命中
+        (13, 16, False),  # 半日市 16:40 已超窗口
+    ],
+    ids=["normal-close", "normal-early-slot", "half-day", "half-day-late-slot"],
+)
+def test_option_intel_runs_only_in_post_close_window(
+    monkeypatch: pytest.MonkeyPatch,
+    close_hour: int,
+    trigger_hour: int,
+    should_run: bool,
+) -> None:
+    et = ZoneInfo("America/New_York")
+    now_et = datetime(2026, 7, 10, trigger_hour, 40, tzinfo=et)
+    close = datetime(2026, 7, 10, close_hour, 0, tzinfo=et).astimezone(
+        timezone.utc
+    )
+    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now_et)
+    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
+    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
+
+    engine = _OptionIntelEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    jobs["option_intel"].func()
+
+    assert engine.calls == (1 if should_run else 0)
+
+
+def test_option_intel_job_absent_when_disabled() -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import ExecutionPlanSettings
+
+    engine = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False)
+        ),
+    )
+    sched = build_scheduler(
+        engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+    )
+    assert "option_intel" not in {job.id for job in sched.get_jobs()}
+
+
 def test_build_scheduler_accepts_injected_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -398,6 +473,13 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
             calls["prune_before"] = before
             return 7
 
+        def prune_option_intel(self, before: datetime) -> int:
+            order = calls["order"]
+            assert isinstance(order, list)
+            order.append("prune_intel")
+            calls["prune_intel_before"] = before
+            return 3
+
     ledger = Ledger()
 
     def fake_ingest(
@@ -447,8 +529,12 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
     jobs["maintenance"].func()
 
     cutoff = fixed_now - timedelta(days=45)
-    assert calls["order"] == ["ingest", "backup", "prune"]
+    intel_cutoff = fixed_now - timedelta(
+        days=settings.option_intel.retention_days
+    )
+    assert calls["order"] == ["ingest", "backup", "prune", "prune_intel"]
     assert calls["prune_before"] == cutoff
+    assert calls["prune_intel_before"] == intel_cutoff
     assert calls["ingest"] == (
         store,
         settings,
@@ -460,7 +546,11 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
         (
             "maintenance.option_flow_pruned",
             {"deleted_scans": 7, "before": cutoff.isoformat()},
-        )
+        ),
+        (
+            "maintenance.option_intel_pruned",
+            {"deleted_rows": 3, "before": intel_cutoff.isoformat()},
+        ),
     ]
 
 

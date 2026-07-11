@@ -35,6 +35,7 @@ from quant_signal.pipelines.market_scan import run as run_market_scan_pipeline
 from quant_signal.pipelines.negative_overreaction import run as run_negative_overreaction_pipeline
 from quant_signal.pipelines.option_flow import deliver as deliver_option_flow_alerts
 from quant_signal.pipelines.option_flow import run as run_option_flow_pipeline
+from quant_signal.pipelines.option_intel import run as run_option_intel_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from quant_signal.datafeed.news import NewsSource
     from quant_signal.news_store import NewsStore
     from quant_signal.options_flow import OptionFlowEnricher, OptionFlowSource
+    from quant_signal.options_intel import OptionChainProvider
 
 log = structlog.get_logger()
 
@@ -77,6 +79,7 @@ class Engine:
         account_provider: AccountProvider | None = None,
         option_flow_source: "OptionFlowSource | None" = None,
         option_flow_enricher: "OptionFlowEnricher | None" = None,
+        option_chain_source: "OptionChainProvider | None" = None,
     ) -> None:
         # 财报日历/基本面为可选注入：不注入(如测试)则完全跳过标注，零网络依赖
         self.earnings_source = earnings_source
@@ -85,6 +88,7 @@ class Engine:
         self.news_store = news_store
         self.option_flow_source = option_flow_source
         self.option_flow_enricher = option_flow_enricher
+        self.option_chain_source = option_chain_source
         self.settings = settings
         self.store = store
         self.source = source
@@ -359,3 +363,6 @@ class Engine:
 
     def run_option_flow_delivery(self, now: datetime) -> None:
         deliver_option_flow_alerts(self, now)
+
+    def run_option_intel(self, now: datetime) -> None:
+        run_option_intel_pipeline(self, now)

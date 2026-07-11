@@ -304,6 +304,15 @@ def build_scheduler(
                 deleted_scans=deleted_scans,
                 before=before.isoformat(),
             )
+            intel_before = datetime.now(timezone.utc) - timedelta(
+                days=engine.settings.option_intel.retention_days
+            )
+            deleted_intel = ledger.prune_option_intel(intel_before)
+            log.info(
+                "maintenance.option_intel_pruned",
+                deleted_rows=deleted_intel,
+                before=intel_before.isoformat(),
+            )
 
     settings = getattr(engine, "settings", None)
     legacy_deviation_enabled = (
@@ -314,6 +323,9 @@ def build_scheduler(
     )
     option_flow_enabled = (
         bool(settings.option_flow.enabled) if settings is not None else False
+    )
+    option_intel_enabled = (
+        bool(settings.option_intel.enabled) if settings is not None else False
     )
 
     health = JobHealth()
@@ -469,6 +481,34 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=600,
+        )
+
+    if option_intel_enabled:
+
+        def option_intel() -> None:
+            now_et = _now_et()
+            if not is_trading_day(now_et.date()):
+                log.info("skip.non_trading_day", job="option_intel")
+                return
+            close_utc = session_close_utc(now_et.date())
+            # 双时点 13:40/16:40 触发，只有落在收盘后 25-70 分钟窗口的那次执行：
+            # 正常日命中 16:40，半日市(13:00收盘)命中 13:40，同一天不会双发。
+            if close_utc is None or not (
+                close_utc + timedelta(minutes=25)
+                <= now_et
+                <= close_utc + timedelta(minutes=70)
+            ):
+                log.info("skip.outside_close_window", job="option_intel")
+                return
+            engine.run_option_intel(datetime.now(timezone.utc))
+
+        sched.add_job(
+            runtime.wrap("option_intel", option_intel),
+            CronTrigger(hour="13,16", minute=40, timezone=ET),
+            id="option_intel",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=1800,
         )
     sched.add_job(
         runtime.wrap("enrichment", enrichment),
