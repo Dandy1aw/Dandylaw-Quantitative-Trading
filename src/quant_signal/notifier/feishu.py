@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Protocol
 
 import httpx
 import structlog
@@ -73,7 +74,51 @@ class FeishuNotifier:
         return False
 
 
+class _CardSender(Protocol):
+    def send_card_to(
+        self, receive_id: str, receive_id_type: str, card: Card
+    ) -> bool: ...
+
+
+class FeishuAppNotifier:
+    """自建应用推送通道：ou_ 前缀推单聊，oc_ 前缀推群。替代 webhook 主通道。"""
+
+    def __init__(self, transport: _CardSender, receive_id: str) -> None:
+        self._transport = transport
+        self._receive_id = receive_id
+        self._receive_id_type = (
+            "open_id" if receive_id.startswith("ou_") else "chat_id"
+        )
+
+    def send(self, card: Card) -> bool:
+        for i, backoff in enumerate(_BACKOFF, start=1):
+            try:
+                if self._transport.send_card_to(
+                    self._receive_id, self._receive_id_type, card
+                ):
+                    return True
+                log.warning("feishu_app.reject", attempt=i, title=card.title)
+            except Exception as e:  # noqa: BLE001 - 推送边界与 webhook 通道同语义
+                log.warning("feishu_app.error", attempt=i, error=str(e))
+            time.sleep(backoff)
+        log.error("feishu_app.giveup", title=card.title)
+        return False
+
+
 def get_notifier(settings: Settings) -> Notifier:
+    bot = settings.feishu_bot
+    if (
+        bot.enabled
+        and bot.push_receive_id
+        and settings.feishu_app_id
+        and settings.feishu_app_secret
+    ):
+        from quant_signal.feishu_bot import LarkTransport
+
+        return FeishuAppNotifier(
+            LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
+            bot.push_receive_id,
+        )
     if settings.feishu_webhook:
         return FeishuNotifier(settings.feishu_webhook)
     return ConsoleNotifier(jsonl_path=REPO_ROOT / "logs" / "signals.jsonl")

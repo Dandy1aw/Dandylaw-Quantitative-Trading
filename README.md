@@ -62,8 +62,9 @@
 - 每个标的按 `tickers.<symbol>.currency` 自动派生数据源：非 USD 固定走 yfinance，USD 跟随
   `data_source` 走 Alpaca——美股/ETF 走 Alpaca，港股/韩股等 Alpaca
   不支持的市场固定走 yfinance，两者数据合并进同一个 duckdb
-- `FEISHU_WEBHOOK` 未配置时自动降级为 Console 通知器（终端打印 +
-  写 `logs/signals.jsonl`），不影响开发和测试
+- 推送通道按优先级选择：`feishu_bot.push_receive_id` 配置齐全时走**自建应用**
+  （单聊或群）→ 否则 `FEISHU_WEBHOOK`（群自定义机器人）→ 都没有则降级为
+  Console 通知器（终端打印 + 写 `logs/signals.jsonl`），不影响开发和测试
 
 ## 快速开始
 
@@ -290,6 +291,9 @@ consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠
   错误并等待 15 分钟内回复「确认导入」；`REJECTED` 绝不应用
 - 文本指令：`状态`（系统概况）/ `持仓`（截图账户+持仓）/ `计划`（活跃执行
   计划）/ `期权`（最新期权榜，读台账不新抓）/ `帮助`
+- **接管全部推送**：`push_receive_id` 填 `ou_xxx`（单聊）或 `oc_xxx`（群，需
+  先把机器人拉进群）后，早报/信号/行动卡/期权榜/告警等所有卡片都改由自建
+  应用发送，webhook 群通道自动闲置；清空该项即回退 webhook，零迁移风险
 
 **一次性配置**（代码无法代劳）：
 
@@ -435,6 +439,7 @@ legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回�
 feishu_bot:                      # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
   enabled: false
   allowed_open_ids: []           # 白名单为空时只回显 open_id，不执行任何操作
+  push_receive_id: ""            # 填 ou_xxx(单聊)/oc_xxx(群) 后所有推送改走自建应用；留空走 webhook
   capital_limit: 6000
   max_financing_ratio: 0.20
   confirm_window_minutes: 15     # PARTIAL 导入确认窗口

@@ -209,6 +209,8 @@ class FeishuBotSettings(BaseModel):
 
     enabled: bool = False
     allowed_open_ids: list[str] = Field(default_factory=list)
+    # 主推送通道目标：ou_ 开头推单聊，oc_ 开头推群；留空则推送继续走 webhook
+    push_receive_id: str = ""
     capital_limit: Decimal = Field(default=Decimal("6000"), gt=0)
     max_financing_ratio: Decimal = Field(default=Decimal("0.20"), ge=0)
     confirm_window_minutes: int = Field(default=15, ge=1, le=120)
@@ -219,6 +221,7 @@ class FeishuBotSettings(BaseModel):
         self.allowed_open_ids = [
             open_id.strip() for open_id in self.allowed_open_ids if open_id.strip()
         ]
+        self.push_receive_id = self.push_receive_id.strip()
         return self
 
 

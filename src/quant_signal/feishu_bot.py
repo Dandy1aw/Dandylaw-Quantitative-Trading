@@ -455,7 +455,14 @@ class LarkTransport:
             lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
         )
 
-    def _send(self, chat_id: str, msg_type: str, content: str) -> bool:
+    def _send(
+        self,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        *,
+        receive_id_type: str = "chat_id",
+    ) -> bool:
         from lark_oapi.api.im.v1 import (
             CreateMessageRequest,
             CreateMessageRequestBody,
@@ -463,10 +470,10 @@ class LarkTransport:
 
         request = (
             CreateMessageRequest.builder()
-            .receive_id_type("chat_id")
+            .receive_id_type(receive_id_type)
             .request_body(
                 CreateMessageRequestBody.builder()
-                .receive_id(chat_id)
+                .receive_id(receive_id)
                 .msg_type(msg_type)
                 .content(content)
                 .build()
@@ -492,6 +499,19 @@ class LarkTransport:
         payload = _to_feishu_payload(card)["card"]
         return self._send(
             chat_id, "interactive", json.dumps(payload, ensure_ascii=False)
+        )
+
+    def send_card_to(
+        self, receive_id: str, receive_id_type: str, card: Card
+    ) -> bool:
+        from quant_signal.notifier.feishu import _to_feishu_payload
+
+        payload = _to_feishu_payload(card)["card"]
+        return self._send(
+            receive_id,
+            "interactive",
+            json.dumps(payload, ensure_ascii=False),
+            receive_id_type=receive_id_type,
         )
 
     def download_image(self, message_id: str, image_key: str) -> bytes:

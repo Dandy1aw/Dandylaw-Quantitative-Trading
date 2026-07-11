@@ -69,6 +69,70 @@ def test_get_notifier_falls_back_to_console(monkeypatch: pytest.MonkeyPatch) -> 
     assert isinstance(get_notifier(make_test_settings(feishu_webhook="")), ConsoleNotifier)
 
 
+class FakeCardSender:
+    def __init__(self, results: list[bool] | None = None) -> None:
+        self.sent: list[tuple[str, str, Card]] = []
+        self.results = list(results or [])
+
+    def send_card_to(self, receive_id: str, receive_id_type: str, card: Card) -> bool:
+        self.sent.append((receive_id, receive_id_type, card))
+        return self.results.pop(0) if self.results else True
+
+
+def test_app_notifier_sends_to_open_id_with_prefix_detection() -> None:
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    sender = FakeCardSender()
+    notifier = FeishuAppNotifier(sender, "ou_owner123")
+    assert notifier.send(alert_card("t", "b")) is True
+    assert sender.sent[0][0] == "ou_owner123"
+    assert sender.sent[0][1] == "open_id"
+
+    group_sender = FakeCardSender()
+    FeishuAppNotifier(group_sender, "oc_group456").send(alert_card("t", "b"))
+    assert group_sender.sent[0][1] == "chat_id"
+
+
+def test_app_notifier_retries_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    monkeypatch.setattr("quant_signal.notifier.feishu._BACKOFF", [0, 0, 0])
+    sender = FakeCardSender(results=[False, False, False])
+    notifier = FeishuAppNotifier(sender, "ou_owner123")
+    assert notifier.send(alert_card("t", "b")) is False
+    assert len(sender.sent) == 3
+
+    recovering = FakeCardSender(results=[False, True])
+    monkeypatch.setattr("quant_signal.notifier.feishu._BACKOFF", [0, 0, 0])
+    assert FeishuAppNotifier(recovering, "ou_owner123").send(alert_card("t", "b")) is True
+
+
+def test_get_notifier_prefers_app_bot_when_fully_configured() -> None:
+    from quant_signal.config import FeishuBotSettings
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    settings = make_test_settings(
+        feishu_webhook="https://open.feishu.cn/hook/xxx",
+        feishu_app_id="cli_x",
+        feishu_app_secret="secret_x",
+        feishu_bot=FeishuBotSettings(
+            enabled=True,
+            allowed_open_ids=["ou_owner123"],
+            push_receive_id="ou_owner123",
+        ),
+    )
+    assert isinstance(get_notifier(settings), FeishuAppNotifier)
+
+    # push_receive_id 为空 → 回退 webhook
+    settings_webhook = make_test_settings(
+        feishu_webhook="https://open.feishu.cn/hook/xxx",
+        feishu_app_id="cli_x",
+        feishu_app_secret="secret_x",
+        feishu_bot=FeishuBotSettings(enabled=True),
+    )
+    assert isinstance(get_notifier(settings_webhook), FeishuNotifier)
+
+
 def test_feishu_renders_structured_sections_as_separate_divs() -> None:
     card = Card(
         kind=CardKind.REPORT,
