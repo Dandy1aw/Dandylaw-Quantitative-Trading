@@ -1047,6 +1047,47 @@ class SignalLedger:
         }
         return snapshot_from_dict(payload)
 
+    def prune_option_flow(self, before: datetime) -> int:
+        cutoff = before.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute("BEGIN IMMEDIATE")
+                self._con.execute(
+                    "DELETE FROM option_flow_outbox"
+                    " WHERE status <> 'PENDING' AND slot IN ("
+                    " SELECT slot FROM option_flow_scans WHERE captured_at < ?"
+                    ")",
+                    (cutoff,),
+                )
+                self._con.execute(
+                    "DELETE FROM option_flow_rows WHERE slot IN ("
+                    " SELECT scans.slot FROM option_flow_scans AS scans"
+                    " WHERE scans.captured_at < ? AND NOT EXISTS ("
+                    " SELECT 1 FROM option_flow_outbox AS outbox"
+                    " WHERE outbox.slot = scans.slot AND outbox.status = 'PENDING'"
+                    ")"
+                    ")",
+                    (cutoff,),
+                )
+                cursor = self._con.execute(
+                    "DELETE FROM option_flow_scans"
+                    " WHERE captured_at < ? AND NOT EXISTS ("
+                    " SELECT 1 FROM option_flow_outbox"
+                    " WHERE option_flow_outbox.slot = option_flow_scans.slot"
+                    " AND option_flow_outbox.status = 'PENDING'"
+                    ")",
+                    (cutoff,),
+                )
+                self._con.execute(
+                    "DELETE FROM feishu_processed_messages WHERE processed_at < ?",
+                    (cutoff,),
+                )
+                self._con.commit()
+                return cursor.rowcount
+            except Exception:
+                self._con.rollback()
+                raise
+
     def option_flow_alert_count(self, session: date) -> int:
         with self._lock:
             row = self._con.execute(

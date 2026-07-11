@@ -43,6 +43,7 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.option_flow.venues == ["cone", "ctwo", "opt", "exo"]
     assert s.option_flow.top_n == 10
     assert s.option_flow.max_alerts_per_day == 4
+    assert s.option_flow.retention_days == 120
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
 
@@ -219,11 +220,16 @@ def test_execution_plan_risk_clusters_are_unique_and_normalized() -> None:
         ("max_alerts_per_day", 1),
         ("intraday_expiry_minutes", 14),
         ("min_venue_coverage", 0.99),
+        ("retention_days", 29),
     ],
 )
 def test_option_flow_rejects_unsafe_policy(field: str, value: object) -> None:
     with pytest.raises(ValidationError, match=field):
         OptionFlowSettings(**{field: value})
+
+
+def test_option_flow_retention_defaults_to_120_days() -> None:
+    assert OptionFlowSettings().retention_days == 120
 
 
 def test_option_flow_requires_complete_unique_venues_when_enabled() -> None:

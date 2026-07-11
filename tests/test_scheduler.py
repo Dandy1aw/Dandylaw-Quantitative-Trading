@@ -371,6 +371,96 @@ def test_action_card_only_suppresses_standalone_enrichment_push() -> None:
     assert engine.calls == 0
 
 
+def test_maintenance_prunes_option_history_and_keeps_existing_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import OptionFlowSettings
+
+    fixed_now = datetime(2026, 7, 11, 7, 0, tzinfo=timezone.utc)
+    settings = make_test_settings(
+        option_flow=OptionFlowSettings(retention_days=45)
+    )
+    engine = SimpleNamespace(settings=settings)
+    store = object()
+    calls: dict[str, object] = {"order": []}
+
+    class Ledger:
+        def prune_option_flow(self, before: datetime) -> int:
+            order = calls["order"]
+            assert isinstance(order, list)
+            order.append("prune")
+            calls["prune_before"] = before
+            return 7
+
+    ledger = Ledger()
+
+    def fake_ingest(
+        actual_store: object,
+        actual_settings: object,
+        symbols: list[str],
+        *,
+        days: int,
+    ) -> None:
+        order = calls["order"]
+        assert isinstance(order, list)
+        order.append("ingest")
+        calls["ingest"] = (actual_store, actual_settings, symbols, days)
+
+    def fake_backup(
+        actual_ledger: object,
+        db_path: object,
+        now: datetime,
+    ) -> None:
+        order = calls["order"]
+        assert isinstance(order, list)
+        order.append("backup")
+        calls["backup"] = (actual_ledger, db_path, now)
+
+    class RecordingLog:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, dict[str, object]]] = []
+
+        def info(self, event: str, **values: object) -> None:
+            self.events.append((event, values))
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    logger = RecordingLog()
+    monkeypatch.setattr("quant_signal.ingest.ingest_daily_split", fake_ingest)
+    monkeypatch.setattr("quant_signal.backup.run_backup", fake_backup)
+    sched = build_scheduler(
+        engine=engine, ledger=ledger, store=store, notifier=FakeNotifier()
+    )
+    monkeypatch.setattr("quant_signal.scheduler.datetime", FixedDateTime)
+    monkeypatch.setattr("quant_signal.scheduler.log", logger)
+
+    jobs = {job.id: job for job in sched.get_jobs()}
+    jobs["maintenance"].func()
+
+    cutoff = fixed_now - timedelta(days=45)
+    assert calls["order"] == ["ingest", "backup", "prune"]
+    assert calls["prune_before"] == cutoff
+    assert calls["ingest"] == (
+        store,
+        settings,
+        settings.universe + settings.watchlist,
+        10,
+    )
+    assert calls["backup"] == (ledger, settings.db_path, fixed_now)
+    assert logger.events == [
+        (
+            "maintenance.option_flow_pruned",
+            {"deleted_scans": 7, "before": cutoff.isoformat()},
+        )
+    ]
+
+
 def test_jobhealth_collects_missed_and_max_instances_events() -> None:
     from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 

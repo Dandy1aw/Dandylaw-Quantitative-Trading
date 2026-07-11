@@ -295,6 +295,15 @@ def build_scheduler(
             )
             # T3(O1)：每日备份台账(不可再生)与行情缓存(尽力)，保留14天
             run_backup(ledger, engine.settings.db_path, datetime.now(timezone.utc))
+            before = datetime.now(timezone.utc) - timedelta(
+                days=engine.settings.option_flow.retention_days
+            )
+            deleted_scans = ledger.prune_option_flow(before)
+            log.info(
+                "maintenance.option_flow_pruned",
+                deleted_scans=deleted_scans,
+                before=before.isoformat(),
+            )
 
     settings = getattr(engine, "settings", None)
     legacy_deviation_enabled = (

@@ -163,6 +163,7 @@ class OptionFlowSettings(BaseModel):
     max_alerts_per_day: int = Field(default=4, ge=2, le=12)
     intraday_expiry_minutes: int = Field(default=45, ge=15, le=180)
     closing_expiry_hours: int = Field(default=12, ge=1, le=24)
+    retention_days: int = Field(default=120, ge=30)
     min_venue_coverage: float = Field(default=1.0, ge=1.0, le=1.0)
     # 展示层开关：只影响卡片显示，不改变排名/异动/落库口径
     display_dedupe_underlying: bool = True

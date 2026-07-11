@@ -148,6 +148,7 @@ option_flow:
   max_alerts_per_day: 4
   intraday_expiry_minutes: 45
   closing_expiry_hours: 12
+  retention_days: 120
   min_venue_coverage: 1.0
   display_dedupe_underlying: true   # 每侧同标的只显示最高量合约
   display_sort_by_expiry: true      # 展示按到期日升序(近月优先)

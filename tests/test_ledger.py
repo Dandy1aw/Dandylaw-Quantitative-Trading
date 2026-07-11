@@ -612,6 +612,124 @@ def test_option_outbox_retries_then_marks_sent(ledger: SignalLedger) -> None:
     assert ledger.last_option_flow_alert_at(snap.session_date) == NOW
 
 
+def test_prune_option_flow_deletes_old_history_and_preserves_boundary(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "signals.db"
+    ledger = SignalLedger(db_path)
+    old_alert = option_snapshot(NOW - timedelta(days=2))
+    old_quiet = option_snapshot(NOW - timedelta(days=1))
+    boundary = option_snapshot(NOW)
+
+    assert ledger.save_option_flow_scan(
+        old_alert,
+        "change",
+        option_card(),
+        now=old_alert.captured_at,
+        expires_at=old_alert.captured_at + timedelta(minutes=45),
+    )
+    ledger.mark_option_flow_alert_sent(
+        f"option-flow:{old_alert.slot}:change", now=old_alert.captured_at
+    )
+    assert ledger.save_option_flow_scan(
+        old_quiet, "quiet", None, now=old_quiet.captured_at
+    )
+    assert ledger.save_option_flow_scan(
+        boundary,
+        "change",
+        option_card(),
+        now=boundary.captured_at,
+        expires_at=boundary.captured_at + timedelta(minutes=45),
+    )
+    ledger.mark_option_flow_alert_sent(
+        f"option-flow:{boundary.slot}:change", now=boundary.captured_at
+    )
+    assert ledger.try_mark_feishu_message(
+        "old-message", now=NOW - timedelta(seconds=1)
+    )
+    assert ledger.try_mark_feishu_message("boundary-message", now=NOW)
+
+    assert ledger.prune_option_flow(NOW) == 2
+
+    with sqlite3.connect(db_path) as con:
+        scans = {row[0] for row in con.execute("SELECT slot FROM option_flow_scans")}
+        rows = {row[0] for row in con.execute("SELECT slot FROM option_flow_rows")}
+        outbox = {row[0] for row in con.execute("SELECT slot FROM option_flow_outbox")}
+        messages = {
+            row[0]
+            for row in con.execute(
+                "SELECT message_id FROM feishu_processed_messages"
+            )
+        }
+    assert scans == {boundary.slot}
+    assert rows == {boundary.slot}
+    assert outbox == {boundary.slot}
+    assert messages == {"boundary-message"}
+
+
+def test_prune_option_flow_preserves_old_pending_alert_and_snapshot(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "signals.db"
+    ledger = SignalLedger(db_path)
+    pending = option_snapshot(NOW - timedelta(days=10))
+    assert ledger.save_option_flow_scan(
+        pending,
+        "change",
+        option_card(),
+        now=pending.captured_at,
+        expires_at=pending.captured_at + timedelta(minutes=45),
+    )
+
+    assert ledger.prune_option_flow(NOW) == 0
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM option_flow_scans WHERE slot = ?", (pending.slot,)
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT count(*) FROM option_flow_rows WHERE slot = ?", (pending.slot,)
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT status FROM option_flow_outbox WHERE slot = ?", (pending.slot,)
+        ).fetchone() == ("PENDING",)
+
+
+def test_prune_option_flow_rolls_back_all_deletes_on_failure(tmp_path: Path) -> None:
+    db_path = tmp_path / "signals.db"
+    ledger = SignalLedger(db_path)
+    old = option_snapshot(NOW - timedelta(days=1))
+    assert ledger.save_option_flow_scan(
+        old,
+        "change",
+        option_card(),
+        now=old.captured_at,
+        expires_at=old.captured_at + timedelta(minutes=45),
+    )
+    ledger.mark_option_flow_alert_sent(
+        f"option-flow:{old.slot}:change", now=old.captured_at
+    )
+    assert ledger.try_mark_feishu_message(
+        "old-message", now=NOW - timedelta(seconds=1)
+    )
+    with sqlite3.connect(db_path) as con:
+        con.execute(
+            "CREATE TRIGGER fail_option_prune BEFORE DELETE ON option_flow_scans "
+            "BEGIN SELECT RAISE(ABORT, 'forced prune failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced prune failure"):
+        ledger.prune_option_flow(NOW)
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute("SELECT count(*) FROM option_flow_scans").fetchone() == (1,)
+        assert con.execute("SELECT count(*) FROM option_flow_rows").fetchone() == (1,)
+        assert con.execute("SELECT count(*) FROM option_flow_outbox").fetchone() == (1,)
+        assert con.execute(
+            "SELECT count(*) FROM feishu_processed_messages"
+        ).fetchone() == (1,)
+
+
 def test_pending_import_round_trip_and_overwrite(ledger: SignalLedger) -> None:
     from decimal import Decimal
 
