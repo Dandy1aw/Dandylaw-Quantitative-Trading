@@ -347,7 +347,9 @@ def build_scheduler(
     )
     sched.add_job(
         runtime.wrap("postmarket", postmarket),
-        CronTrigger(hour=16, minute=30, timezone=ET), id="postmarket"
+        # 固定 UTC 时刻(北京 08:05)：收盘复盘随早间一起读，不随夏令时漂移
+        CronTrigger(hour=0, minute=5, timezone=timezone.utc),
+        id="postmarket",  # 08:05 北京时间
     )
     sched.add_job(
         runtime.wrap("negative_overreaction", negative_overreaction),
@@ -427,17 +429,11 @@ def build_scheduler(
             engine.run_option_flow(datetime.now(timezone.utc))
 
         def option_flow_close() -> None:
+            # 北京 08:00(UTC 00:00) = 美东晚间(19/20点)，仍在收盘当日、
+            # 午夜前，Cboe 榜单尚未重置；is_trading_day 按美东日期门控
             now_et = _now_et()
             if not is_trading_day(now_et.date()):
                 log.info("skip.non_trading_day", job="option_flow_close")
-                return
-            close_utc = session_close_utc(now_et.date())
-            if close_utc is None or not (
-                close_utc + timedelta(minutes=15)
-                <= now_et
-                <= close_utc + timedelta(minutes=55)
-            ):
-                log.info("skip.outside_close_window", job="option_flow_close")
                 return
             engine.run_option_flow(
                 datetime.now(timezone.utc), force_summary=True
@@ -461,11 +457,11 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=600,
         )
-        # 收盘后单独保留一个名额，输出当日最终可见榜单。
+        # 收盘榜：固定 UTC 时刻(北京 08:00)，用户早间统一阅读，不随夏令时漂移
         sched.add_job(
             runtime.wrap("option_flow_close", option_flow_close),
-            CronTrigger(hour="13,16", minute=20, timezone=ET),
-            id="option_flow_close",
+            CronTrigger(hour=0, minute=0, timezone=timezone.utc),
+            id="option_flow_close",  # 08:00 北京时间
             max_instances=1,
             coalesce=True,
             misfire_grace_time=1800,
@@ -484,26 +480,18 @@ def build_scheduler(
     if option_intel_enabled:
 
         def option_intel() -> None:
+            # 北京 08:10(UTC 00:10) = 美东晚间，收盘当日数据已完整；
+            # 半日市/正常日同一槽，无需双时点
             now_et = _now_et()
             if not is_trading_day(now_et.date()):
                 log.info("skip.non_trading_day", job="option_intel")
-                return
-            close_utc = session_close_utc(now_et.date())
-            # 双时点 13:40/16:40 触发，只有落在收盘后 25-70 分钟窗口的那次执行：
-            # 正常日命中 16:40，半日市(13:00收盘)命中 13:40，同一天不会双发。
-            if close_utc is None or not (
-                close_utc + timedelta(minutes=25)
-                <= now_et
-                <= close_utc + timedelta(minutes=70)
-            ):
-                log.info("skip.outside_close_window", job="option_intel")
                 return
             engine.run_option_intel(datetime.now(timezone.utc))
 
         sched.add_job(
             runtime.wrap("option_intel", option_intel),
-            CronTrigger(hour="13,16", minute=40, timezone=ET),
-            id="option_intel",
+            CronTrigger(hour=0, minute=10, timezone=timezone.utc),
+            id="option_intel",  # 08:10 北京时间
             max_instances=1,
             coalesce=True,
             misfire_grace_time=1800,

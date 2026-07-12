@@ -128,9 +128,9 @@ def test_option_flow_jobs_registered_only_when_enabled() -> None:
     assert intraday.misfire_grace_time == 600
 
     closing = jobs["option_flow_close"]
-    assert "hour='13,16'" in str(closing.trigger)
-    assert "minute='20'" in str(closing.trigger)
-    assert str(closing.trigger.timezone) == "America/New_York"
+    assert "hour='0'" in str(closing.trigger)
+    assert "minute='0'" in str(closing.trigger)
+    assert str(closing.trigger.timezone) == "UTC"  # 北京 08:00, 不随美东夏令时漂移
     assert closing.max_instances == 1
     assert closing.coalesce is True
     assert closing.misfire_grace_time == 1800
@@ -167,7 +167,7 @@ def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
 
     monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
     jobs["option_flow"].func()
-    now["value"] = datetime(2026, 7, 10, 16, 20, tzinfo=et)
+    now["value"] = datetime(2026, 7, 10, 20, 0, tzinfo=et)  # 北京 08:00 晚间槽
     jobs["option_flow_close"].func()
     jobs["option_flow_drain"].func()
     assert engine.calls == [False, True]
@@ -208,65 +208,24 @@ def test_option_flow_skips_only_after_session_close(
 
 
 @pytest.mark.parametrize(
-    ("close_hour", "trigger_hour", "should_run"),
+    ("close_hour", "should_run"),
     [
-        (16, 13, False),
-        (16, 16, True),
-        (13, 13, True),
-        (13, 16, False),
+        (16, True),   # 正常日：北京 08:00 晚间槽照常出收盘榜
+        (13, True),   # 半日市：同一晚间槽，无需双槽
     ],
-    ids=[
-        "full-day-1320-skips",
-        "full-day-1620-runs",
-        "half-day-1320-runs",
-        "half-day-1620-skips",
-    ],
+    ids=["full-day", "half-day"],
 )
-def test_option_flow_close_matches_session_close(
+def test_option_flow_close_runs_on_trading_evening_regardless_of_close_hour(
     monkeypatch: pytest.MonkeyPatch,
     close_hour: int,
-    trigger_hour: int,
     should_run: bool,
 ) -> None:
     et = ZoneInfo("America/New_York")
-    now_et = datetime(2026, 7, 10, trigger_hour, 20, tzinfo=et)
+    now_et = datetime(2026, 7, 10, 20, 0, tzinfo=et)  # UTC 00:00 = 北京 08:00
     close = datetime(2026, 7, 10, close_hour, 0, tzinfo=et).astimezone(
         timezone.utc
     )
     monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now_et)
-    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
-    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
-
-    engine = _OptionFlowEngine()
-    jobs = {
-        job.id: job
-        for job in build_scheduler(
-            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
-        ).get_jobs()
-    }
-
-    jobs["option_flow_close"].func()
-
-    assert engine.calls == ([True] if should_run else [])
-
-
-@pytest.mark.parametrize(
-    ("offset", "should_run"),
-    [
-        (timedelta(minutes=15) - timedelta(seconds=1), False),
-        (timedelta(minutes=15), True),
-        (timedelta(minutes=55), True),
-        (timedelta(minutes=55) + timedelta(seconds=1), False),
-    ],
-    ids=["before-window", "lower-bound", "upper-bound", "after-window"],
-)
-def test_option_flow_close_uses_inclusive_post_close_window(
-    monkeypatch: pytest.MonkeyPatch,
-    offset: timedelta,
-    should_run: bool,
-) -> None:
-    close = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: close + offset)
     monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
     monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
 
@@ -304,29 +263,24 @@ class _OptionIntelEngine:
 
 
 @pytest.mark.parametrize(
-    ("close_hour", "trigger_hour", "should_run"),
+    ("trading_day", "should_run"),
     [
-        (16, 16, True),   # 正常日 16:40 在收盘后 25-70 分钟窗口内
-        (16, 13, False),  # 正常日 13:40 尚未收盘
-        (13, 13, True),   # 半日市 13:40 命中
-        (13, 16, False),  # 半日市 16:40 已超窗口
+        (True, True),    # 交易日晚间(北京 08:10)运行
+        (False, False),  # 周末/假日跳过
     ],
-    ids=["normal-close", "normal-early-slot", "half-day", "half-day-late-slot"],
+    ids=["trading-evening", "non-trading-day"],
 )
-def test_option_intel_runs_only_in_post_close_window(
+def test_option_intel_runs_on_trading_evening(
     monkeypatch: pytest.MonkeyPatch,
-    close_hour: int,
-    trigger_hour: int,
+    trading_day: bool,
     should_run: bool,
 ) -> None:
     et = ZoneInfo("America/New_York")
-    now_et = datetime(2026, 7, 10, trigger_hour, 40, tzinfo=et)
-    close = datetime(2026, 7, 10, close_hour, 0, tzinfo=et).astimezone(
-        timezone.utc
-    )
+    now_et = datetime(2026, 7, 10, 20, 10, tzinfo=et)  # UTC 00:10 = 北京 08:10
     monkeypatch.setattr("quant_signal.scheduler._now_et", lambda: now_et)
-    monkeypatch.setattr("quant_signal.scheduler.is_trading_day", lambda day: True)
-    monkeypatch.setattr("quant_signal.scheduler.session_close_utc", lambda day: close)
+    monkeypatch.setattr(
+        "quant_signal.scheduler.is_trading_day", lambda day: trading_day
+    )
 
     engine = _OptionIntelEngine()
     jobs = {
@@ -335,10 +289,35 @@ def test_option_intel_runs_only_in_post_close_window(
             engine=engine, ledger=None, store=None, notifier=FakeNotifier()
         ).get_jobs()
     }
+    trigger = str(jobs["option_intel"].trigger)
+    assert "hour='0'" in trigger and "minute='10'" in trigger
+    assert str(jobs["option_intel"].trigger.timezone) == "UTC"
 
     jobs["option_intel"].func()
 
     assert engine.calls == (1 if should_run else 0)
+
+
+def test_postmarket_trigger_is_beijing_morning() -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import ExecutionPlanSettings
+
+    engine = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False)
+        ),
+    )
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+    trigger = str(jobs["postmarket"].trigger)
+    assert "hour='0'" in trigger and "minute='5'" in trigger
+    assert str(jobs["postmarket"].trigger.timezone) == "UTC"  # 北京 08:05
 
 
 def test_option_intel_job_absent_when_disabled() -> None:
@@ -579,7 +558,8 @@ def test_scheduler_sets_explicit_misfire_grace_windows() -> None:
 def test_us_market_jobs_use_new_york_trigger_timezone() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     jobs = {job.id: job for job in sched.get_jobs()}
-    for job_id in ("premarket", "intraday", "postmarket", "maintenance", "enrichment",
+    # postmarket 收盘复盘改为固定 UTC(北京 08:05)，见 test_postmarket_trigger_is_beijing_morning
+    for job_id in ("premarket", "intraday", "maintenance", "enrichment",
                    "negative_overreaction"):
         assert str(jobs[job_id].trigger.timezone) == "America/New_York"
 
