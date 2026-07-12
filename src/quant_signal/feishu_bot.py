@@ -23,6 +23,7 @@ from quant_signal.notifier.base import Card
 
 if TYPE_CHECKING:
     from quant_signal.config import Settings
+    from quant_signal.engine import Engine
     from quant_signal.ledger import SignalLedger
     from quant_signal.portfolio_import import (
         PortfolioExtraction,
@@ -39,6 +40,7 @@ _HELP_TEXT = (
     "持仓 / holdings — 最新截图账户与持仓\n"
     "计划 / plans — 活跃执行计划\n"
     "期权 / options — 最新期权热度榜(不新抓)\n"
+    "期权 <代码> — 单标的期权情报(现场拉取, 如: 期权 MU)\n"
     "信号 / signals — 今日各策略信号\n"
     "扫描 / scan — 最新指数池 Top20 观察榜\n"
     "健康 / health — 定时任务运行状态\n"
@@ -66,6 +68,7 @@ class BotIntent(str, Enum):
     HOLDINGS = "holdings"
     PLANS = "plans"
     OPTIONS = "options"
+    OPTION_INTEL = "option_intel"
     SIGNALS = "signals"
     SCAN = "scan"
     HEALTH = "health"
@@ -108,6 +111,18 @@ def parse_text(content_json: str) -> str:
     return re.sub(r"@_user_\d+", "", text).strip()
 
 
+_OPTION_TICKER = re.compile(r"^[A-Z]{1,6}$")
+
+
+def parse_option_ticker(text: str) -> str | None:
+    """`期权 MU` / `options nvda` → "MU"；不满足两段式或代码非法返回 None。"""
+    parts = text.split()
+    if len(parts) != 2 or parts[0].lower() not in ("期权", "options"):
+        return None
+    ticker = parts[1].upper()
+    return ticker if _OPTION_TICKER.fullmatch(ticker) else None
+
+
 def parse_image_key(content_json: str) -> str | None:
     try:
         payload = json.loads(content_json)
@@ -139,7 +154,12 @@ def route(message: BotMessage, allowed_open_ids: frozenset[str]) -> BotIntent:
     if message.message_type != "text":
         return BotIntent.IGNORE
     text = parse_text(message.content_json)
-    return _TEXT_COMMANDS.get(text.lower(), BotIntent.UNKNOWN)
+    exact = _TEXT_COMMANDS.get(text.lower())
+    if exact is not None:
+        return exact
+    if parse_option_ticker(text) is not None:
+        return BotIntent.OPTION_INTEL
+    return BotIntent.UNKNOWN
 
 
 class BotTransport(Protocol):
@@ -170,6 +190,7 @@ class FeishuBotService:
         extractor: PortfolioExtractor | None = None,
         clock: Callable[[], datetime] | None = None,
         runtime: "JobRuntime | None" = None,
+        engine: "Engine | None" = None,
     ) -> None:
         self._ledger = ledger
         self._settings = settings
@@ -177,6 +198,7 @@ class FeishuBotService:
         self._transport = transport
         self._extractor = extractor
         self._runtime = runtime
+        self._engine = engine
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._started_at = self._clock()
         self._queue: "queue.Queue[BotMessage]" = queue.Queue()
@@ -253,6 +275,10 @@ class FeishuBotService:
             self._transport.send_text(message.chat_id, self._plans_text())
         elif intent is BotIntent.OPTIONS:
             self._reply_options(message.chat_id, now)
+        elif intent is BotIntent.OPTION_INTEL:
+            self._reply_option_intel(
+                message.chat_id, parse_text(message.content_json), now
+            )
         elif intent is BotIntent.SIGNALS:
             self._transport.send_text(message.chat_id, self._signals_text(now))
         elif intent is BotIntent.SCAN:
@@ -404,6 +430,46 @@ class FeishuBotService:
             enrichment_status=enrichment,
             display_dedupe=cfg.display_dedupe_underlying,
             display_sort_by_expiry=cfg.display_sort_by_expiry,
+        )
+        self._transport.send_card(chat_id, card)
+
+    def _reply_option_intel(self, chat_id: str, text: str, now: datetime) -> None:
+        # 与 `期权`(读台账)不同：这里现场拉取该标的期权链,耗时数秒
+        ticker = parse_option_ticker(text)
+        if ticker is None:
+            self._transport.send_text(
+                chat_id, "用法：期权 <美股代码>，例如「期权 MU」。"
+            )
+            return
+        if self._engine is None or self._engine.option_chain_source is None:
+            self._transport.send_text(
+                chat_id,
+                "期权链查询未启用：需要配置 ALPACA_KEY/ALPACA_SECRET 并重启。",
+            )
+            return
+        from quant_signal.pipelines import option_intel as intel_pipeline
+
+        try:
+            intel = intel_pipeline.build_intel(self._engine, ticker, now)
+        except Exception as error:  # noqa: BLE001 - 单次查询失败只回错误文案
+            log.warning(
+                "feishu_bot.option_intel_failed", ticker=ticker, error=str(error)
+            )
+            self._transport.send_text(
+                chat_id, f"{ticker} 期权数据拉取失败：{type(error).__name__}"
+            )
+            return
+        if intel is None:
+            self._transport.send_text(
+                chat_id, f"取不到 {ticker} 的现价，无法计算期权情报。"
+            )
+            return
+        from quant_signal.notifier.cards import option_intel_card
+
+        card = option_intel_card(
+            [intel],
+            session=intel.session,
+            iv_rv_warn_ratio=self._settings.option_intel.iv_rv_warn_ratio,
         )
         self._transport.send_card(chat_id, card)
 
