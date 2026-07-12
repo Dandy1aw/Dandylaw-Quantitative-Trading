@@ -177,7 +177,7 @@ def test_stale_bars_without_live_price_omit_day_change(tmp_path: Path) -> None:
 
 def test_signal_tally_counts_distinct_not_intraday_repeats(tmp_path: Path) -> None:
     engine, notifier = make_engine(tmp_path)
-    for minutes in (0, 5, 10):  # 盘中同一信号每 5 分钟重复入账(pushed=False)
+    for minutes in (0, 5, 10):  # 盘中同一信号每 5 分钟重复入账
         engine.ledger.insert(
             Signal(
                 ticker="NVDA",
@@ -187,7 +187,7 @@ def test_signal_tally_counts_distinct_not_intraday_repeats(tmp_path: Path) -> No
                 strategy_id="breakout_20d",
                 ts=NOW + timedelta(minutes=minutes),
             ),
-            pushed=False,
+            pushed=True,
             now=NOW + timedelta(minutes=minutes),
         )
     run(engine, NOW)
@@ -195,6 +195,45 @@ def test_signal_tally_counts_distinct_not_intraday_repeats(tmp_path: Path) -> No
     body = notifier.cards[0].body_md
     assert "BUY 1" in body
     assert "306" not in body and "BUY 3" not in body
+    assert "已推送 1" in body   # 推送数同样去重，不能大于信号总数
+
+
+def test_partial_positions_fall_back_to_screenshot_pnl(tmp_path: Path) -> None:
+    """截图缺股数/成本(precision=ESTIMATED)时退回截图时点盈亏并加 * 标注。"""
+    engine, notifier = make_engine(tmp_path, live={"MU": 105.0})
+    extraction = PortfolioExtraction(
+        account=ExtractedAccount(
+            equity="5995.52",
+            market_value="4244.15",
+            cash="1751.13",
+            buying_power="3474.15",
+            frozen_cash="0",
+            processing_cash="0",
+            total_unrealized_pnl="-108.04",
+            day_pnl="68.33",
+            currency="USD",
+            reported_position_count=6,
+            observed_at=OBSERVED_AT,
+        ),
+        positions=(
+            ExtractedPosition(
+                symbol="MU", pnl="166.82", pnl_pct="20.23", weight_pct="16.53"
+            ),
+        ),
+    )
+    result = validate_extraction(
+        extraction,
+        image_sha256="b" * 64,
+        uploaded_at=OBSERVED_AT,
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+    assert engine.ledger.save_portfolio_import(result) is True
+    run(engine, NOW)
+
+    body = notifier.cards[0].body_md
+    assert "+20.2%*" in body
+    assert "截图时点" in body
 
 
 def test_no_positions_still_sends_signal_tally(tmp_path: Path) -> None:

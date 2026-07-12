@@ -25,6 +25,7 @@ class PositionRecap:
     position_pnl_pct: float | None
     market_value: Decimal | None
     international: bool = False
+    pnl_as_of_screenshot: bool = False  # 缺股数/成本时退回截图时点盈亏
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,12 @@ def build_close_recap(
         ]
         for r in recaps:
             symbol = f"{r.symbol}†" if r.international else r.symbol
+            pnl = _pct(r.position_pnl_pct)
+            if r.position_pnl_pct is not None and r.pnl_as_of_screenshot:
+                pnl += "*"
             lines.append(
                 f"| {symbol} | {_money(r.close)} | {_pct(r.day_change_pct)} |"
-                f" {_pct(r.position_pnl_pct)} | {_money(r.market_value)} |"
+                f" {pnl} | {_money(r.market_value)} |"
             )
         usd = [
             r for r in recaps if not r.international and r.market_value is not None
@@ -94,6 +98,8 @@ def build_close_recap(
     notes = ["持仓盈亏=收盘价 vs 截图成本"]
     if observed_at is not None:
         notes.insert(0, f"持仓快照 {observed_at:%m-%d %H:%M}")
+    if any(r.pnl_as_of_screenshot for r in recaps):
+        notes.append("* 截图时点盈亏（截图缺股数/成本明细）")
     if any(r.international for r in recaps):
         notes.append("† 非USD标的，不计入市值合计")
     lines += ["", "> " + " · ".join(notes)]

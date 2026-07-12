@@ -68,7 +68,18 @@ def _recap(
 
     day = float(close / prev) - 1.0 if close and prev else None
     avg = _positive_decimal(row.get("avg_entry_price"))
-    pnl = float(close / avg) - 1.0 if close and avg else None
+    pnl: float | None = None
+    pnl_as_of_screenshot = False
+    if close is not None and avg is not None:
+        pnl = float(close / avg) - 1.0
+    else:
+        raw_pct = row.get("pnl_pct")  # 截图里的盈亏比例(如 "20.23")
+        if raw_pct is not None:
+            try:
+                pnl = float(str(raw_pct)) / 100.0
+                pnl_as_of_screenshot = True
+            except ValueError:
+                pnl = None
     qty = _positive_decimal(row.get("qty"))
     market_value = (
         qty * close
@@ -83,6 +94,7 @@ def _recap(
         position_pnl_pct=pnl,
         market_value=market_value,
         international=international,
+        pnl_as_of_screenshot=pnl_as_of_screenshot,
     )
 
 
@@ -106,11 +118,16 @@ def run(engine: "Engine", now: datetime) -> None:
     distinct = {
         (str(r["ticker"]), str(r["strategy_id"]), str(r["direction"])) for r in rows
     }
+    pushed_keys = {
+        (str(r["ticker"]), str(r["strategy_id"]), str(r["direction"]))
+        for r in rows
+        if bool(r["pushed"])
+    }
     tally = SignalTally(
         total=len(distinct),
         buys=sum(1 for key in distinct if key[2] == "buy"),
         sells=sum(1 for key in distinct if key[2] == "sell"),
-        pushed=sum(1 for r in rows if bool(r["pushed"])),
+        pushed=len(pushed_keys),
     )
     card = build_close_recap(
         recaps, session=session, tally=tally, observed_at=observed_at

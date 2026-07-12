@@ -84,6 +84,26 @@ def test_international_positions_excluded_from_usd_total() -> None:
     assert "非USD" in card.body_md or "国际" in card.body_md
 
 
+def test_screenshot_pnl_fallback_is_marked() -> None:
+    card = build_close_recap(
+        [
+            PositionRecap(
+                symbol="MU",
+                close=Decimal("105"),
+                day_change_pct=0.05,
+                position_pnl_pct=0.2023,
+                market_value=Decimal("991.06"),
+                pnl_as_of_screenshot=True,
+            )
+        ],
+        session=SESSION,
+        tally=tally(),
+        observed_at=OBSERVED_AT,
+    )
+    assert "+20.2%*" in card.body_md
+    assert "截图时点" in card.body_md
+
+
 def test_signal_tally_line() -> None:
     card = build_close_recap(
         [recap()], session=SESSION, tally=tally(9, 7, 2, 1), observed_at=OBSERVED_AT
