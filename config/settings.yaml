@@ -153,6 +153,15 @@ option_flow:
   display_dedupe_underlying: true   # 每侧同标的只显示最高量合约
   display_sort_by_expiry: true      # 展示按到期日升序(近月优先)
 
+option_intel:                     # 持仓期权情报(只观察, 不推荐任何期权交易)
+  enabled: true
+  max_expiry_days: 60             # 只看 60 天内到期的合约
+  min_expected_move_dte: 7        # 预期波动取 DTE>=7 的最近到期
+  top_oi_strikes: 3               # 展示 OI 最大的 N 个 strike
+  iv_rv_warn_ratio: 1.5           # ATM IV / 20日RV 超过此值提示"事件定价"
+  retention_days: 400             # 日度快照保留天数(留足一年做分位数)
+  max_tickers: 12                 # 每日最多处理的持仓标的数
+
 feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
   enabled: true
   allowed_open_ids: [ou_3953033b90bfd9b808b9309c668bb77c]

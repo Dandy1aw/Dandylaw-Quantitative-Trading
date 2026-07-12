@@ -14,6 +14,7 @@
 - [策略](#策略)
 - [指数发现池与 PAPER 执行建议](#指数发现池与-paper-执行建议)
 - [美股期权异动提醒（Cboe 四市场）](#美股期权异动提醒cboe-四市场)
+- [持仓期权情报（期权市场当信息源）](#持仓期权情报期权市场当信息源)
 - [飞书机器人交互（可选）](#飞书机器人交互可选)
 - [调度：一天跑哪些任务](#调度一天跑哪些任务)
 - [配置参考（settings.yaml）](#配置参考settingsyaml)
@@ -33,6 +34,9 @@
 - 不维护港股/韩股专属交易日历（用固定 UTC 时间窗口兜底，见"已知限制"）
 - 不做 Web UI，所有输出走飞书（或本地终端 Console 模式）
 - 不让 AI 生成或修改任何价格、金额和股数（prompt 硬约束 + 结构化卡片独立于 AI）
+- 不推荐任何期权交易（备兑/保护性认沽/价差都不做）——期权按 100 股一张合约交易，
+  当前账户规模买不起任何一张标准合约对应的正股，卖裸期权更是禁区；期权市场
+  只作为**信息源**服务于股票决策（见"持仓期权情报"）
 - 不用当前指数成分宣称历史回测无偏（幸存者偏差显式标注）
 
 ## 架构
@@ -56,7 +60,7 @@
                     └───────────────┘
 ```
 
-单进程 monorepo，APScheduler 驱动 17 个定时任务（详见下文）。数据源
+单进程 monorepo，APScheduler 驱动 18 个定时任务（详见下文）。数据源
 （yfinance / Alpaca）与通知器（Console / 飞书）都是可切换的抽象：
 
 - 每个标的按 `tickers.<symbol>.currency` 自动派生数据源：非 USD 固定走 yfinance，USD 跟随
@@ -278,6 +282,28 @@ STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（f
 consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠ 看跌
 （可能是平仓/备兑/保护/价差/做市对冲），不构成交易建议。
 
+## 持仓期权情报（期权市场当信息源）
+
+`option_intel.enabled` 开关。**不推荐任何期权交易**（原因见"非目标"），而是把
+持仓标的的期权链当作前瞻信息源，回答"期权市场怎么看我手里的股票"：
+
+- **预期波动**：ATM straddle 中间价 ÷ 现价 ≈ 市场定价的到期前波动幅度
+  （取 DTE≥7 的最近到期）；若 30 天内有财报，另取跨财报到期算一份
+  "跨财报预期波动"——比如"财报周 ±8%"能提示你财报前是否该减仓/挂宽止损
+- **IV vs 实际波动**：ATM 隐含波动率对比 20 日实现波动率，比值超过
+  `iv_rv_warn_ratio`（默认 1.5x）标注 ⚠IV偏高（事件定价），说明期权市场
+  在为某个事件付溢价
+- **Put/Call 量比与 OI 比**：当日成交与持仓的方向倾斜（只做参考，
+  Put 多 ≠ 看跌，可能是保护盘）
+- **大 OI 执行价**：未平仓量最大的 3 个 strike，常构成支撑/压力磁吸位
+- **数据落库**：每日快照进 sqlite `option_intel_daily`（保留 400 天），
+  攒够历史后可算 IV 分位数
+
+产出三处：① 每交易日收盘后（16:40 ET，半日市 13:40 ET 槽）推「🧭 持仓期权
+情报」卡片；② 期权异动榜卡片上你的持仓标的带 📌 标记；③ 机器人指令
+`期权 <代码>`（如 `期权 MU`）现场拉取单标的情报。数据源为 Alpaca Indicative
+feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示 `-`），不编造数据。
+
 ## 飞书机器人交互（可选）
 
 `feishu_bot.enabled` 打开后，系统通过**企业自建应用**机器人的长连接（WebSocket，
@@ -290,7 +316,8 @@ consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠
   `portfolio_import` 全部安全门槛）。`VALIDATED` 自动应用；`PARTIAL` 列出校验
   错误并等待 15 分钟内回复「确认导入」；`REJECTED` 绝不应用
 - 文本指令：`状态`（系统概况）/ `持仓`（截图账户+持仓）/ `计划`（活跃执行
-  计划）/ `期权`（最新期权榜，读台账不新抓）/ `帮助`
+  计划）/ `期权`（最新期权榜，读台账不新抓）/ `期权 <代码>`（单标的期权
+  情报，现场拉取，如 `期权 MU`）/ `帮助`
 - **接管全部推送**：`push_receive_id` 填 `ou_xxx`（单聊）或 `oc_xxx`（群，需
   先把机器人拉进群）后，早报/信号/行动卡/期权榜/告警等所有卡片都改由自建
   应用发送，webhook 群通道自动闲置；清空该项即回退 webhook，零迁移风险
@@ -329,6 +356,7 @@ consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠
 | `option_flow` | 10:00–15:45 ET 每15分钟 | NYSE 交易日历 | Cboe 四市场期权 Call/Put Top10 扫描，基线/实质变化才推送 |
 | `option_flow_close` | 16:20 ET | NYSE 交易日历 | 期权收盘榜（force_summary，让 ≈15 分钟延迟的补全覆盖收盘） |
 | `option_flow_drain` | 16:35–21:35 ET 每小时 | NYSE 交易日历 | 只重试期权 outbox 未发出的卡（不抓数据），保证收盘榜在过期窗口内有真实重试 |
+| `option_intel` | 13:40 + 16:40 ET 双槽 | NYSE 交易日历 + 收盘后 25–70 分钟窗口 | 持仓标的期权情报卡（预期波动/IV vs RV/PC比/大OI），半日市走 13:40 槽 |
 | `postmarket` | 16:30 ET | NYSE 交易日历 | 当日信号日报（数量、理论收益） |
 | `negative_overreaction` | 16:45 ET | NYSE 交易日历 | 利空错杀观察（新闻分类+企稳确认，仅观察不建仓） |
 | `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉 + 台账/行情备份（保留14天） |
@@ -438,6 +466,15 @@ option_flow:                     # 期权异动提醒（Cboe 四市场，只观�
   intraday_expiry_minutes: 45    # 盘中卡过期取消
   closing_expiry_hours: 12       # 收盘榜过期时间
   min_venue_coverage: 1.0        # 四市场缺一即 fail closed
+
+option_intel:                    # 持仓期权情报（只观察，不推荐任何期权交易）
+  enabled: false
+  max_expiry_days: 60            # 只看 60 天内到期的合约
+  min_expected_move_dte: 7       # 预期波动取 DTE>=7 的最近到期
+  top_oi_strikes: 3              # 展示 OI 最大的 N 个 strike
+  iv_rv_warn_ratio: 1.5          # ATM IV / 20日RV 超过此值提示"事件定价"
+  retention_days: 400            # 日度快照保留天数（留足一年做 IV 分位数）
+  max_tickers: 12                # 每日最多处理的持仓标的数
 
 legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回滚
   enabled: false
@@ -567,7 +604,7 @@ quant-signal/
 │   └── .env                    # 凭证（不提交 git）
 ├── src/quant_signal/
 │   ├── main.py                 # 入口：uv run quant-signal
-│   ├── scheduler.py            # 17 个定时任务的注册与门控逻辑
+│   ├── scheduler.py            # 18 个定时任务的注册与门控逻辑
 │   ├── engine.py                # 依赖装配与兼容入口
 │   ├── pipelines/               # premarket/intraday/execution_plan/option_flow 等工作流
 │   ├── config.py                # 配置加载（yaml + .env）
@@ -578,6 +615,7 @@ quant-signal/
 │   ├── report.py                  # 日报统计
 │   ├── watch_monitor.py           # 持仓偏离检测（纯函数）
 │   ├── options_flow.py            # 期权榜领域模型：OCC symbol/聚合排名/异动判定
+│   ├── options_intel.py           # 持仓期权情报领域模型：预期波动/IV vs RV/PC比/大OI
 │   ├── feishu_bot.py              # 自建应用机器人：长连接指令交互+截图导入
 │   ├── portfolio_import.py        # 券商截图解析(Codex)+对账校验+导入
 │   ├── index_universe.py           # 指数发现池（纳指100+标普500 成分）
@@ -590,7 +628,7 @@ quant-signal/
 │   │   ├── yf_source.py           # yfinance 实现
 │   │   ├── alpaca_source.py       # Alpaca REST 实现
 │   │   ├── cboe_options.py        # Cboe 四市场期权榜发现（网站 JSON 接口）
-│   │   ├── alpaca_options.py      # Alpaca Indicative 期权补全（OI/报价/Greeks）
+│   │   ├── alpaca_options.py      # Alpaca Indicative 期权补全（OI/报价/Greeks）+ 期权链快照
 │   │   ├── fx.py                  # 实时汇率查询
 │   │   └── store.py               # duckdb 行情读写
 │   ├── strategies/
