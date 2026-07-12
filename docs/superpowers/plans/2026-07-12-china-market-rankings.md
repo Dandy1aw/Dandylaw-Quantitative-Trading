@@ -127,8 +127,10 @@ Commit: `feat: define China ranking domain and settings`
 
 - [ ] **Step 3: 验证并提交**
 
-Run: `uv run pytest tests/test_china_calendar.py -q`  
-Run: `uv run mypy src/quant_signal/china_calendar.py`  
+Run: `uv run pytest tests/test_china_calendar.py -q`
+
+Run: `uv run mypy src/quant_signal/china_calendar.py`
+
 Commit: `feat: add China exchange calendar`
 
 ### Task 3: 独立点时行情库
@@ -160,8 +162,10 @@ Commit: `feat: add China exchange calendar`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_china_store.py -q`  
-Run: `uv run mypy src/quant_signal/datafeed/china_store.py`  
+Run: `uv run pytest tests/test_china_store.py -q`
+
+Run: `uv run mypy src/quant_signal/datafeed/china_store.py`
+
 Commit: `feat: persist point-in-time China market data`
 
 ### Task 4: Tushare 主源
@@ -186,8 +190,10 @@ Commit: `feat: persist point-in-time China market data`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_tushare_china.py -q`  
-Run: `uv run mypy src/quant_signal/datafeed/china_base.py src/quant_signal/datafeed/tushare_china.py`  
+Run: `uv run pytest tests/test_tushare_china.py -q`
+
+Run: `uv run mypy src/quant_signal/datafeed/china_base.py src/quant_signal/datafeed/tushare_china.py`
+
 Commit: `feat: add Tushare China market source`
 
 ### Task 5: AKShare 整批回退与数据质量门
@@ -215,8 +221,10 @@ Commit: `feat: add Tushare China market source`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_akshare_china.py tests/test_china_dataqa.py -q`  
-Run: `uv run mypy src/quant_signal/datafeed/akshare_china.py src/quant_signal/china_dataqa.py`  
+Run: `uv run pytest tests/test_akshare_china.py tests/test_china_dataqa.py -q`
+
+Run: `uv run mypy src/quant_signal/datafeed/akshare_china.py src/quant_signal/china_dataqa.py`
+
 Run: `uv lock --check`
 Commit: `feat: add fail-closed China data fallback`
 
@@ -249,7 +257,8 @@ uv run pytest tests/test_ledger.py tests/test_china_ranking_ledger.py -q
 uv run mypy src/quant_signal/ledger.py
 ```
 
-复制 `data/signals.db` 到临时目录，打开后确认旧 signals、账户、期权和执行计划数量不变。  
+复制 `data/signals.db` 到临时目录，打开后确认旧 signals、账户、期权和执行计划数量不变。
+
 Commit: `feat: persist versioned China ranking snapshots`
 
 ### Task 7: A 股资格过滤与 baseline 排名
@@ -275,8 +284,10 @@ Commit: `feat: persist versioned China ranking snapshots`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_china_universe.py tests/test_china_a_ranking.py -q`  
-Run: `uv run mypy src/quant_signal/china_universe.py src/quant_signal/china_scanner.py`  
+Run: `uv run pytest tests/test_china_universe.py tests/test_china_a_ranking.py -q`
+
+Run: `uv run mypy src/quant_signal/china_universe.py src/quant_signal/china_scanner.py`
+
 Commit: `feat: rank eligible A-share candidates`
 
 ### Task 8: A 股流水线与移动端卡片
@@ -304,8 +315,10 @@ Commit: `feat: rank eligible A-share candidates`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_china_ingest_pipeline.py tests/test_china_a_pipeline.py tests/test_china_cards.py -q`  
-Run: `uv run mypy src/quant_signal/pipelines/china_ingest.py src/quant_signal/pipelines/china_rankings.py src/quant_signal/notifier/china_cards.py`  
+Run: `uv run pytest tests/test_china_ingest_pipeline.py tests/test_china_a_pipeline.py tests/test_china_cards.py -q`
+
+Run: `uv run mypy src/quant_signal/pipelines/china_ingest.py src/quant_signal/pipelines/china_rankings.py src/quant_signal/notifier/china_cards.py`
+
 Commit: `feat: build mobile A-share rankings in shadow mode`
 
 ### Task 9: 场内 ETF/LOF 分类榜
@@ -340,8 +353,10 @@ ETF 默认上市 ≥120 日、规模 ≥2 亿元、20 日成交额中位数 ≥1
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_china_exchange_funds.py tests/test_china_exchange_fund_pipeline.py tests/test_china_cards.py -q`  
-Run: `uv run mypy src/quant_signal/china_exchange_funds.py src/quant_signal/pipelines/china_rankings.py`  
+Run: `uv run pytest tests/test_china_exchange_funds.py tests/test_china_exchange_fund_pipeline.py tests/test_china_cards.py -q`
+
+Run: `uv run mypy src/quant_signal/china_exchange_funds.py src/quant_signal/pipelines/china_rankings.py`
+
 Commit: `feat: rank listed China funds by category`
 
 ### Task 10: 场外公募基金周榜
@@ -371,8 +386,10 @@ Commit: `feat: rank listed China funds by category`
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_china_public_funds.py tests/test_china_public_fund_pipeline.py tests/test_china_cards.py -q`  
-Run: `uv run mypy src/quant_signal/china_public_funds.py src/quant_signal/pipelines/china_rankings.py`  
+Run: `uv run pytest tests/test_china_public_funds.py tests/test_china_public_fund_pipeline.py tests/test_china_cards.py -q`
+
+Run: `uv run mypy src/quant_signal/china_public_funds.py src/quant_signal/pipelines/china_rankings.py`
+
 Commit: `feat: rank open-end public funds without price advice`
 
 ### Task 11: Engine 装配、独立调度与健康 SLA
@@ -402,7 +419,8 @@ Commit: `feat: rank open-end public funds without price advice`
 - [ ] **Step 4: 实现生产装配和验证**
 
 装配时 provider readiness 和 calendar bootstrap 失败只把中国功能置 unavailable，现有美股 scheduler 仍必须启动。
-Run: `uv run pytest tests/test_engine.py tests/test_scheduler.py tests/test_china_runtime.py -q`  
+Run: `uv run pytest tests/test_engine.py tests/test_scheduler.py tests/test_china_runtime.py -q`
+
 Run: `uv run mypy src/quant_signal/china_runtime.py src/quant_signal/engine.py src/quant_signal/main.py src/quant_signal/scheduler.py`
 Commit: `feat: schedule China rankings independently`
 
@@ -432,8 +450,10 @@ Top10 使用窄行文本/卡片而非 Markdown 表格，固定显示行情/NAV �
 
 - [ ] **Step 4: 验证并提交**
 
-Run: `uv run pytest tests/test_feishu_bot.py tests/test_backup.py tests/test_deploy.py -q`  
-Run: `uv run mypy src/quant_signal/feishu_bot.py src/quant_signal/backup.py`  
+Run: `uv run pytest tests/test_feishu_bot.py tests/test_backup.py tests/test_deploy.py -q`
+
+Run: `uv run mypy src/quant_signal/feishu_bot.py src/quant_signal/backup.py`
+
 Commit: `feat: expose and operate China rankings safely`
 
 ### Task 13: 点时回测、前向绩效与发布门
