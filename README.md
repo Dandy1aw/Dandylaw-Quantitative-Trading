@@ -357,7 +357,7 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 | `option_flow_close` | 16:20 ET | NYSE 交易日历 | 期权收盘榜（force_summary，让 ≈15 分钟延迟的补全覆盖收盘） |
 | `option_flow_drain` | 16:35–21:35 ET 每小时 | NYSE 交易日历 | 只重试期权 outbox 未发出的卡（不抓数据），保证收盘榜在过期窗口内有真实重试 |
 | `option_intel` | 13:40 + 16:40 ET 双槽 | NYSE 交易日历 + 收盘后 25–70 分钟窗口 | 持仓标的期权情报卡（预期波动/IV vs RV/PC比/大OI），半日市走 13:40 槽 |
-| `postmarket` | 16:30 ET | NYSE 交易日历 | 当日信号日报（数量、理论收益） |
+| `postmarket` | 16:30 ET | NYSE 交易日历 | 收盘复盘卡：截图持仓逐标的当日涨跌/持仓盈亏/市值 + 组合加权小结 + 当日信号计数 |
 | `negative_overreaction` | 16:45 ET | NYSE 交易日历 | 利空错杀观察（新闻分类+企稳确认，仅观察不建仓） |
 | `maintenance` | 03:00 ET | 无 | 近 10 日缺 bar 重拉 + 台账/行情备份（保留14天） |
 | `data_qa` | 03:30 ET | 无 | 两源收盘价偏差体检 |
@@ -524,8 +524,9 @@ uv run quant-signal
 三种卡片模板（`notifier/cards.py`）：
 
 1. **信号卡片**：`{emoji} {ticker} {方向}`，含现价/触发原因/建议仓位/策略/时间(SGT)
-2. **早报/日报卡片**：markdown 表格，早报含"标的/方向/参考价/现价/原因"，最多
-   展示 5 条（BUY 按动量排名优先，超出的在末尾注明"还有 N 条见台账"）
+2. **早报/复盘卡片**：markdown 表格，早报含"标的/方向/参考价/现价/原因"，最多
+   展示 5 条（BUY 按动量排名优先，超出的在末尾注明"还有 N 条见台账"）；
+   收盘复盘卡含"标的/收盘/当日/持仓盈亏/市值"与组合加权小结，缺数据显示 `-`
 3. **告警卡片**：红色 header，用于心跳失败和限流汇总
 4. **期权热度卡片**：标题"🔥 美股期权热度 · Cboe四市场"，纯结构化分段
    （数据身份/异动聚焦/CALL Top10/PUT Top10/解释边界），不用 markdown
@@ -612,7 +613,7 @@ quant-signal/
 │   ├── ledger.py                 # sqlite 信号台账 + 虚拟持仓 + 参考价查询
 │   ├── ingest.py                  # 历史数据入库 CLI，按标的分流数据源
 │   ├── seed_holdings.py           # 初始化虚拟持仓 CLI
-│   ├── report.py                  # 日报统计
+│   ├── report.py                  # 收盘复盘卡（持仓表现+信号计数）
 │   ├── watch_monitor.py           # 持仓偏离检测（纯函数）
 │   ├── options_flow.py            # 期权榜领域模型：OCC symbol/聚合排名/异动判定
 │   ├── options_intel.py           # 持仓期权情报领域模型：预期波动/IV vs RV/PC比/大OI

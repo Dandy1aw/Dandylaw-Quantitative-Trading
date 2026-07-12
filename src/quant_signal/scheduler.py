@@ -253,9 +253,7 @@ def build_scheduler(
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="postmarket")
             return
-        from quant_signal.report import build_daily_report
-
-        notifier.send(build_daily_report(ledger, store, now_et.date()))
+        engine.run_postmarket(datetime.now(timezone.utc))
 
     def negative_overreaction() -> None:
         now_et = _now_et()

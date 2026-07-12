@@ -37,6 +37,7 @@ from quant_signal.pipelines.option_flow import deliver as deliver_option_flow_al
 from quant_signal.pipelines.option_flow import run as run_option_flow_pipeline
 from quant_signal.pipelines.option_intel import run as run_option_intel_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
+from quant_signal.pipelines.postmarket import run as run_postmarket_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
@@ -342,6 +343,9 @@ class Engine:
 
     def run_performance(self, now: datetime) -> None:
         run_performance_pipeline(self, now)
+
+    def run_postmarket(self, now: datetime) -> None:
+        run_postmarket_pipeline(self, now)
 
     def run_data_qa(self, now: datetime) -> None:
         run_dataqa_pipeline(self, now)
