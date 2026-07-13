@@ -25,7 +25,7 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.ai_briefing.command == "codex"
     assert s.strategies["momentum_rotation"]["top_n"] == 3
     assert s.notify.dedup_hours == 4
-    assert s.notify.action_card_only is True
+    assert s.notify.action_card_only is False
     # 趋势闸门：阶段B回测选出的最优配置(仅200线+防御，关绝对动量)
     assert s.trend_gate.enabled is True
     assert s.trend_gate.use_mom is False

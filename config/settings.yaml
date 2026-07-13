@@ -82,7 +82,7 @@ strategies:
 
 notify:
   dedup_hours: 4
-  action_card_only: true
+  action_card_only: false
   premarket_hourly_limit: 10
   intraday_hourly_limit: 10
   deviation_hourly_limit: 10
