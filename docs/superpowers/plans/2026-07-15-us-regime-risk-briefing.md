@@ -6,7 +6,7 @@
 
 **Architecture:** Add focused pure-computation modules for market regime, strategy lanes, and position discipline, then persist their snapshots and compose a single deterministic briefing payload. The scheduler invokes one briefing pipeline in two explicit modes; AI only explains the versioned payload and cannot alter prices or quantities.
 
-**Tech Stack:** Python 3.11, pandas, Pydantic 2, DuckDB, APScheduler, pytest, mypy, existing Feishu card/notifier and index-universe providers.
+**Tech Stack:** Python 3.11, pandas, Pydantic 2, DuckDB daily-bar store, SQLite decision ledger, APScheduler, pytest, mypy, existing Feishu card/notifier and index-universe providers.
 
 ---
 
@@ -288,7 +288,7 @@ Expected: FAIL because the tables and methods are missing.
 
 - [ ] **Step 3: Add schema and repository methods**
 
-Add DuckDB tables `market_regime_snapshots`, `candidate_lane_snapshots`, `position_discipline_states`, and `us_briefing_runs`. Use JSON payloads for versioned domain details plus indexed identity columns for queries. All replacement writes use explicit transactions; report identity has a unique constraint.
+Add SQLite ledger tables `market_regime_snapshots`, `candidate_lane_snapshots`, `position_discipline_states`, and `us_briefing_runs`. Use JSON payloads for versioned domain details plus indexed identity columns for queries. All replacement writes use explicit transactions; report identity has a unique constraint.
 
 - [ ] **Step 4: Run tests and verify GREEN**
 
@@ -517,4 +517,3 @@ git commit -m "test: verify US briefing end to end"
 - [ ] SKHY remains observation-only until each required lookback is genuinely available.
 - [ ] AI failure or numeric rejection leaves the deterministic report intact.
 - [ ] Only after shadow review, change `delivery_mode` from `shadow` to `live` in a separate reviewed release commit.
-
