@@ -233,6 +233,8 @@ def test_live_pipeline_discovers_nasdaq_candidates_and_applies_holding_disciplin
     stored = engine.ledger.candidate_lane_snapshot("US_CLOSE", date(2026, 7, 14))
     assert stored
     assert all(row["ticker"] != "RAM" for row in stored)
+    assert any(isinstance(row.get("suggested_qty"), int) for row in stored)
+    assert "建议" in body and "股" in body
 
 
 def test_repeated_run_does_not_resend_card(tmp_path: Path) -> None:

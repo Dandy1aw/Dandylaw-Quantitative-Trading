@@ -352,11 +352,19 @@ def us_briefing_card(
         lane = lane_names.get(
             str(candidate.get("lane", "")), str(candidate.get("lane", "-"))
         )
+        quantity = candidate.get("suggested_qty")
+        block_reason = candidate.get("block_reason")
+        sizing = (
+            f"｜建议 {_briefing_number(quantity, 0)} 股 / "
+            f"${_briefing_number(candidate.get('suggested_notional'))}"
+            if quantity is not None
+            else f"｜股数不可用（{block_reason or '账户数据不足'}）"
+        )
         lane_lines.append(
             f"• {ticker}｜{lane}｜买入 {_briefing_number(candidate.get('entry_low'))}"
             f"–{_briefing_number(candidate.get('entry_high'))}｜失效 "
             f"{_briefing_number(candidate.get('invalidation_price'))}｜目标 "
-            f"{_briefing_number(candidate.get('target_price'))}"
+            f"{_briefing_number(candidate.get('target_price'))}{sizing}"
         )
     sections.append(CardSection("\n".join(lane_lines)))
     discipline_lines = ["**持仓纪律**"]

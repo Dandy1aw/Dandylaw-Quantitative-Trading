@@ -381,6 +381,8 @@ def test_us_briefing_card_is_compact_and_action_oriented() -> None:
                 "entry_high": 208.0,
                 "invalidation_price": 198.0,
                 "target_price": 228.0,
+                "suggested_qty": 3,
+                "suggested_notional": 624.0,
             }
         ],
         discipline=[
@@ -409,6 +411,7 @@ def test_us_briefing_card_is_compact_and_action_oriented() -> None:
 
     assert "回调" in card.body_md
     assert "AAPL" in card.body_md
+    assert "建议 3 股 / $624.00" in card.body_md
     assert "卖出 25 股（累计 25%）" in card.body_md
     assert "SKHY：历史仅 4 个交易日" in card.body_md
     assert "|---" not in card.body_md

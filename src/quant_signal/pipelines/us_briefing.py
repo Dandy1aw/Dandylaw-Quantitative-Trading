@@ -21,9 +21,16 @@ from quant_signal.ai_briefing import (
 )
 from quant_signal.calendar import is_trading_day, previous_trading_day, session_close_utc
 from quant_signal.candidate_lanes import (
+    Candidate,
     CandidateDiscovery,
     CandidateObservation,
     discover_candidates,
+)
+from quant_signal.execution import (
+    PlanCandidate,
+    apply_portfolio_limits,
+    build_plan,
+    portfolio_budget_from_state,
 )
 from quant_signal.market_regime import RegimeSnapshot, classify_market_regime
 from quant_signal.notifier.cards import us_briefing_card
@@ -268,6 +275,81 @@ def _discipline(
     return advice, summary
 
 
+def _upcoming_us_session(now: datetime) -> date:
+    now_utc = now.astimezone(timezone.utc)
+    day = now_utc.astimezone(ET).date()
+    close = session_close_utc(day) if is_trading_day(day) else None
+    if close is not None and now_utc < close.astimezone(timezone.utc):
+        return day
+    day += timedelta(days=1)
+    while not is_trading_day(day):
+        day += timedelta(days=1)
+    return day
+
+
+def _size_candidates(
+    engine: Engine,
+    candidates: Sequence[Candidate],
+    account: AccountState | None,
+    now: datetime,
+) -> list[dict[str, object]]:
+    payloads = [_mapping(candidate) for candidate in candidates]
+    if account is None:
+        for payload in payloads:
+            payload.update(
+                {
+                    "suggested_qty": None,
+                    "suggested_notional": None,
+                    "plan_state": "BLOCKED",
+                    "block_reason": "NO_ACCOUNT",
+                }
+            )
+        return payloads
+    plan_date = _upcoming_us_session(now)
+    plans = [
+        build_plan(
+            PlanCandidate(
+                ticker=candidate.ticker,
+                plan_date=plan_date,
+                entry_low=candidate.entry_low,
+                entry_high=candidate.entry_high,
+                stop_loss=candidate.invalidation_price,
+                take_profit=candidate.target_price,
+                target_weight=None,
+                score=candidate.score,
+                source_strategies=(candidate.lane.value,),
+                memberships=("nasdaq100",),
+                quote_at=now,
+                currency="USD",
+            ),
+            account.snapshot,
+            account.positions,
+            account.open_orders,
+            engine.settings.execution_plan,
+            now,
+            observed_positions=account.observed_positions,
+        )
+        for candidate in candidates
+    ]
+    plans = apply_portfolio_limits(
+        plans,
+        account.snapshot.equity,
+        engine.settings.execution_plan,
+        budget=portfolio_budget_from_state(account, engine.settings.execution_plan),
+    )
+    for payload, plan in zip(payloads, plans):
+        payload.update(
+            {
+                "suggested_qty": plan.suggested_qty,
+                "suggested_notional": plan.suggested_notional,
+                "plan_state": plan.state.value,
+                "block_reason": plan.block_reason,
+                "valid_session": plan.plan_date.isoformat(),
+            }
+        )
+    return payloads
+
+
 def _skhy_observation(
     bars: pd.DataFrame, existing: Sequence[CandidateObservation]
 ) -> CandidateObservation | None:
@@ -386,6 +468,7 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     regime_payload, candidates, discipline, portfolio_risk, observations = _payloads(
         regime, discovery, advice, risk
     )
+    candidates = _size_candidates(engine, discovery.candidates, account, now)
     if mode == BriefingMode.ASIA_CONFIRM:
         asia, asia_quality = _asia_context(engine, now)
         regime_payload["asia_context"] = asia
