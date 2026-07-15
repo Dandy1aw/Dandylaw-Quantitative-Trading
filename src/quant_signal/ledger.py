@@ -1506,9 +1506,10 @@ class SignalLedger:
         *,
         payload: Mapping[str, object],
         delivered: bool,
+        shadowed: bool = False,
         now: datetime,
     ) -> None:
-        status = "DELIVERED" if delivered else "SHADOWED"
+        status = "DELIVERED" if delivered else "SHADOWED" if shadowed else "FAILED"
         with self._lock:
             self._con.execute(
                 "UPDATE us_briefing_runs SET status = ?, payload_json = ?, completed_at = ?"

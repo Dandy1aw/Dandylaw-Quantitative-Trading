@@ -35,12 +35,13 @@ NOW_ASIA = datetime(2026, 7, 15, 7, 30, tzinfo=timezone.utc)
 
 
 class FakeNotifier:
-    def __init__(self) -> None:
+    def __init__(self, results: list[bool] | None = None) -> None:
         self.cards: list[Card] = []
+        self.results = list(results or [])
 
     def send(self, card: Card) -> bool:
         self.cards.append(card)
-        return True
+        return self.results.pop(0) if self.results else True
 
 
 class FakeSource:
@@ -169,6 +170,7 @@ def _engine(
     *,
     delivery_mode: str = "live",
     account_provider: object | None = None,
+    notifier: FakeNotifier | None = None,
 ) -> tuple[Engine, FakeNotifier]:
     bars, members = _bars()
     settings = make_test_settings(
@@ -193,7 +195,7 @@ def _engine(
             ),
         ),
     )
-    notifier = FakeNotifier()
+    notifier = notifier or FakeNotifier()
     engine = Engine(
         settings,
         BarStore(tmp_path / "bars.duckdb"),
@@ -271,3 +273,31 @@ def test_asia_failure_is_explicit_and_does_not_fail_report(tmp_path: Path) -> No
     assert len(notifier.cards) == 1
     assert "亚洲确认数据不可用" in notifier.cards[0].body_md
     assert "000660.KS" not in notifier.cards[0].body_md
+
+
+def test_failed_delivery_retries_without_consuming_profit_stage(tmp_path: Path) -> None:
+    notifier = FakeNotifier([False, True])
+    engine, _ = _engine(
+        tmp_path,
+        account_provider=FixedAccountProvider(_account()),
+        notifier=notifier,
+    )
+
+    run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
+    first_run = engine.ledger.us_briefing_run(
+        next(iter(_run_ids(engine.ledger)))
+    )
+    assert first_run is not None and first_run["status"] == "FAILED"
+    assert engine.ledger.position_discipline_state("RAM") is None
+
+    run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
+    assert len(notifier.cards) == 2
+    assert all("卖出 7 股（累计 75%）" in card.body_md for card in notifier.cards)
+    state = engine.ledger.position_discipline_state("RAM")
+    assert state is not None and state.notified_stage == 3
+
+
+def _run_ids(ledger: SignalLedger) -> set[str]:
+    with ledger._lock:  # type: ignore[attr-defined]
+        rows = ledger._con.execute("SELECT run_id FROM us_briefing_runs").fetchall()  # type: ignore[attr-defined]
+    return {str(row["run_id"]) for row in rows}

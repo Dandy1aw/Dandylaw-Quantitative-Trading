@@ -250,7 +250,6 @@ def _discipline(
             settings=engine.settings.us_briefing.position_discipline,
             regime=regime.regime,
         )
-        engine.ledger.save_position_discipline_state(advice_item.next_state, now=now)
         advice.append(advice_item)
     summary = summarize_portfolio_risk(
         advice,
@@ -430,6 +429,10 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     delivered = False
     if settings.delivery_mode == "live":
         delivered = engine.notifier.send(card)
+    shadowed = settings.delivery_mode == "shadow"
+    if delivered or shadowed:
+        for item in advice:
+            engine.ledger.save_position_discipline_state(item.next_state, now=now)
     payload: dict[str, object] = {
         "regime": regime_payload,
         "candidates": candidates,
@@ -443,6 +446,7 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         report_run.run_id,
         payload=payload,
         delivered=delivered,
+        shadowed=shadowed,
         now=now,
     )
     log.info(
