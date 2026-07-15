@@ -198,4 +198,3 @@ AI 输入改成版本化 JSON，其中价格、数量、止盈止损、市场状
 
 - SK hynix 的 SEC ADS 招股材料明确纳斯达克交易代码为 `SKHY`：<https://www.sec.gov/Archives/edgar/data/2120882/000119312526299963/d32785d424b4.htm>
 - 纳斯达克官方上市说明：<https://www.nasdaq.com/newsroom/global-innovation-meets-global-capital-sk-hynix-lists-on-nasdaq>
-
