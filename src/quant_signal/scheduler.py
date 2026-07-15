@@ -589,4 +589,14 @@ def build_scheduler(
         id="performance",
         misfire_grace_time=21600,
     )
+    if us_briefing_enabled and settings is not None:
+        if settings.us_briefing.delivery_mode == "live":
+            for legacy_job in (
+                "premarket",
+                "postmarket",
+                "enrichment",
+                "execution_brief",
+            ):
+                if sched.get_job(legacy_job) is not None:
+                    sched.remove_job(legacy_job)
     return sched

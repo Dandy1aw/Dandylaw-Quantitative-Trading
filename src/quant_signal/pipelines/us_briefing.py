@@ -292,6 +292,8 @@ def _size_candidates(
     candidates: Sequence[Candidate],
     account: AccountState | None,
     now: datetime,
+    *,
+    persist_plans: bool = False,
 ) -> list[dict[str, object]]:
     payloads = [_mapping(candidate) for candidate in candidates]
     if account is None:
@@ -337,6 +339,9 @@ def _size_candidates(
         engine.settings.execution_plan,
         budget=portfolio_budget_from_state(account, engine.settings.execution_plan),
     )
+    if persist_plans:
+        for plan in plans:
+            engine.ledger.upsert_execution_plan(plan)
     for payload, plan in zip(payloads, plans):
         payload.update(
             {
@@ -468,7 +473,13 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     regime_payload, candidates, discipline, portfolio_risk, observations = _payloads(
         regime, discovery, advice, risk
     )
-    candidates = _size_candidates(engine, discovery.candidates, account, now)
+    candidates = _size_candidates(
+        engine,
+        discovery.candidates,
+        account,
+        now,
+        persist_plans=settings.delivery_mode == "live",
+    )
     if mode == BriefingMode.ASIA_CONFIRM:
         asia, asia_quality = _asia_context(engine, now)
         regime_payload["asia_context"] = asia

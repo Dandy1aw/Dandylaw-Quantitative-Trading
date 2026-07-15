@@ -235,6 +235,9 @@ def test_live_pipeline_discovers_nasdaq_candidates_and_applies_holding_disciplin
     assert all(row["ticker"] != "RAM" for row in stored)
     assert any(isinstance(row.get("suggested_qty"), int) for row in stored)
     assert "建议" in body and "股" in body
+    active_plans = engine.ledger.active_execution_plans()
+    assert active_plans
+    assert all(plan.source_strategies[0].startswith(("TREND_", "RANGE_")) for plan in active_plans)
 
 
 def test_repeated_run_does_not_resend_card(tmp_path: Path) -> None:
@@ -251,6 +254,7 @@ def test_shadow_mode_persists_without_delivery(tmp_path: Path) -> None:
     run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
     assert notifier.cards == []
     assert engine.ledger.count_us_briefing_runs() == 1
+    assert engine.ledger.active_execution_plans() == []
 
 
 def test_partial_screenshot_outputs_percentage_not_invented_qty(tmp_path: Path) -> None:

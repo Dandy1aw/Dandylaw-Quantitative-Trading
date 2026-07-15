@@ -111,6 +111,9 @@ def test_us_briefing_replaces_legacy_rotation_jobs() -> None:
 
     assert "rotation_asia_open" not in jobs
     assert "rotation_asia_close" not in jobs
+    assert "premarket" not in jobs
+    assert "postmarket" not in jobs
+    assert "enrichment" not in jobs
     assert {"us_close_briefing", "asia_confirm_briefing"} <= jobs.keys()
     close_trigger = str(jobs["us_close_briefing"].trigger)
     assert "day_of_week='tue-sat'" in close_trigger
