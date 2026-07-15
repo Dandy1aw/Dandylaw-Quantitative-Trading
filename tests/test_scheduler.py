@@ -72,7 +72,7 @@ def test_scheduler_registers_all_jobs() -> None:
 
 
 class _USBriefingEngine:
-    def __init__(self, *, options: bool = False) -> None:
+    def __init__(self, *, options: bool = False, delivery_mode: str = "live") -> None:
         from conftest import make_test_settings
         from quant_signal.config import (
             ExecutionPlanSettings,
@@ -83,7 +83,7 @@ class _USBriefingEngine:
         self.settings = make_test_settings(
             execution_plan=ExecutionPlanSettings(enabled=False),
             option_flow=OptionFlowSettings(enabled=options),
-            us_briefing=USBriefingSettings(enabled=True, delivery_mode="live"),
+            us_briefing=USBriefingSettings(enabled=True, delivery_mode=delivery_mode),  # type: ignore[arg-type]
         )
         self.briefing_calls: list[str] = []
         self.option_calls: list[bool] = []
@@ -138,6 +138,19 @@ def test_option_close_is_staggered_when_us_briefing_is_enabled() -> None:
     trigger = str(closing.trigger)
     assert "hour='0'" in trigger and "minute='2'" in trigger
     assert str(closing.trigger.timezone) == "UTC"
+
+
+def test_shadow_briefing_keeps_legacy_notifications_running() -> None:
+    engine = _USBriefingEngine(delivery_mode="shadow")
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    assert {"rotation_asia_open", "rotation_asia_close"} <= jobs.keys()
+    assert {"us_close_briefing", "asia_confirm_briefing"} <= jobs.keys()
 
 
 def test_execution_jobs_run_at_0815_and_watch_is_staggered_one_minute() -> None:

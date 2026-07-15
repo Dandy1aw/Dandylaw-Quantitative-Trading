@@ -392,10 +392,11 @@ def build_scheduler(
         misfire_grace_time=3600,
     )
     if us_briefing_enabled:
-        sched.remove_job("rotation_asia_open")
-        sched.remove_job("rotation_asia_close")
         assert settings is not None
         briefing = settings.us_briefing
+        if briefing.delivery_mode == "live":
+            sched.remove_job("rotation_asia_open")
+            sched.remove_job("rotation_asia_close")
         sched.add_job(
             runtime.wrap("us_close_briefing", us_close_briefing),
             CronTrigger(
