@@ -39,6 +39,10 @@ from quant_signal.pipelines.option_intel import run as run_option_intel_pipeline
 from quant_signal.pipelines.performance import run as run_performance_pipeline
 from quant_signal.pipelines.postmarket import run as run_postmarket_pipeline
 from quant_signal.pipelines.premarket import run as run_premarket_pipeline
+from quant_signal.pipelines.us_briefing import (
+    BriefingMode,
+    run as run_us_briefing_pipeline,
+)
 from quant_signal.strategies.base import Direction, Signal
 from quant_signal.strategies.bollinger_breakout import BollingerBreakout
 from quant_signal.strategies.breakout_20d import Breakout20d
@@ -370,3 +374,6 @@ class Engine:
 
     def run_option_intel(self, now: datetime) -> None:
         run_option_intel_pipeline(self, now)
+
+    def run_us_briefing(self, now: datetime, mode: BriefingMode) -> None:
+        run_us_briefing_pipeline(self, now, mode)
