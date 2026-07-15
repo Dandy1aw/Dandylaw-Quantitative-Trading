@@ -8,6 +8,16 @@
 
 **Tech Stack:** Python 3.11, pandas, Pydantic 2, DuckDB daily-bar store, SQLite decision ledger, APScheduler, pytest, mypy, existing Feishu card/notifier and index-universe providers.
 
+## Implementation status (2026-07-15)
+
+- Tasks 1–9 and the automated portion of Task 10 are implemented on `feat/us-regime-risk-briefing`.
+- The feature is intentionally configured as `enabled: true` and `delivery_mode: shadow`; the production worktree and A-share branches remain untouched.
+- The new report creates Nasdaq-100 candidates independently of holdings, calculates account-budgeted buy quantities, and feeds live-mode candidates into the existing five-minute confirmation watch before an entry reminder can fire.
+- Live mode suppresses the legacy holdings-centric morning/close cards and the standalone market-scan Top1 card, while shadow mode preserves all current production notifications for safe comparison.
+- Large observation pools are summarized by exclusion reason, and the AI receives compact, valid JSON containing deterministic prices, quantities and position actions rather than a character-truncated payload.
+- Automated verification: `689 passed, 2 warnings`; `mypy` reports no issues in 77 source files; `uv lock --check` and `git diff --check` pass.
+- Remaining release gate: observe five consecutive US sessions in shadow mode, complete the checklist below, then switch to `live` in a separate reviewed release commit.
+
 ---
 
 ## File map
