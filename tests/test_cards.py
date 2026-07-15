@@ -440,3 +440,31 @@ def test_us_briefing_card_never_invents_qty_for_partial_position() -> None:
 
     assert "卖出 25%（股数不可用）" in card.body_md
     assert "成本估算" in card.body_md
+
+
+def test_us_briefing_card_keeps_unconfirmed_profit_action_visible() -> None:
+    card = us_briefing_card(
+        report_kind="US_CLOSE",
+        as_of="2026-07-15",
+        regime={"regime": "TREND", "reasons": ["TREND_AND_BREADTH_HEALTHY"]},
+        candidates=[],
+        discipline=[
+            {
+                "ticker": "MU",
+                "status": "TAKE_PROFIT_DUE",
+                "cost_basis": "100.00",
+                "cost_quality": "EXACT",
+                "incremental_sell_qty": "0",
+                "incremental_sell_fraction": "0",
+                "pending_sell_fraction": "0.25",
+                "cumulative_sell_fraction": "0.25",
+                "protection_price": "102.00",
+            }
+        ],
+        portfolio_risk={},
+        observations=[],
+        data_quality=[],
+    )
+
+    assert "止盈仍待执行（累计应减 25%）" in card.body_md
+    assert "继续持有/观察" not in card.body_md

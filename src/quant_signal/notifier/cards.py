@@ -368,14 +368,17 @@ def us_briefing_card(
         quantity = item.get("incremental_sell_qty")
         quantity_number = _briefing_float(quantity)
         incremental_number = _briefing_float(item.get("incremental_sell_fraction"))
+        pending_number = _briefing_float(item.get("pending_sell_fraction"))
         fraction = _briefing_percent(item.get("incremental_sell_fraction"))
         cumulative = _briefing_percent(item.get("cumulative_sell_fraction"))
-        if quantity_number is not None and quantity_number > 0:
+        if status == "EXIT_DUE":
+            action = "止损/利润保护退出条件已触发"
+        elif quantity_number is not None and quantity_number > 0:
             action = f"卖出 {_briefing_number(quantity, 0)} 股（累计 {cumulative}）"
         elif incremental_number is not None and incremental_number > 0:
             action = f"卖出 {fraction}（股数不可用）"
-        elif status == "EXIT_DUE":
-            action = "止损退出条件已触发"
+        elif status == "TAKE_PROFIT_DUE" and pending_number is not None and pending_number > 0:
+            action = f"止盈仍待执行（累计应减 {cumulative}）"
         elif status == "REDUCE":
             action = "降低有效敞口"
         else:

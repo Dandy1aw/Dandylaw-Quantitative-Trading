@@ -51,7 +51,18 @@ def test_first_profit_stage_is_cumulative_and_idempotent() -> None:
         _position(), leverage=1, prior=advice.next_state, settings=CFG
     )
     assert repeated.incremental_sell_qty == Decimal("0")
-    assert repeated.status == DisciplineStatus.HOLD
+    assert repeated.pending_sell_fraction == Decimal("0.25")
+    assert repeated.status == DisciplineStatus.TAKE_PROFIT_DUE
+
+
+def test_observed_position_reduction_confirms_notified_stage() -> None:
+    first = advise_position(_position(), leverage=1, prior=None, settings=CFG)
+    confirmed = advise_position(
+        _position(qty="75"), leverage=1, prior=first.next_state, settings=CFG
+    )
+    assert confirmed.incremental_sell_qty == Decimal("0")
+    assert confirmed.pending_sell_fraction == Decimal("0")
+    assert confirmed.status == DisciplineStatus.HOLD
 
 
 def test_second_stage_only_sells_increment_from_original_position() -> None:
@@ -140,6 +151,22 @@ def test_stop_breach_is_exit_due() -> None:
     )
     assert advice.status == DisciplineStatus.EXIT_DUE
     assert advice.hard_stop_price == Decimal("92.00")
+
+
+def test_raised_profit_protection_breach_is_exit_due() -> None:
+    prior = DisciplineState(
+        ticker="MU",
+        basis_version="MU:100.0000",
+        notified_stage=2,
+        peak_price=Decimal("125"),
+        basis_quantity=Decimal("100"),
+    )
+    advice = advise_position(
+        _position(price="107", qty="50"), leverage=1, prior=prior, settings=CFG
+    )
+    assert advice.hard_stop_price == Decimal("92.00")
+    assert advice.protection_price == Decimal("108.00")
+    assert advice.status == DisciplineStatus.EXIT_DUE
 
 
 def test_final_stage_uses_peak_atr_trailing_protection() -> None:

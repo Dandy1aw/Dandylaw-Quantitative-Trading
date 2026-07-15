@@ -67,6 +67,8 @@ def test_repo_universe_uses_skhynix_ads_not_korean_listing() -> None:
     assert "SKHY" in settings.tickers
     assert settings.tickers["SKHY"].currency == "USD"
     assert "KRW" not in settings.momentum_group_top_n
+    assert settings.us_briefing.enabled is True
+    assert settings.us_briefing.delivery_mode == "shadow"
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -25,6 +25,8 @@ from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.pipelines.us_briefing import (
     BriefingMode,
+    _load_daily_bars,
+    _observed_input,
     last_completed_us_session,
     run,
 )
@@ -141,7 +143,7 @@ def _account(*, partial: bool = False) -> AccountState:
                     market_value=Decimal("700"),
                     estimated_market_value=None,
                     pnl=Decimal("200"),
-                    pnl_pct=Decimal("0.40"),
+                    pnl_pct=Decimal("40.00"),
                     weight_pct=Decimal("11.67"),
                     precision="PARTIAL",
                 ),
@@ -295,6 +297,56 @@ def test_failed_delivery_retries_without_consuming_profit_stage(tmp_path: Path) 
     assert all("卖出 7 股（累计 75%）" in card.body_md for card in notifier.cards)
     state = engine.ledger.position_discipline_state("RAM")
     assert state is not None and state.notified_stage == 3
+
+
+def test_screenshot_pnl_pct_is_always_converted_from_percentage_points() -> None:
+    account = _account(partial=True)
+    observed = ObservedPosition(
+        symbol="SMH",
+        qty=None,
+        avg_entry_price=None,
+        current_price=Decimal("100"),
+        market_value=Decimal("1000"),
+        estimated_market_value=None,
+        pnl=Decimal("9.50"),
+        pnl_pct=Decimal("0.95"),
+        weight_pct=Decimal("16.67"),
+        precision="PARTIAL",
+    )
+
+    position = _observed_input(observed, account, pd.DataFrame())
+
+    assert position is not None
+    assert position.pnl_pct == Decimal("0.0095")
+
+
+def test_partial_volume_primary_uses_full_volume_fallback(tmp_path: Path) -> None:
+    bars, members = _bars()
+
+    class PartialPrimary(FakeSource):
+        partial_market_volume = True
+
+        def fetch_daily_bars(self, tickers, start, end):  # type: ignore[no-untyped-def]
+            raise AssertionError("partial primary must not drive liquidity filters")
+
+    class FullVolume(FakeSource):
+        def __init__(self, data: pd.DataFrame) -> None:
+            super().__init__(data)
+            self.calls = 0
+
+        def fetch_daily_bars(self, tickers, start, end):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            return super().fetch_daily_bars(tickers, start, end)
+
+    engine, _ = _engine(tmp_path)
+    engine.source = PartialPrimary(bars)
+    full = FullVolume(bars)
+    engine._intl_source = full  # type: ignore[assignment]
+
+    loaded = _load_daily_bars(engine, members, date(2026, 7, 14))
+
+    assert not loaded.empty
+    assert full.calls > 0
 
 
 def _run_ids(ledger: SignalLedger) -> set[str]:

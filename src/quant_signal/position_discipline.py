@@ -61,6 +61,7 @@ class PositionAdvice:
     next_profit_price: Decimal | None
     cumulative_sell_fraction: Decimal
     incremental_sell_fraction: Decimal
+    pending_sell_fraction: Decimal
     incremental_sell_qty: Decimal | None
     financing_allowed: bool
     effective_exposure: Decimal | None
@@ -219,6 +220,13 @@ def advise_position(
     incremental_fraction = (
         cumulative - previous_cumulative if attained_stage > previous_stage else Decimal("0")
     )
+    observed_reduction = Decimal("0")
+    if basis_quantity is not None and basis_quantity > 0 and quantity is not None:
+        observed_reduction = max(
+            Decimal("0"),
+            min(Decimal("1"), Decimal("1") - quantity / basis_quantity),
+        )
+    pending_fraction = max(Decimal("0"), cumulative - observed_reduction)
     incremental_qty: Decimal | None
     if quantity is None or basis_quantity is None or cost is None:
         incremental_qty = None
@@ -252,9 +260,11 @@ def advise_position(
     if not financing_allowed:
         warnings.append("FINANCING_DISABLED")
 
-    if hard_stop is not None and position.current_price <= hard_stop:
+    if protection is not None and position.current_price <= protection:
         status = DisciplineStatus.EXIT_DUE
     elif incremental_fraction > 0:
+        status = DisciplineStatus.TAKE_PROFIT_DUE
+    elif pending_fraction > 0:
         status = DisciplineStatus.TAKE_PROFIT_DUE
     elif (
         pnl_pct is not None
@@ -288,6 +298,7 @@ def advise_position(
         next_profit_price=next_profit,
         cumulative_sell_fraction=cumulative,
         incremental_sell_fraction=incremental_fraction,
+        pending_sell_fraction=pending_fraction,
         incremental_sell_qty=incremental_qty,
         financing_allowed=financing_allowed,
         effective_exposure=effective_exposure,

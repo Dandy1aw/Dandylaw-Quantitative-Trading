@@ -96,18 +96,23 @@ def _load_daily_bars(
     symbols = sorted(members | {engine.settings.us_briefing.market_regime.benchmark, "SKHY"})
     start = as_of - timedelta(days=420)
     end = as_of + timedelta(days=1)
+    full_volume_fallback = bool(
+        getattr(engine.source, "partial_market_volume", False)
+    )
+    daily_source = engine._intl_source if full_volume_fallback else engine.source
+    source_name = "yfinance" if full_volume_fallback else engine.settings.data_source
     frames: list[pd.DataFrame] = []
     for offset in range(0, len(symbols), 100):
         chunk = symbols[offset : offset + 100]
         try:
-            fetched = engine.source.fetch_daily_bars(chunk, start, end)
+            fetched = daily_source.fetch_daily_bars(chunk, start, end)
         except Exception as error:  # noqa: BLE001
             log.warning("us_briefing.daily_chunk_failed", offset=offset, error=str(error))
             continue
         if not fetched.empty:
             frames.append(fetched)
     for frame in frames:
-        engine.store.write_daily_bars(frame, source=engine.settings.data_source)
+        engine.store.write_daily_bars(frame, source=source_name)
     end_time = datetime.combine(as_of, datetime.max.time(), tzinfo=timezone.utc)
     return engine.store.read_daily_bars(
         symbols,
@@ -210,7 +215,11 @@ def _observed_input(
         current_price=current,
         quantity=abs(position.qty) if position.qty is not None else None,
         avg_entry_price=position.avg_entry_price,
-        pnl_pct=(position.pnl_pct / Decimal("100") if position.pnl_pct is not None and abs(position.pnl_pct) > 2 else position.pnl_pct),
+        pnl_pct=(
+            position.pnl_pct / Decimal("100")
+            if position.pnl_pct is not None
+            else None
+        ),
         market_value=position.market_value or position.estimated_market_value,
         account_equity=account.snapshot.equity,
         atr=_latest_atr(bars, position.symbol),

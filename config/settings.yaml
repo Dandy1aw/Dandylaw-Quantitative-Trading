@@ -113,7 +113,7 @@ index_universe:
   min_dollar_volume: 50000000
 
 us_briefing:
-  enabled: false                  # 新流程先在独立分支验证，发布时切换
+  enabled: true                   # 独立分支先影子运行；delivery_mode=shadow 不发送生产卡片
   delivery_mode: shadow           # shadow 只计算/落库，不替换生产推送
   candidate_index: nasdaq100
   min_coverage: 0.98
