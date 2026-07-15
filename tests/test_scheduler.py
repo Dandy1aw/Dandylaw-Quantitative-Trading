@@ -71,6 +71,75 @@ def test_scheduler_registers_all_jobs() -> None:
     assert "watch_deviation" not in ids
 
 
+class _USBriefingEngine:
+    def __init__(self, *, options: bool = False) -> None:
+        from conftest import make_test_settings
+        from quant_signal.config import (
+            ExecutionPlanSettings,
+            OptionFlowSettings,
+            USBriefingSettings,
+        )
+
+        self.settings = make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            option_flow=OptionFlowSettings(enabled=options),
+            us_briefing=USBriefingSettings(enabled=True, delivery_mode="live"),
+        )
+        self.briefing_calls: list[str] = []
+        self.option_calls: list[bool] = []
+
+    def run_us_briefing(self, now: datetime, mode: object) -> None:
+        self.briefing_calls.append(str(getattr(mode, "value", mode)))
+
+    def run_option_flow(
+        self, now: datetime, *, force_summary: bool = False
+    ) -> None:
+        self.option_calls.append(force_summary)
+
+    def run_option_flow_delivery(self, now: datetime) -> None:
+        return None
+
+
+def test_us_briefing_replaces_legacy_rotation_jobs() -> None:
+    engine = _USBriefingEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    assert "rotation_asia_open" not in jobs
+    assert "rotation_asia_close" not in jobs
+    assert {"us_close_briefing", "asia_confirm_briefing"} <= jobs.keys()
+    close_trigger = str(jobs["us_close_briefing"].trigger)
+    assert "day_of_week='tue-sat'" in close_trigger
+    assert "hour='0'" in close_trigger and "minute='0'" in close_trigger
+    assert str(jobs["us_close_briefing"].trigger.timezone) == "UTC"
+    asia_trigger = str(jobs["asia_confirm_briefing"].trigger)
+    assert "day_of_week='mon-fri'" in asia_trigger
+    assert "hour='7'" in asia_trigger and "minute='30'" in asia_trigger
+    assert str(jobs["asia_confirm_briefing"].trigger.timezone) == "UTC"
+
+    jobs["us_close_briefing"].func()
+    jobs["asia_confirm_briefing"].func()
+    assert engine.briefing_calls == ["US_CLOSE", "ASIA_CONFIRM"]
+
+
+def test_option_close_is_staggered_when_us_briefing_is_enabled() -> None:
+    engine = _USBriefingEngine(options=True)
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+    closing = jobs["option_flow_close"]
+    trigger = str(closing.trigger)
+    assert "hour='0'" in trigger and "minute='2'" in trigger
+    assert str(closing.trigger.timezone) == "UTC"
+
+
 def test_execution_jobs_run_at_0815_and_watch_is_staggered_one_minute() -> None:
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
     jobs = {job.id: job for job in sched.get_jobs()}

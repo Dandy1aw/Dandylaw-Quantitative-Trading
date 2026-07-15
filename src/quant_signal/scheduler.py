@@ -18,6 +18,7 @@ from quant_signal.calendar import (
     previous_trading_day,
     session_close_utc,
 )
+from quant_signal.pipelines.us_briefing import BriefingMode
 
 log = structlog.get_logger()
 ET = ZoneInfo("America/New_York")
@@ -267,6 +268,18 @@ def build_scheduler(
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
         run_rotation_once()
 
+    def us_close_briefing() -> None:
+        with rotation_lock:
+            engine.run_us_briefing(
+                datetime.now(timezone.utc), BriefingMode.US_CLOSE
+            )
+
+    def asia_confirm_briefing() -> None:
+        with rotation_lock:
+            engine.run_us_briefing(
+                datetime.now(timezone.utc), BriefingMode.ASIA_CONFIRM
+            )
+
     def watch_deviation() -> None:
         engine.run_watch_deviation(datetime.now(timezone.utc))
 
@@ -325,6 +338,9 @@ def build_scheduler(
     option_intel_enabled = (
         bool(settings.option_intel.enabled) if settings is not None else False
     )
+    us_briefing_enabled = (
+        bool(settings.us_briefing.enabled) if settings is not None else False
+    )
 
     health = JobHealth()
     sched.add_listener(
@@ -375,6 +391,38 @@ def build_scheduler(
         id="rotation_asia_close",  # 15:30 北京时间
         misfire_grace_time=3600,
     )
+    if us_briefing_enabled:
+        sched.remove_job("rotation_asia_open")
+        sched.remove_job("rotation_asia_close")
+        assert settings is not None
+        briefing = settings.us_briefing
+        sched.add_job(
+            runtime.wrap("us_close_briefing", us_close_briefing),
+            CronTrigger(
+                hour=briefing.morning_hour_utc,
+                minute=briefing.morning_minute_utc,
+                day_of_week="tue-sat",
+                timezone=timezone.utc,
+            ),
+            id="us_close_briefing",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+        sched.add_job(
+            runtime.wrap("asia_confirm_briefing", asia_confirm_briefing),
+            CronTrigger(
+                hour=briefing.afternoon_hour_utc,
+                minute=briefing.afternoon_minute_utc,
+                day_of_week="mon-fri",
+                timezone=timezone.utc,
+            ),
+            id="asia_confirm_briefing",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+
     if legacy_deviation_enabled:
         # 旧普通价格偏离提醒: 默认下线, 保留 feature flag 以便快速回滚
         sched.add_job(
@@ -460,7 +508,11 @@ def build_scheduler(
         # 收盘榜：固定 UTC 时刻(北京 08:00)，用户早间统一阅读，不随夏令时漂移
         sched.add_job(
             runtime.wrap("option_flow_close", option_flow_close),
-            CronTrigger(hour=0, minute=0, timezone=timezone.utc),
+            CronTrigger(
+                hour=0,
+                minute=2 if us_briefing_enabled else 0,
+                timezone=timezone.utc,
+            ),
             id="option_flow_close",  # 08:00 北京时间
             max_instances=1,
             coalesce=True,
