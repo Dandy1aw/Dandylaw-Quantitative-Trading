@@ -10,6 +10,7 @@ from quant_signal.config import (
     NotifySettings,
     OptionFlowSettings,
     Settings,
+    USBriefingSettings,
     load_settings,
 )
 
@@ -46,6 +47,26 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.option_flow.retention_days == 120
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
+
+
+def test_us_briefing_defaults_are_safe() -> None:
+    settings = USBriefingSettings()
+    assert settings.enabled is False
+    assert settings.delivery_mode == "shadow"
+    assert settings.candidate_index == "nasdaq100"
+    assert settings.min_coverage == 0.98
+    assert settings.morning_hour_utc == 0
+    assert settings.afternoon_hour_utc == 7
+    assert settings.afternoon_minute_utc == 30
+    assert settings.position_discipline.allow_financing_for_leveraged is False
+
+
+def test_repo_universe_uses_skhynix_ads_not_korean_listing() -> None:
+    settings = load_settings()
+    assert "000660.KS" not in settings.tickers
+    assert "SKHY" in settings.tickers
+    assert settings.tickers["SKHY"].currency == "USD"
+    assert "KRW" not in settings.momentum_group_top_n
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:

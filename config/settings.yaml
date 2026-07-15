@@ -33,7 +33,7 @@ tickers:                       # 标的注册表：动量池、资产类型、�
   LLY: {asset_type: STOCK, currency: USD}
   JNJ: {asset_type: STOCK, currency: USD}
   "7709.HK": {asset_type: STOCK, currency: HKD}
-  "000660.KS": {asset_type: STOCK, currency: KRW}
+  SKHY: {asset_type: STOCK, currency: USD}
 
 trend_gate:                      # 趋势持有闸门+防御切换（阶段B回测选出的最优配置：仅200线+防御）
   enabled: true                  # 动量选出后叠加，趋势失效切防御sleeve；回测降回撤44.5%->29.5%
@@ -45,7 +45,6 @@ trend_gate:                      # 趋势持有闸门+防御切换（阶段B回�
 
 momentum_group_top_n:            # 动量轮动按币种分组独立排名的名额，不配置的币种(含美股)归入默认组用 top_n
   HKD: 1                          # 港股组名额
-  KRW: 1                          # 韩股组名额
 
 momentum_default_group_top_n:    # 美股默认组内部再按资产类型独立排名的名额
   ETF: 2
@@ -112,6 +111,36 @@ index_universe:
   execution_top_n: 5
   min_coverage: 0.98
   min_dollar_volume: 50000000
+
+us_briefing:
+  enabled: false                  # 新流程先在独立分支验证，发布时切换
+  delivery_mode: shadow           # shadow 只计算/落库，不替换生产推送
+  candidate_index: nasdaq100
+  min_coverage: 0.98
+  morning_hour_utc: 0             # 北京 08:00
+  morning_minute_utc: 0
+  afternoon_hour_utc: 7           # 北京 15:30
+  afternoon_minute_utc: 30
+  market_regime:
+    benchmark: QQQ
+    min_history_days: 201
+    trend_breadth_min: 0.60
+    risk_off_breadth_max: 0.35
+    high_volatility_annualized: 0.35
+  candidate_lanes:
+    top_n_per_lane: 3
+    minimum_price: 5
+    min_dollar_volume: 50000000
+    overheat_atr_multiple: 2.5
+    pullback_atr_multiple: 1.25
+    stop_atr_multiple: 2.0
+    target_reward_risk: 2.0
+  position_discipline:
+    hard_loss_caps: {"1x": 0.08, "2x": 0.05, "3x": 0.035}
+    breakeven_trigger: 0.10
+    stage_one_profit_lock: 0.02
+    stage_two_profit_lock: 0.08
+    allow_financing_for_leveraged: false
 
 execution_plan:
   enabled: true

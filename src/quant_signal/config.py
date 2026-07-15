@@ -96,6 +96,99 @@ class IndexUniverseSettings(BaseModel):
         return self
 
 
+class MarketRegimeSettings(BaseModel):
+    benchmark: str = "QQQ"
+    min_history_days: int = Field(default=201, ge=60, le=500)
+    trend_breadth_min: float = Field(default=0.60, ge=0, le=1)
+    risk_off_breadth_max: float = Field(default=0.35, ge=0, le=1)
+    high_volatility_annualized: float = Field(default=0.35, gt=0, le=2)
+    atr_days: int = Field(default=14, ge=5, le=60)
+    volatility_days: int = Field(default=20, ge=5, le=120)
+
+
+class CandidateLaneSettings(BaseModel):
+    top_n_per_lane: int = Field(default=3, ge=1, le=10)
+    minimum_price: float = Field(default=5.0, gt=0)
+    min_dollar_volume: float = Field(default=50_000_000, gt=0)
+    overheat_atr_multiple: float = Field(default=2.5, gt=0, le=10)
+    pullback_atr_multiple: float = Field(default=1.25, gt=0, le=5)
+    stop_atr_multiple: float = Field(default=2.0, gt=0, le=10)
+    target_reward_risk: float = Field(default=2.0, gt=1, le=10)
+
+
+class ProfitStageSettings(BaseModel):
+    gain: float = Field(gt=0, le=2)
+    cumulative_sell: float = Field(gt=0, le=1)
+
+
+def _default_profit_ladders() -> dict[str, list[ProfitStageSettings]]:
+    return {
+        "1x": [
+            ProfitStageSettings(gain=0.15, cumulative_sell=0.25),
+            ProfitStageSettings(gain=0.20, cumulative_sell=0.50),
+            ProfitStageSettings(gain=0.30, cumulative_sell=0.75),
+        ],
+        "2x": [
+            ProfitStageSettings(gain=0.10, cumulative_sell=0.25),
+            ProfitStageSettings(gain=0.15, cumulative_sell=0.50),
+            ProfitStageSettings(gain=0.20, cumulative_sell=0.75),
+        ],
+        "3x": [
+            ProfitStageSettings(gain=0.08, cumulative_sell=0.25),
+            ProfitStageSettings(gain=0.12, cumulative_sell=0.50),
+            ProfitStageSettings(gain=0.16, cumulative_sell=0.75),
+        ],
+    }
+
+
+class PositionDisciplineSettings(BaseModel):
+    profit_ladders: dict[str, list[ProfitStageSettings]] = Field(
+        default_factory=_default_profit_ladders
+    )
+    hard_loss_caps: dict[str, float] = Field(
+        default_factory=lambda: {"1x": 0.08, "2x": 0.05, "3x": 0.035}
+    )
+    breakeven_trigger: float = Field(default=0.10, gt=0, le=1)
+    stage_one_profit_lock: float = Field(default=0.02, ge=0, le=1)
+    stage_two_profit_lock: float = Field(default=0.08, ge=0, le=1)
+    trailing_atr_multiple_1x: float = Field(default=3.0, gt=0, le=10)
+    trailing_atr_multiple_leveraged: float = Field(default=2.0, gt=0, le=10)
+    allow_financing_for_leveraged: bool = False
+    max_single_effective_weight: float = Field(default=0.25, gt=0, le=1)
+    max_total_leveraged_effective_weight: float = Field(default=0.50, gt=0, le=2)
+
+    @model_validator(mode="after")
+    def validate_ladders(self) -> Self:
+        for key in ("1x", "2x", "3x"):
+            stages = self.profit_ladders.get(key)
+            if not stages or key not in self.hard_loss_caps:
+                raise ValueError(f"position discipline requires {key} rules")
+            if any(
+                later.gain <= earlier.gain
+                or later.cumulative_sell <= earlier.cumulative_sell
+                for earlier, later in zip(stages, stages[1:])
+            ):
+                raise ValueError(f"profit ladder {key} must increase monotonically")
+            cap = self.hard_loss_caps[key]
+            if cap <= 0 or cap >= 1:
+                raise ValueError(f"hard loss cap {key} must be between zero and one")
+        return self
+
+
+class USBriefingSettings(BaseModel):
+    enabled: bool = False
+    delivery_mode: Literal["shadow", "live"] = "shadow"
+    candidate_index: Literal["nasdaq100"] = "nasdaq100"
+    min_coverage: float = Field(default=0.98, ge=0.8, le=1)
+    morning_hour_utc: int = Field(default=0, ge=0, le=23)
+    morning_minute_utc: int = Field(default=0, ge=0, le=59)
+    afternoon_hour_utc: int = Field(default=7, ge=0, le=23)
+    afternoon_minute_utc: int = Field(default=30, ge=0, le=59)
+    market_regime: MarketRegimeSettings = MarketRegimeSettings()
+    candidate_lanes: CandidateLaneSettings = CandidateLaneSettings()
+    position_discipline: PositionDisciplineSettings = PositionDisciplineSettings()
+
+
 class ExecutionPlanSettings(BaseModel):
     enabled: bool = False
     account_provider: Literal["alpaca_paper", "screenshot", "none"] = "alpaca_paper"
@@ -255,6 +348,7 @@ class Settings(BaseModel):
     ai_briefing: AIBriefingSettings = AIBriefingSettings()
     trend_gate: TrendGateSettings = TrendGateSettings()
     index_universe: IndexUniverseSettings = IndexUniverseSettings()
+    us_briefing: USBriefingSettings = USBriefingSettings()
     execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
     option_flow: OptionFlowSettings = OptionFlowSettings()
     option_intel: OptionIntelSettings = OptionIntelSettings()
