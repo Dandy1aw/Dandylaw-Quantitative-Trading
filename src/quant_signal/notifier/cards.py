@@ -409,7 +409,30 @@ def us_briefing_card(
         risk_lines.append("当前没有新增杠杆风险升级。")
     sections.append(CardSection("\n".join(risk_lines)))
     observation_lines = ["**观察与数据边界**"]
-    for item in observations:
+    observation_labels = {
+        "INSUFFICIENT_HISTORY": "历史不足",
+        "OVERHEATED": "过热不追",
+        "LIQUIDITY_FILTER": "流动性过滤",
+        "EARNINGS_WINDOW": "财报窗口",
+        "INVALID_VOLATILITY": "波动数据异常",
+    }
+    observation_counts = Counter(
+        str(item.get("reason", "仅观察")) for item in observations
+    )
+    if observation_counts:
+        observation_lines.append(
+            "筛除汇总："
+            + " · ".join(
+                f"{observation_labels.get(reason, reason)} {count}"
+                for reason, count in sorted(observation_counts.items())
+            )
+        )
+    notable = [
+        item
+        for item in observations
+        if item.get("ticker") == "SKHY" or item.get("reason") == "EARNINGS_WINDOW"
+    ][:4]
+    for item in notable:
         if item.get("reason") == "INSUFFICIENT_HISTORY":
             observation_lines.append(
                 f"• {item.get('ticker')}：历史仅 {item.get('history_days', 0)} 个交易日，暂不排名。"

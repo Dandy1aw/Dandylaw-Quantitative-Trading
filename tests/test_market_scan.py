@@ -6,7 +6,11 @@ import pandas as pd
 
 from conftest import make_test_settings
 
-from quant_signal.config import IndexUniverseSettings, NotifySettings
+from quant_signal.config import (
+    IndexUniverseSettings,
+    NotifySettings,
+    USBriefingSettings,
+)
 from quant_signal.datafeed.store import BarStore
 from quant_signal.engine import Engine
 from quant_signal.index_universe import merge_members
@@ -114,6 +118,55 @@ def test_action_card_only_stores_scan_without_standalone_push(tmp_path: Path) ->
     assert notifier.cards == []
     rows = [row for row in ledger.signals_on(NOW.date()) if row["strategy_id"] == "market_scan"]
     assert len(rows) == 1 and rows[0]["pushed"] == 0
+
+
+def test_live_us_briefing_stores_scan_without_duplicate_card(tmp_path: Path) -> None:
+    settings = make_test_settings(
+        watchlist=[],
+        index_universe=IndexUniverseSettings(enabled=False),
+        us_briefing=USBriefingSettings(enabled=True, delivery_mode="live"),
+    )
+    bars = _bars({"HOT": 0.01, "MEH": 0.0, "COLD": -0.005})
+    ledger = SignalLedger(tmp_path / "s.db")
+    notifier = FakeNotifier()
+    engine = Engine(
+        settings,
+        BarStore(tmp_path / "b.duckdb"),
+        FakeScanSource(bars),
+        ledger,
+        notifier,
+    )
+
+    engine.run_market_scan(NOW)
+
+    assert notifier.cards == []
+    rows = [
+        row
+        for row in ledger.signals_on(NOW.date())
+        if row["strategy_id"] == "market_scan"
+    ]
+    assert len(rows) == 1 and rows[0]["pushed"] == 0
+
+
+def test_shadow_us_briefing_keeps_legacy_scan_card(tmp_path: Path) -> None:
+    settings = make_test_settings(
+        watchlist=[],
+        index_universe=IndexUniverseSettings(enabled=False),
+        us_briefing=USBriefingSettings(enabled=True, delivery_mode="shadow"),
+    )
+    bars = _bars({"HOT": 0.01, "MEH": 0.0, "COLD": -0.005})
+    notifier = FakeNotifier()
+    engine = Engine(
+        settings,
+        BarStore(tmp_path / "b.duckdb"),
+        FakeScanSource(bars),
+        SignalLedger(tmp_path / "s.db"),
+        notifier,
+    )
+
+    engine.run_market_scan(NOW)
+
+    assert len(notifier.cards) == 1
 
 
 def test_market_scan_skips_source_without_asset_list(tmp_path: Path) -> None:

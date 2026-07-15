@@ -418,6 +418,35 @@ def test_us_briefing_card_is_compact_and_action_oriented() -> None:
     assert len(card.sections) <= 7
 
 
+def test_us_briefing_card_summarizes_large_observation_pool() -> None:
+    observations = [
+        {"ticker": f"HOT{index:02d}", "reason": "OVERHEATED", "history_days": 220}
+        for index in range(40)
+    ] + [
+        {"ticker": f"ILL{index:02d}", "reason": "LIQUIDITY_FILTER", "history_days": 220}
+        for index in range(25)
+    ] + [
+        {"ticker": "SKHY", "reason": "INSUFFICIENT_HISTORY", "history_days": 4}
+    ]
+
+    card = us_briefing_card(
+        report_kind="US_CLOSE",
+        as_of="2026-07-14",
+        regime={"regime": "RANGE", "reasons": ["NO_DIRECTIONAL_EDGE"]},
+        candidates=[],
+        discipline=[],
+        portfolio_risk={},
+        observations=observations,
+        data_quality=["纳指100覆盖率 99%"],
+    )
+
+    assert "过热不追 40" in card.body_md
+    assert "流动性过滤 25" in card.body_md
+    assert "SKHY：历史仅 4 个交易日" in card.body_md
+    assert "HOT00" not in card.body_md and "ILL00" not in card.body_md
+    assert len(card.body_md.splitlines()) < 25
+
+
 def test_us_briefing_card_never_invents_qty_for_partial_position() -> None:
     card = us_briefing_card(
         report_kind="ASIA_CONFIRM",

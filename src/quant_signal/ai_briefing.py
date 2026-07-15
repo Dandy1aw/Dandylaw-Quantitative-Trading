@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from collections import Counter
 from decimal import Decimal, InvalidOperation
 import re
 import shutil
 import subprocess
 import tempfile
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import structlog
 from pydantic import BaseModel, Field
@@ -90,13 +91,9 @@ def build_ai_briefing_prompt(
             "输入数据：\n"
         )
         suffix = "\n\n必须保留：仅供观察，不构成投资建议。"
-        payload = json.dumps(
-            _sanitize(context.model_dump(mode="json")),
-            ensure_ascii=False,
-            indent=2,
-        )
         budget = max(0, max_chars - len(instructions) - len(suffix))
-        return f"{instructions}{payload[:budget]}{suffix}"[:max_chars]
+        payload = _bounded_us_context_payload(context, budget)
+        return f"{instructions}{payload}{suffix}"[:max_chars]
     if context.output_mode == "action_card":
         instructions = (
             "你是量化交易系统的行动卡分析员。只分析本 prompt 输入，不运行命令、不读文件、不联网。"
@@ -181,6 +178,146 @@ def _bounded_context_payload(context: AIBriefingContext, budget: int) -> str:
         if len(payload) <= budget or body_limit == 0:
             return payload
     return json.dumps(base, ensure_ascii=False, indent=2)
+
+
+def _selected_fields(
+    row: dict[str, object], fields: tuple[str, ...]
+) -> dict[str, object]:
+    return {field: row[field] for field in fields if field in row}
+
+
+def _bounded_us_context_payload(
+    context: USBriefingAIContext, budget: int
+) -> str:
+    """Serialize a compact, always-valid briefing payload within the prompt budget."""
+    regime_fields = (
+        "regime",
+        "coverage",
+        "benchmark_price",
+        "benchmark_ma20",
+        "benchmark_ma50",
+        "benchmark_ma200",
+        "breadth_above_20d",
+        "breadth_above_50d",
+        "breadth_above_200d",
+        "participation_5d",
+        "realized_volatility",
+        "atr_pct",
+        "reasons",
+        "data_quality",
+        "asia_context",
+    )
+    candidate_fields = (
+        "ticker",
+        "lane",
+        "entry_low",
+        "entry_high",
+        "invalidation_price",
+        "target_price",
+        "suggested_qty",
+        "suggested_notional",
+        "plan_state",
+        "block_reason",
+        "valid_session",
+        "reasons",
+    )
+    discipline_fields = (
+        "ticker",
+        "status",
+        "leverage",
+        "current_price",
+        "cost_basis",
+        "cost_quality",
+        "quantity",
+        "quantity_quality",
+        "pnl_pct",
+        "hard_stop_price",
+        "protection_price",
+        "next_profit_price",
+        "cumulative_sell_fraction",
+        "incremental_sell_fraction",
+        "pending_sell_fraction",
+        "incremental_sell_qty",
+        "financing_allowed",
+        "effective_weight",
+        "warnings",
+    )
+    risk_fields = (
+        "total_effective_exposure",
+        "total_effective_weight",
+        "leveraged_effective_exposure",
+        "leveraged_effective_weight",
+        "cluster_effective_weights",
+        "warnings",
+    )
+    observation_counts = Counter(
+        str(row.get("reason", "UNKNOWN")) for row in context.observations
+    )
+    notable_observations = [
+        _selected_fields(row, ("ticker", "reason", "history_days", "price"))
+        for row in context.observations
+        if row.get("ticker") == "SKHY" or row.get("reason") == "EARNINGS_WINDOW"
+    ][:8]
+    payload: dict[str, object] = {
+        "schema_version": context.schema_version,
+        "report_kind": context.report_kind,
+        "as_of": context.as_of,
+        "regime": _selected_fields(context.regime, regime_fields),
+        "candidates": [
+            _selected_fields(row, candidate_fields) for row in context.candidates
+        ],
+        "discipline": [
+            _selected_fields(row, discipline_fields) for row in context.discipline
+        ],
+        "portfolio_risk": _selected_fields(context.portfolio_risk, risk_fields),
+        "observation_counts": dict(sorted(observation_counts.items())),
+        "notable_observations": notable_observations,
+        "data_quality": context.data_quality,
+    }
+
+    def render() -> str:
+        clean = _sanitize(payload)
+        return json.dumps(clean, ensure_ascii=False, separators=(",", ": "))
+
+    serialized = render()
+    if len(serialized) <= budget:
+        return serialized
+
+    payload.pop("notable_observations", None)
+    for row in cast(list[dict[str, object]], payload["candidates"]):
+        row.pop("reasons", None)
+    for row in cast(list[dict[str, object]], payload["discipline"]):
+        row.pop("warnings", None)
+    cast(dict[str, object], payload["regime"]).pop("reasons", None)
+    cast(dict[str, object], payload["portfolio_risk"]).pop("warnings", None)
+    serialized = render()
+    if len(serialized) <= budget:
+        return serialized
+
+    candidates = cast(list[dict[str, object]], payload["candidates"])
+    while len(serialized) > budget and len(candidates) > 1:
+        candidates.pop()
+        payload["candidate_rows_limited"] = True
+        serialized = render()
+    discipline = cast(list[dict[str, object]], payload["discipline"])
+    while len(serialized) > budget and len(discipline) > 1:
+        discipline.pop()
+        payload["discipline_rows_limited"] = True
+        serialized = render()
+    if len(serialized) <= budget:
+        return serialized
+
+    minimal = {
+        "schema_version": context.schema_version,
+        "report_kind": context.report_kind,
+        "as_of": context.as_of,
+        "data_quality": context.data_quality,
+        "payload_limited": True,
+    }
+    serialized = json.dumps(
+        _sanitize(minimal), ensure_ascii=False, separators=(",", ": ")
+    )
+    return serialized if len(serialized) <= budget else "{}"
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -345,6 +482,14 @@ def validate_us_briefing_output(
                 for token in _NUMBER_TOKEN.findall(value)
                 if (number := _canonical_number(token)) is not None
             )
+    for rows in (context.candidates, context.discipline, context.observations):
+        allowed_numbers.add(Decimal(len(rows)))
+    allowed_numbers.update(
+        Decimal(count)
+        for count in Counter(
+            str(row.get("reason", "UNKNOWN")) for row in context.observations
+        ).values()
+    )
     for row in (*context.candidates, *context.discipline, *context.observations):
         ticker = row.get("ticker")
         if ticker:

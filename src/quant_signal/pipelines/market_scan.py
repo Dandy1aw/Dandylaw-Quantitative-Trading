@@ -45,6 +45,13 @@ TOP_LIQUID = 500
 SCAN_DEADLINE_SECONDS = 600.0
 
 
+def _standalone_card_enabled(engine: Engine) -> bool:
+    briefing = engine.settings.us_briefing
+    return not engine.settings.notify.action_card_only and not (
+        briefing.enabled and briefing.delivery_mode == "live"
+    )
+
+
 class _DailySource(Protocol):
     def fetch_daily_bars(
         self, tickers: list[str], start: date, end: date
@@ -288,7 +295,7 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
         now.date(), candidate_rows, as_of=market_as_of
     )
     delivered = False
-    if not engine.settings.notify.action_card_only:
+    if _standalone_card_enabled(engine):
         delivered = engine.notifier.send(
             report_card(
                 "指数发现池 · 今日候选",
@@ -372,7 +379,7 @@ def _run_legacy_scan(engine: Engine, now: datetime) -> None:
     note = "- " + " · ".join(notes) if notes else ""
 
     delivered = False
-    if not engine.settings.notify.action_card_only:
+    if _standalone_card_enabled(engine):
         delivered = engine.notifier.send(
             report_card("🔎 全市场扫描 · 今日Top1", _card_body(top, note))
         )

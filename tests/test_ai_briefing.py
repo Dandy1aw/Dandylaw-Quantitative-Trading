@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 from typing import Any
 
@@ -317,6 +318,47 @@ def test_us_prompt_is_versioned_and_forbids_numeric_rewrites() -> None:
     assert "只解释候选与持仓纪律，不重新计算" in prompt
 
 
+def test_large_us_prompt_keeps_complete_compact_json() -> None:
+    base = _us_context()
+    context = base.model_copy(
+        update={
+            "candidates": [
+                {**base.candidates[0], "ticker": f"N{index:02d}"}
+                for index in range(9)
+            ],
+            "discipline": [
+                {
+                    **base.discipline[0],
+                    "ticker": f"H{index:02d}",
+                    "next_state": {
+                        "basis_version": "internal-state-that-ai-does-not-need" * 5,
+                        "notified_stage": 2,
+                    },
+                }
+                for index in range(5)
+            ],
+            "observations": [
+                {
+                    "ticker": f"X{index:02d}",
+                    "reason": "INSUFFICIENT_HISTORY",
+                    "history_days": index,
+                }
+                for index in range(80)
+            ],
+        }
+    )
+
+    prompt = build_ai_briefing_prompt(context, max_chars=4000)
+    payload_text = prompt.split("输入数据：\n", 1)[1].split("\n\n必须保留：", 1)[0]
+    payload = json.loads(payload_text)
+
+    assert len(prompt) <= 4000
+    assert payload["schema_version"] == "us-briefing-v1"
+    assert payload["candidates"] and payload["discipline"]
+    assert payload["observation_counts"] == {"INSUFFICIENT_HISTORY": 80}
+    assert all("next_state" not in row for row in payload["discipline"])
+
+
 def test_us_ai_output_rejects_changed_discipline_price() -> None:
     assert validate_us_briefing_output("MU 保护价 91.00", _us_context()) is None
 
@@ -324,6 +366,20 @@ def test_us_ai_output_rejects_changed_discipline_price() -> None:
 def test_us_ai_output_accepts_structured_numbers_and_tickers() -> None:
     output = "市场处于回调。MU 保护价 92.0；AAPL 观察 205.0-208.0。仅供观察，不构成投资建议。"
     assert validate_us_briefing_output(output, _us_context()) == output
+
+
+def test_us_ai_output_accepts_derived_observation_count() -> None:
+    context = _us_context().model_copy(
+        update={
+            "observations": [
+                {"ticker": f"X{index:02d}", "reason": "OVERHEATED"}
+                for index in range(4)
+            ]
+        }
+    )
+    output = "有 4 个标的因过热被排除。仅供观察，不构成投资建议。"
+
+    assert validate_us_briefing_output(output, context) == output
 
 
 def test_prompt_without_execution_plans_omits_execution_rules() -> None:
