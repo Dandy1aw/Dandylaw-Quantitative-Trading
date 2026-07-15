@@ -22,6 +22,7 @@ from quant_signal.options_flow import (
     OptionFlowSnapshot,
     scan_slot,
 )
+from quant_signal.position_discipline import DisciplineState
 from quant_signal.strategies.base import Direction, Signal, dedup_key
 
 NOW = datetime(2026, 7, 6, 12, 0, tzinfo=timezone.utc)
@@ -789,3 +790,85 @@ def test_account_change_does_not_cancel_option_outbox(ledger: SignalLedger) -> N
     )
     ledger.invalidate_active_plans("ACCOUNT_CHANGED", now=NOW)
     assert len(ledger.due_option_flow_alerts(NOW)) == 1
+
+
+def test_us_briefing_run_key_is_idempotent(ledger: SignalLedger) -> None:
+    first = ledger.begin_us_briefing_run(
+        "US_CLOSE", date(2026, 7, 14), "bars-v1", now=NOW
+    )
+    second = ledger.begin_us_briefing_run(
+        "US_CLOSE", date(2026, 7, 14), "bars-v1", now=NOW + timedelta(minutes=1)
+    )
+
+    assert first.run_id == second.run_id
+    assert first.created is True
+    assert second.created is False
+    assert ledger.count_us_briefing_runs() == 1
+
+
+def test_market_regime_snapshot_round_trip(ledger: SignalLedger) -> None:
+    payload = {
+        "as_of": "2026-07-14",
+        "regime": "TREND",
+        "coverage": 0.99,
+        "reasons": ["TREND_AND_BREADTH_HEALTHY"],
+    }
+    ledger.save_market_regime_snapshot("US_CLOSE", payload, now=NOW)
+
+    assert ledger.latest_market_regime_snapshot("US_CLOSE") == payload
+
+
+def test_candidate_snapshot_replaces_one_report_slot(ledger: SignalLedger) -> None:
+    first = [
+        {"ticker": "AAPL", "lane": "TREND_CONTINUATION", "score": 0.5},
+        {"ticker": "MSFT", "lane": "TREND_PULLBACK", "score": 0.4},
+    ]
+    ledger.replace_candidate_lane_snapshot(
+        "US_CLOSE", date(2026, 7, 14), first, now=NOW
+    )
+    ledger.replace_candidate_lane_snapshot(
+        "US_CLOSE",
+        date(2026, 7, 14),
+        [{"ticker": "NVDA", "lane": "TREND_CONTINUATION", "score": 0.7}],
+        now=NOW,
+    )
+
+    assert ledger.candidate_lane_snapshot("US_CLOSE", date(2026, 7, 14)) == [
+        {"ticker": "NVDA", "lane": "TREND_CONTINUATION", "score": 0.7}
+    ]
+
+
+def test_discipline_state_round_trip_and_basis_reset(ledger: SignalLedger) -> None:
+    first = DisciplineState(
+        ticker="MU",
+        basis_version="MU:100.0000",
+        notified_stage=1,
+        peak_price=Decimal("120.00"),
+        basis_quantity=Decimal("10"),
+    )
+    ledger.save_position_discipline_state(first, now=NOW)
+    assert ledger.position_discipline_state("MU") == first
+
+    changed = DisciplineState(
+        ticker="MU",
+        basis_version="MU:110.0000",
+        notified_stage=0,
+        peak_price=Decimal("111.00"),
+        basis_quantity=Decimal("12"),
+    )
+    ledger.save_position_discipline_state(changed, now=NOW + timedelta(minutes=1))
+    assert ledger.position_discipline_state("MU") == changed
+
+
+def test_us_briefing_delivery_status_is_persisted(ledger: SignalLedger) -> None:
+    run = ledger.begin_us_briefing_run(
+        "ASIA_CONFIRM", date(2026, 7, 14), "bars-v2", now=NOW
+    )
+    ledger.complete_us_briefing_run(
+        run.run_id, payload={"regime": "PULLBACK"}, delivered=True, now=NOW
+    )
+
+    stored = ledger.us_briefing_run(run.run_id)
+    assert stored is not None
+    assert stored["status"] == "DELIVERED"
+    assert stored["payload"] == {"regime": "PULLBACK"}

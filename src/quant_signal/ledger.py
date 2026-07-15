@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import dataclasses
+from decimal import Decimal
+from enum import Enum
+from hashlib import sha256
 import json
 import sqlite3
 import threading
@@ -18,6 +21,7 @@ from quant_signal.execution import (
     plan_to_dict,
 )
 from quant_signal.notifier.base import Card, card_from_dict, card_to_dict
+from quant_signal.position_discipline import DisciplineState
 from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
@@ -25,7 +29,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -255,7 +259,73 @@ CREATE TABLE IF NOT EXISTS option_intel_daily (
     captured_at TEXT NOT NULL,
     PRIMARY KEY(session_date, symbol)
 );
+CREATE TABLE IF NOT EXISTS market_regime_snapshots (
+    report_kind TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY(report_kind, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_market_regime_latest
+    ON market_regime_snapshots(report_kind, captured_at DESC);
+CREATE TABLE IF NOT EXISTS candidate_lane_snapshots (
+    report_kind TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY(report_kind, as_of, rank)
+);
+CREATE TABLE IF NOT EXISTS position_discipline_states (
+    ticker TEXT PRIMARY KEY,
+    basis_version TEXT NOT NULL,
+    notified_stage INTEGER NOT NULL,
+    peak_price TEXT NOT NULL,
+    basis_quantity TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS us_briefing_runs (
+    run_id TEXT PRIMARY KEY,
+    report_kind TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    data_version TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(report_kind, as_of, data_version)
+);
 """
+
+
+@dataclasses.dataclass(frozen=True)
+class USBriefingRun:
+    run_id: str
+    report_kind: str
+    as_of: date
+    data_version: str
+    status: str
+    created: bool
+
+
+def _json_default(value: object) -> object:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if dataclasses.is_dataclass(value):
+        return dataclasses.asdict(value)  # type: ignore[arg-type]
+    raise TypeError(f"cannot JSON encode {type(value).__name__}")
+
+
+def _payload_json(payload: object) -> str:
+    return json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, default=_json_default
+    )
 
 
 class SignalLedger:
@@ -1256,3 +1326,217 @@ class SignalLedger:
                 (slot, alert_type),
             ).fetchone()
         return str(row["status"]) if row is not None else None
+
+    def save_market_regime_snapshot(
+        self,
+        report_kind: str,
+        payload: Mapping[str, object],
+        *,
+        now: datetime,
+    ) -> None:
+        as_of = str(payload.get("as_of", ""))
+        if not as_of:
+            raise ValueError("market regime payload requires as_of")
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO market_regime_snapshots"
+                " (report_kind, as_of, payload_json, captured_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(report_kind, as_of) DO UPDATE SET"
+                " payload_json = excluded.payload_json, captured_at = excluded.captured_at",
+                (
+                    report_kind,
+                    as_of,
+                    _payload_json(payload),
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+
+    def latest_market_regime_snapshot(
+        self, report_kind: str
+    ) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT payload_json FROM market_regime_snapshots"
+                " WHERE report_kind = ? ORDER BY captured_at DESC LIMIT 1",
+                (report_kind,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row["payload_json"]))
+        return dict(payload) if isinstance(payload, dict) else None
+
+    def replace_candidate_lane_snapshot(
+        self,
+        report_kind: str,
+        as_of: date,
+        candidates: Sequence[Mapping[str, object]],
+        *,
+        now: datetime,
+    ) -> None:
+        captured_at = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute("BEGIN")
+                self._con.execute(
+                    "DELETE FROM candidate_lane_snapshots"
+                    " WHERE report_kind = ? AND as_of = ?",
+                    (report_kind, as_of.isoformat()),
+                )
+                self._con.executemany(
+                    "INSERT INTO candidate_lane_snapshots"
+                    " (report_kind, as_of, rank, ticker, lane, payload_json, captured_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            report_kind,
+                            as_of.isoformat(),
+                            rank,
+                            str(candidate.get("ticker", "")),
+                            str(candidate.get("lane", "")),
+                            _payload_json(candidate),
+                            captured_at,
+                        )
+                        for rank, candidate in enumerate(candidates, start=1)
+                    ],
+                )
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def candidate_lane_snapshot(
+        self, report_kind: str, as_of: date
+    ) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT payload_json FROM candidate_lane_snapshots"
+                " WHERE report_kind = ? AND as_of = ? ORDER BY rank",
+                (report_kind, as_of.isoformat()),
+            ).fetchall()
+        output: list[dict[str, object]] = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            if isinstance(payload, dict):
+                output.append(dict(payload))
+        return output
+
+    def save_position_discipline_state(
+        self, state: DisciplineState, *, now: datetime
+    ) -> None:
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO position_discipline_states"
+                " (ticker, basis_version, notified_stage, peak_price, basis_quantity, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(ticker) DO UPDATE SET"
+                " basis_version = excluded.basis_version,"
+                " notified_stage = excluded.notified_stage,"
+                " peak_price = excluded.peak_price,"
+                " basis_quantity = excluded.basis_quantity,"
+                " updated_at = excluded.updated_at",
+                (
+                    state.ticker,
+                    state.basis_version,
+                    state.notified_stage,
+                    str(state.peak_price),
+                    str(state.basis_quantity) if state.basis_quantity is not None else None,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+
+    def position_discipline_state(self, ticker: str) -> DisciplineState | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM position_discipline_states WHERE ticker = ?", (ticker,)
+            ).fetchone()
+        if row is None:
+            return None
+        value = row["basis_quantity"]
+        return DisciplineState(
+            ticker=str(row["ticker"]),
+            basis_version=str(row["basis_version"]),
+            notified_stage=int(row["notified_stage"]),
+            peak_price=Decimal(str(row["peak_price"])),
+            basis_quantity=Decimal(str(value)) if value is not None else None,
+        )
+
+    def begin_us_briefing_run(
+        self,
+        report_kind: str,
+        as_of: date,
+        data_version: str,
+        *,
+        now: datetime,
+    ) -> USBriefingRun:
+        identity = f"{report_kind}|{as_of.isoformat()}|{data_version}"
+        run_id = sha256(identity.encode("utf-8")).hexdigest()[:20]
+        with self._lock:
+            cursor = self._con.execute(
+                "INSERT OR IGNORE INTO us_briefing_runs"
+                " (run_id, report_kind, as_of, data_version, status, created_at)"
+                " VALUES (?, ?, ?, ?, 'STARTED', ?)",
+                (
+                    run_id,
+                    report_kind,
+                    as_of.isoformat(),
+                    data_version,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            created = cursor.rowcount > 0
+            row = self._con.execute(
+                "SELECT * FROM us_briefing_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            self._con.commit()
+        assert row is not None
+        return USBriefingRun(
+            run_id=run_id,
+            report_kind=str(row["report_kind"]),
+            as_of=date.fromisoformat(str(row["as_of"])),
+            data_version=str(row["data_version"]),
+            status=str(row["status"]),
+            created=created,
+        )
+
+    def complete_us_briefing_run(
+        self,
+        run_id: str,
+        *,
+        payload: Mapping[str, object],
+        delivered: bool,
+        now: datetime,
+    ) -> None:
+        status = "DELIVERED" if delivered else "SHADOWED"
+        with self._lock:
+            self._con.execute(
+                "UPDATE us_briefing_runs SET status = ?, payload_json = ?, completed_at = ?"
+                " WHERE run_id = ?",
+                (
+                    status,
+                    _payload_json(payload),
+                    now.astimezone(timezone.utc).isoformat(),
+                    run_id,
+                ),
+            )
+            self._con.commit()
+
+    def us_briefing_run(self, run_id: str) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM us_briefing_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        item: dict[str, object] = dict(row)
+        raw = item.pop("payload_json", None)
+        item["payload"] = json.loads(str(raw)) if raw is not None else None
+        return item
+
+    def count_us_briefing_runs(self) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT count(*) AS n FROM us_briefing_runs"
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
