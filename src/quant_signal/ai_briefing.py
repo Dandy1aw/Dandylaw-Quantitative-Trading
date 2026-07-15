@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
+import re
 import shutil
 import subprocess
 import tempfile
@@ -41,6 +43,18 @@ class AIBriefingContext(BaseModel):
     output_mode: Literal["full", "action_card"] = "full"
 
 
+class USBriefingAIContext(BaseModel):
+    schema_version: Literal["us-briefing-v1"] = "us-briefing-v1"
+    report_kind: Literal["US_CLOSE", "ASIA_CONFIRM"]
+    as_of: str
+    regime: dict[str, object]
+    candidates: list[dict[str, object]] = Field(default_factory=list)
+    discipline: list[dict[str, object]] = Field(default_factory=list)
+    portfolio_risk: dict[str, object] = Field(default_factory=dict)
+    observations: list[dict[str, object]] = Field(default_factory=list)
+    data_quality: list[str] = Field(default_factory=list)
+
+
 def _is_secret_like(value: str) -> bool:
     upper = value.upper()
     return any(marker in upper for marker in _SECRET_MARKERS)
@@ -64,8 +78,25 @@ def _sanitize(value: Any) -> Any:
 
 
 def build_ai_briefing_prompt(
-    context: AIBriefingContext, max_chars: int = 6000
+    context: AIBriefingContext | USBriefingAIContext, max_chars: int = 6000
 ) -> str:
+    if isinstance(context, USBriefingAIContext):
+        instructions = (
+            "你是量化交易系统的简报解释员。只解释本 prompt 中的结构化数据，"
+            "不运行命令、不读文件、不联网。价格、区间、股数、比例、市场状态均由"
+            "确定性规则产生；不得新增或修改任何数字，不得新增标的，不得重新计算。"
+            "只解释候选与持仓纪律，不重新计算。输出不超过 400 个中文字符，按“市场、"
+            "候选、持仓、风险”四个短段落组织，不使用表格，不声称已经成交。\n\n"
+            "输入数据：\n"
+        )
+        suffix = "\n\n必须保留：仅供观察，不构成投资建议。"
+        payload = json.dumps(
+            _sanitize(context.model_dump(mode="json")),
+            ensure_ascii=False,
+            indent=2,
+        )
+        budget = max(0, max_chars - len(instructions) - len(suffix))
+        return f"{instructions}{payload[:budget]}{suffix}"[:max_chars]
     if context.output_mode == "action_card":
         instructions = (
             "你是量化交易系统的行动卡分析员。只分析本 prompt 输入，不运行命令、不读文件、不联网。"
@@ -191,7 +222,7 @@ def _resolve_windows_script_command(command: list[str]) -> list[str]:
 
 def run_ai_briefing(
     settings: AIBriefingSettings,
-    context: AIBriefingContext,
+    context: AIBriefingContext | USBriefingAIContext,
     runner: Runner = subprocess.run,
 ) -> str | None:
     if not settings.enabled:
@@ -256,3 +287,75 @@ def run_ai_briefing(
             return output
     output = completed.stdout.strip()
     return output or None
+
+
+_NUMBER_TOKEN = re.compile(r"\d+(?:\.\d+)?")
+_TICKER_TOKEN = re.compile(r"\b[A-Z][A-Z0-9.-]{0,6}\b")
+_TICKER_EXEMPT = {
+    "AI",
+    "ATR",
+    "ETF",
+    "HOLD",
+    "QQQ",
+    "REDUCE",
+    "RSI",
+    "USD",
+    "WATCH",
+}
+
+
+def _walk_values(value: object) -> list[object]:
+    if isinstance(value, dict):
+        output: list[object] = []
+        for item in value.values():
+            output.extend(_walk_values(item))
+        return output
+    if isinstance(value, list):
+        output = []
+        for item in value:
+            output.extend(_walk_values(item))
+        return output
+    return [value]
+
+
+def _canonical_number(token: str) -> Decimal | None:
+    try:
+        return Decimal(token).normalize()
+    except InvalidOperation:
+        return None
+
+
+def validate_us_briefing_output(
+    output: str, context: USBriefingAIContext
+) -> str | None:
+    """Reject AI prose that introduces tickers or numeric facts outside the payload."""
+    payload = context.model_dump(mode="json")
+    allowed_numbers: set[Decimal] = set()
+    allowed_tickers: set[str] = set()
+    for value in _walk_values(payload):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = _canonical_number(str(value))
+            if number is not None:
+                allowed_numbers.add(number)
+                if abs(number) <= 1:
+                    allowed_numbers.add((number * 100).normalize())
+        elif isinstance(value, str):
+            allowed_numbers.update(
+                number
+                for token in _NUMBER_TOKEN.findall(value)
+                if (number := _canonical_number(token)) is not None
+            )
+    for row in (*context.candidates, *context.discipline, *context.observations):
+        ticker = row.get("ticker")
+        if ticker:
+            allowed_tickers.add(str(ticker).upper())
+    for token in _NUMBER_TOKEN.findall(output):
+        number = _canonical_number(token)
+        if number is not None and number not in allowed_numbers:
+            log.warning("ai_briefing.numeric_guard_rejected", token=token)
+            return None
+    for token in _TICKER_TOKEN.findall(output):
+        if token not in allowed_tickers and token not in _TICKER_EXEMPT:
+            log.warning("ai_briefing.ticker_guard_rejected", token=token)
+            return None
+    return output.strip() or None

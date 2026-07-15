@@ -6,8 +6,10 @@ from typing import Any
 
 from quant_signal.ai_briefing import (
     AIBriefingContext,
+    USBriefingAIContext,
     build_ai_briefing_prompt,
     run_ai_briefing,
+    validate_us_briefing_output,
 )
 from quant_signal.config import AIBriefingSettings
 from quant_signal.notifier.base import CardKind
@@ -277,6 +279,51 @@ def test_prompt_includes_execution_plan_guardrails() -> None:
     assert "不可用" in prompt
     assert "PAPER" in prompt
     assert "实盘" in prompt
+
+
+def _us_context() -> USBriefingAIContext:
+    return USBriefingAIContext(
+        report_kind="US_CLOSE",
+        as_of="2026-07-14",
+        regime={"regime": "PULLBACK", "breadth_above_50d": 0.58},
+        candidates=[
+            {
+                "ticker": "AAPL",
+                "lane": "TREND_PULLBACK",
+                "entry_low": 205.0,
+                "entry_high": 208.0,
+                "invalidation_price": 198.0,
+                "target_price": 228.0,
+            }
+        ],
+        discipline=[
+            {
+                "ticker": "MU",
+                "incremental_sell_qty": 25,
+                "protection_price": 92.0,
+            }
+        ],
+        portfolio_risk={"total_effective_weight": 0.82},
+        data_quality=["COMPLETE"],
+    )
+
+
+def test_us_prompt_is_versioned_and_forbids_numeric_rewrites() -> None:
+    prompt = build_ai_briefing_prompt(_us_context(), max_chars=4000)
+
+    assert '"schema_version": "us-briefing-v1"' in prompt
+    assert '"report_kind": "US_CLOSE"' in prompt
+    assert "不得新增或修改任何数字" in prompt
+    assert "只解释候选与持仓纪律，不重新计算" in prompt
+
+
+def test_us_ai_output_rejects_changed_discipline_price() -> None:
+    assert validate_us_briefing_output("MU 保护价 91.00", _us_context()) is None
+
+
+def test_us_ai_output_accepts_structured_numbers_and_tickers() -> None:
+    output = "市场处于回调。MU 保护价 92.0；AAPL 观察 205.0-208.0。仅供观察，不构成投资建议。"
+    assert validate_us_briefing_output(output, _us_context()) == output
 
 
 def test_prompt_without_execution_plans_omits_execution_rules() -> None:

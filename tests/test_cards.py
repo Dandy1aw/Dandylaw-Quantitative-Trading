@@ -1,7 +1,12 @@
 from datetime import datetime, timezone
 
 from quant_signal.notifier import cards as cards_module
-from quant_signal.notifier.cards import premarket_cards, report_card, signal_card
+from quant_signal.notifier.cards import (
+    premarket_cards,
+    report_card,
+    signal_card,
+    us_briefing_card,
+)
 from quant_signal.strategies.base import Direction, Signal
 
 TS = datetime(2026, 1, 2, tzinfo=timezone.utc)
@@ -356,3 +361,82 @@ def test_plan_event_card_is_account_source_neutral() -> None:
     assert "ACTIONABLE" in card.title or "ACTIONABLE" in card.body_md
     assert "102" in card.body_md and "95" in card.body_md
     assert "71" in card.body_md
+
+
+def test_us_briefing_card_is_compact_and_action_oriented() -> None:
+    card = us_briefing_card(
+        report_kind="US_CLOSE",
+        as_of="2026-07-14",
+        regime={
+            "regime": "PULLBACK",
+            "breadth_above_50d": 0.58,
+            "realized_volatility": 0.24,
+            "reasons": ["SHORT_TERM_DETERIORATION"],
+        },
+        candidates=[
+            {
+                "ticker": "AAPL",
+                "lane": "TREND_PULLBACK",
+                "entry_low": 205.0,
+                "entry_high": 208.0,
+                "invalidation_price": 198.0,
+                "target_price": 228.0,
+            }
+        ],
+        discipline=[
+            {
+                "ticker": "MU",
+                "status": "TAKE_PROFIT_DUE",
+                "current_price": "116.00",
+                "cost_basis": "100.00",
+                "cost_quality": "EXACT",
+                "incremental_sell_qty": "25",
+                "incremental_sell_fraction": "0.25",
+                "cumulative_sell_fraction": "0.25",
+                "protection_price": "102.00",
+            }
+        ],
+        portfolio_risk={
+            "total_effective_weight": "0.82",
+            "leveraged_effective_weight": "0.25",
+            "warnings": ["CLUSTER_EFFECTIVE_EXPOSURE_HIGH"],
+        },
+        observations=[
+            {"ticker": "SKHY", "reason": "INSUFFICIENT_HISTORY", "history_days": 4}
+        ],
+        data_quality=["纳指100覆盖率 99%"],
+    )
+
+    assert "回调" in card.body_md
+    assert "AAPL" in card.body_md
+    assert "卖出 25 股（累计 25%）" in card.body_md
+    assert "SKHY：历史仅 4 个交易日" in card.body_md
+    assert "|---" not in card.body_md
+    assert len(card.sections) <= 7
+
+
+def test_us_briefing_card_never_invents_qty_for_partial_position() -> None:
+    card = us_briefing_card(
+        report_kind="ASIA_CONFIRM",
+        as_of="2026-07-14",
+        regime={"regime": "RANGE", "reasons": ["NO_DIRECTIONAL_EDGE"]},
+        candidates=[],
+        discipline=[
+            {
+                "ticker": "RAM",
+                "status": "TAKE_PROFIT_DUE",
+                "cost_basis": "50.00",
+                "cost_quality": "ESTIMATED",
+                "incremental_sell_qty": None,
+                "incremental_sell_fraction": "0.25",
+                "cumulative_sell_fraction": "0.25",
+                "protection_price": "51.00",
+            }
+        ],
+        portfolio_risk={},
+        observations=[],
+        data_quality=["持仓截图不完整"],
+    )
+
+    assert "卖出 25%（股数不可用）" in card.body_md
+    assert "成本估算" in card.body_md

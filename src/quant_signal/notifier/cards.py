@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from quant_signal.notifier.base import Card, CardKind, CardSection
@@ -281,6 +281,148 @@ def alert_card(title: str, body_md: str) -> Card:
 
 _PAPER_FOOTER = "> PAPER 模拟账户建议，仅供观察，不构成投资建议；本系统不自动下单。"
 _ADVISORY_FOOTER = "> 观察模式，不自动下单。仅供观察，不构成投资建议。"
+
+
+def _briefing_float(value: object) -> float | None:
+    if not isinstance(value, (str, int, float, Decimal)):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _briefing_number(value: object, digits: int = 2) -> str:
+    number = _briefing_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.{digits}f}"
+
+
+def _briefing_percent(value: object) -> str:
+    number = _briefing_float(value)
+    if number is None:
+        return "-"
+    return f"{number * 100:.0f}%"
+
+
+def us_briefing_card(
+    *,
+    report_kind: str,
+    as_of: str,
+    regime: Mapping[str, object],
+    candidates: Sequence[Mapping[str, object]],
+    discipline: Sequence[Mapping[str, object]],
+    portfolio_risk: Mapping[str, object],
+    observations: Sequence[Mapping[str, object]],
+    data_quality: Sequence[str],
+    ai_summary: str | None = None,
+) -> Card:
+    """Render a mobile-first US briefing without wide Markdown tables."""
+    regime_code = str(regime.get("regime", "UNKNOWN"))
+    regime_names = {
+        "TREND": "趋势",
+        "PULLBACK": "回调",
+        "RANGE": "震荡",
+        "RISK_OFF": "风险关闭",
+        "UNKNOWN": "数据不足",
+    }
+    kind_names = {"US_CLOSE": "美股收盘简报", "ASIA_CONFIRM": "亚洲确认与美股计划"}
+    reasons = regime.get("reasons")
+    reason_text = "、".join(str(item) for item in reasons) if isinstance(reasons, list) else "-"
+    sections: list[CardSection] = [
+        CardSection(
+            "**今日结论**\n"
+            f"市场状态：{regime_names.get(regime_code, regime_code)}\n"
+            f"50日线上宽度 {_briefing_percent(regime.get('breadth_above_50d'))}"
+            f" · 实现波动 {_briefing_percent(regime.get('realized_volatility'))}\n"
+            f"依据：{reason_text}"
+        )
+    ]
+    lane_names = {
+        "TREND_CONTINUATION": "趋势延续",
+        "TREND_PULLBACK": "强势回调",
+        "RANGE_REVERSION": "震荡修复",
+    }
+    lane_lines = ["**纳指100候选**"]
+    if not candidates:
+        lane_lines.append("当前状态没有满足条件的新多仓；不为凑榜而交易。")
+    for candidate in candidates:
+        ticker = str(candidate.get("ticker", "-"))
+        lane = lane_names.get(
+            str(candidate.get("lane", "")), str(candidate.get("lane", "-"))
+        )
+        lane_lines.append(
+            f"• {ticker}｜{lane}｜买入 {_briefing_number(candidate.get('entry_low'))}"
+            f"–{_briefing_number(candidate.get('entry_high'))}｜失效 "
+            f"{_briefing_number(candidate.get('invalidation_price'))}｜目标 "
+            f"{_briefing_number(candidate.get('target_price'))}"
+        )
+    sections.append(CardSection("\n".join(lane_lines)))
+    discipline_lines = ["**持仓纪律**"]
+    if not discipline:
+        discipline_lines.append("没有可用持仓，或账户数据不足。")
+    for item in discipline:
+        ticker = str(item.get("ticker", "-"))
+        status = str(item.get("status", "HOLD"))
+        quantity = item.get("incremental_sell_qty")
+        quantity_number = _briefing_float(quantity)
+        incremental_number = _briefing_float(item.get("incremental_sell_fraction"))
+        fraction = _briefing_percent(item.get("incremental_sell_fraction"))
+        cumulative = _briefing_percent(item.get("cumulative_sell_fraction"))
+        if quantity_number is not None and quantity_number > 0:
+            action = f"卖出 {_briefing_number(quantity, 0)} 股（累计 {cumulative}）"
+        elif incremental_number is not None and incremental_number > 0:
+            action = f"卖出 {fraction}（股数不可用）"
+        elif status == "EXIT_DUE":
+            action = "止损退出条件已触发"
+        elif status == "REDUCE":
+            action = "降低有效敞口"
+        else:
+            action = "继续持有/观察"
+        cost_label = "成本估算" if item.get("cost_quality") == "ESTIMATED" else "成本"
+        discipline_lines.append(
+            f"• {ticker}｜{action}｜{cost_label} {_briefing_number(item.get('cost_basis'))}"
+            f"｜保护价 {_briefing_number(item.get('protection_price'))}"
+        )
+    sections.append(CardSection("\n".join(discipline_lines)))
+    risk_lines = ["**杠杆与组合风险**"]
+    risk_lines.append(
+        f"总有效仓位 {_briefing_percent(portfolio_risk.get('total_effective_weight'))}"
+        f" · 杠杆有效仓位 {_briefing_percent(portfolio_risk.get('leveraged_effective_weight'))}"
+    )
+    risk_warnings = portfolio_risk.get("warnings")
+    if isinstance(risk_warnings, (list, tuple)) and risk_warnings:
+        risk_lines.append("提醒：" + "、".join(str(item) for item in risk_warnings))
+    else:
+        risk_lines.append("当前没有新增杠杆风险升级。")
+    sections.append(CardSection("\n".join(risk_lines)))
+    observation_lines = ["**观察与数据边界**"]
+    for item in observations:
+        if item.get("reason") == "INSUFFICIENT_HISTORY":
+            observation_lines.append(
+                f"• {item.get('ticker')}：历史仅 {item.get('history_days', 0)} 个交易日，暂不排名。"
+            )
+        else:
+            observation_lines.append(
+                f"• {item.get('ticker')}：{item.get('reason', '仅观察')}"
+            )
+    observation_lines.extend(f"• {item}" for item in data_quality)
+    sections.append(CardSection("\n".join(observation_lines)))
+    if ai_summary:
+        sections.append(CardSection("**AI解释（不改写数值）**\n" + ai_summary.strip()[:500]))
+    sections.append(
+        CardSection(
+            "> 价格触发不保证成交，隔夜跳空可能穿价；系统不自动下单。仅供观察，不构成投资建议。"
+        )
+    )
+    body = "\n\n".join(section.content_md for section in sections)
+    return Card(
+        kind=CardKind.REPORT,
+        title=f"📌 {kind_names.get(report_kind, report_kind)} · {as_of}",
+        body_md=body,
+        sections=tuple(sections),
+    )
 
 
 def _fmt_qty(value: object) -> str:
