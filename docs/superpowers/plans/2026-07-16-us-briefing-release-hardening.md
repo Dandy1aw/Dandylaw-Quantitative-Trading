@@ -8,6 +8,15 @@
 
 **Tech Stack:** Python 3.11, subprocess/Codex CLI, pandas, SQLite, APScheduler, pytest, mypy, YAML.
 
+## Completion record (2026-07-16)
+
+- All six tasks are implemented and reviewed on `feat/us-regime-risk-briefing`.
+- Verification: `702 passed, 2 warnings`; mypy reports no issues in 77 source files; lock and complete-diff checks pass.
+- Real Codex CLI smoke uses the native `0.144.1` executable and passes the deterministic number/ticker guard.
+- Production SQLite backup and settings snapshot are stored in `data/backups/20260716`; a production DB copy migration and the live DB integrity check both pass at schema version 9.
+- Production `feat/v0` was fast-forwarded and the `quant-signal` Scheduled Task restarted. The new process tree is healthy, the latest stderr log is empty, and both briefing jobs appear in startup logs.
+- Production remains `delivery_mode: shadow`; no test trade notification or broker order was sent. Five-session observation remains the only gate before a separate live release.
+
 ---
 
 ### Task 1: Codex Windows execution and AI guard
