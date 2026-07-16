@@ -27,6 +27,7 @@ from quant_signal.candidate_lanes import (
     discover_candidates,
 )
 from quant_signal.execution import (
+    ExecutionPlan,
     PlanCandidate,
     apply_portfolio_limits,
     build_plan,
@@ -292,9 +293,7 @@ def _size_candidates(
     candidates: Sequence[Candidate],
     account: AccountState | None,
     now: datetime,
-    *,
-    persist_plans: bool = False,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[ExecutionPlan]]:
     payloads = [_mapping(candidate) for candidate in candidates]
     if account is None:
         for payload in payloads:
@@ -306,7 +305,7 @@ def _size_candidates(
                     "block_reason": "NO_ACCOUNT",
                 }
             )
-        return payloads
+        return payloads, []
     plan_date = _upcoming_us_session(now)
     plans = [
         build_plan(
@@ -339,9 +338,6 @@ def _size_candidates(
         engine.settings.execution_plan,
         budget=portfolio_budget_from_state(account, engine.settings.execution_plan),
     )
-    if persist_plans:
-        for plan in plans:
-            engine.ledger.upsert_execution_plan(plan)
     for payload, plan in zip(payloads, plans):
         payload.update(
             {
@@ -352,7 +348,7 @@ def _size_candidates(
                 "valid_session": plan.plan_date.isoformat(),
             }
         )
-    return payloads
+    return payloads, plans
 
 
 def _skhy_observation(
@@ -473,12 +469,11 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     regime_payload, candidates, discipline, portfolio_risk, observations = _payloads(
         regime, discovery, advice, risk
     )
-    candidates = _size_candidates(
+    candidates, execution_plans = _size_candidates(
         engine,
         discovery.candidates,
         account,
         now,
-        persist_plans=settings.delivery_mode == "live",
     )
     if mode == BriefingMode.ASIA_CONFIRM:
         asia, asia_quality = _asia_context(engine, now)
@@ -533,7 +528,9 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     if settings.delivery_mode == "live":
         delivered = engine.notifier.send(card)
     shadowed = settings.delivery_mode == "shadow"
-    if delivered or shadowed:
+    if delivered:
+        for plan in execution_plans:
+            engine.ledger.upsert_execution_plan(plan)
         for item in advice:
             engine.ledger.save_position_discipline_state(item.next_state, now=now)
     payload: dict[str, object] = {

@@ -250,11 +250,16 @@ def test_repeated_run_does_not_resend_card(tmp_path: Path) -> None:
 
 
 def test_shadow_mode_persists_without_delivery(tmp_path: Path) -> None:
-    engine, notifier = _engine(tmp_path, delivery_mode="shadow")
+    engine, notifier = _engine(
+        tmp_path,
+        delivery_mode="shadow",
+        account_provider=FixedAccountProvider(_account()),
+    )
     run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
     assert notifier.cards == []
     assert engine.ledger.count_us_briefing_runs() == 1
     assert engine.ledger.active_execution_plans() == []
+    assert engine.ledger.position_discipline_state("RAM") is None
 
 
 def test_partial_screenshot_outputs_percentage_not_invented_qty(tmp_path: Path) -> None:
@@ -297,12 +302,14 @@ def test_failed_delivery_retries_without_consuming_profit_stage(tmp_path: Path) 
     )
     assert first_run is not None and first_run["status"] == "FAILED"
     assert engine.ledger.position_discipline_state("RAM") is None
+    assert engine.ledger.active_execution_plans() == []
 
     run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
     assert len(notifier.cards) == 2
     assert all("卖出 7 股（累计 75%）" in card.body_md for card in notifier.cards)
     state = engine.ledger.position_discipline_state("RAM")
     assert state is not None and state.notified_stage == 3
+    assert engine.ledger.active_execution_plans()
 
 
 def test_screenshot_pnl_pct_is_always_converted_from_percentage_points() -> None:
