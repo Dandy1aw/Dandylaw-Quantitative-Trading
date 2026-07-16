@@ -19,6 +19,7 @@ replay_candidate_lanes = _MODULE.replay_candidate_lanes
 render_markdown = _MODULE.render_markdown
 entry_fill_price = getattr(_MODULE, "entry_fill_price", None)
 exit_fill_price = getattr(_MODULE, "exit_fill_price", None)
+entry_session_exit_price = getattr(_MODULE, "entry_session_exit_price", None)
 load_point_in_time_members = getattr(_MODULE, "load_point_in_time_members", None)
 
 
@@ -165,6 +166,16 @@ def test_same_bar_stop_and_target_is_conservatively_stopped() -> None:
     assert exit_fill_price(
         bar, stop=95.0, target=115.0, time_exit=False
     ) == (95.0, "STOP")
+
+
+def test_pre_entry_gap_target_is_not_counted_as_post_entry_profit() -> None:
+    assert entry_session_exit_price is not None
+    bar = pd.Series({"open": 120.0, "high": 121.0, "low": 103.0, "close": 104.0})
+
+    assert entry_fill_price(bar, _candidate()) == 105.0
+    assert entry_session_exit_price(
+        bar, _candidate(), time_exit=False
+    ) is None
 
 
 def test_point_in_time_membership_json_loader(tmp_path: Path) -> None:

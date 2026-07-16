@@ -8,7 +8,6 @@ import math
 from pathlib import Path
 from typing import Mapping
 
-import numpy as np
 import pandas as pd
 
 from quant_signal.candidate_lanes import Candidate, discover_candidates
@@ -77,6 +76,31 @@ def exit_fill_price(
     if time_exit:
         return close, "TIME"
     return None
+
+
+def entry_session_exit_price(
+    bar: pd.Series,
+    candidate: Candidate,
+    *,
+    time_exit: bool,
+) -> tuple[float, str] | None:
+    """Avoid crediting a target that traded before a gap-down zone entry."""
+    try:
+        opening = _number(bar, "open")
+        low = _number(bar, "low")
+        close = _number(bar, "close")
+    except (KeyError, TypeError, ValueError):
+        return None
+    if opening > candidate.entry_high:
+        if low <= candidate.invalidation_price:
+            return candidate.invalidation_price, "STOP"
+        return (close, "TIME") if time_exit else None
+    return exit_fill_price(
+        bar,
+        stop=candidate.invalidation_price,
+        target=candidate.target_price,
+        time_exit=time_exit,
+    )
 
 
 def _bar(bars: pd.DataFrame, ticker: str, session: pd.Timestamp) -> pd.Series | None:
@@ -192,10 +216,9 @@ def replay_candidate_lanes(
             trade_count += 1
             entry_delays.append(index - signal_index)
             position = _OpenPosition(candidate, units, fill, index)
-            immediate_exit = exit_fill_price(
+            immediate_exit = entry_session_exit_price(
                 row,
-                stop=candidate.invalidation_price,
-                target=candidate.target_price,
+                candidate,
                 time_exit=max_hold_sessions == 1,
             )
             if immediate_exit is None:
@@ -256,10 +279,10 @@ def replay_candidate_lanes(
     volatility = float(returns.std())
     sharpe = float(returns.mean() / volatility * math.sqrt(252)) if volatility > 0 else 0.0
     years = len(returns) / 252
-    qqq_start = _bar(bars, "QQQ", pd.Timestamp(sessions[first_index]))
+    qqq_start = _bar(bars, "QQQ", pd.Timestamp(sessions[first_index + 1]))
     qqq_end = _bar(bars, "QQQ", pd.Timestamp(sessions[-1]))
     qqq_return = (
-        _number(qqq_end, "close") / _number(qqq_start, "close") - 1.0
+        _number(qqq_end, "close") / _number(qqq_start, "open") - 1.0
         if qqq_start is not None and qqq_end is not None
         else 0.0
     )
