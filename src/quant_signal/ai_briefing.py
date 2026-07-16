@@ -352,7 +352,21 @@ def _resolve_windows_script_command(command: list[str]) -> list[str]:
         return command
     executable = command[0]
     resolved = shutil.which(executable) or executable
-    if Path(resolved).suffix.lower() in {".cmd", ".bat"}:
+    resolved_path = Path(resolved)
+    if resolved_path.suffix.lower() in {".cmd", ".bat"}:
+        package_root = (
+            resolved_path.parent
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+        )
+        native = sorted(
+            package_root.glob("codex-win32-*/vendor/*/bin/codex.exe")
+        )
+        if native:
+            return [str(native[0]), *command[1:]]
         return [resolved, *command[1:]]
     return command
 
@@ -455,6 +469,20 @@ def _walk_values(value: object) -> list[object]:
     return [value]
 
 
+def _walk_keys(value: object) -> list[str]:
+    if isinstance(value, dict):
+        key_output = [str(key) for key in value]
+        for item in value.values():
+            key_output.extend(_walk_keys(item))
+        return key_output
+    if isinstance(value, list):
+        list_output: list[str] = []
+        for item in value:
+            list_output.extend(_walk_keys(item))
+        return list_output
+    return []
+
+
 def _canonical_number(token: str) -> Decimal | None:
     try:
         return Decimal(token).normalize()
@@ -482,6 +510,13 @@ def validate_us_briefing_output(
                 for token in _NUMBER_TOKEN.findall(value)
                 if (number := _canonical_number(token)) is not None
             )
+            allowed_tickers.update(_TICKER_TOKEN.findall(value.upper()))
+    for key in _walk_keys(payload):
+        allowed_numbers.update(
+            number
+            for token in _NUMBER_TOKEN.findall(key)
+            if (number := _canonical_number(token)) is not None
+        )
     for rows in (context.candidates, context.discipline, context.observations):
         allowed_numbers.add(Decimal(len(rows)))
     allowed_numbers.update(

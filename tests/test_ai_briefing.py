@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+from pathlib import Path
 import subprocess
 from typing import Any
 
@@ -9,6 +10,7 @@ from quant_signal.ai_briefing import (
     AIBriefingContext,
     USBriefingAIContext,
     build_ai_briefing_prompt,
+    _resolve_windows_script_command,
     run_ai_briefing,
     validate_us_briefing_output,
 )
@@ -122,7 +124,7 @@ def test_codex_cli_is_default_ai_provider() -> None:
     assert result == "观点"
     command = calls[0]["args"][0]
     if os.name == "nt":
-        assert command[0].lower().endswith((".cmd", ".bat"))
+        assert command[0].lower().endswith(".exe")
         command = ["codex", *command[1:]]
     assert command[:2] == ["codex", "exec"]
 
@@ -174,7 +176,7 @@ def test_codex_cli_uses_exec_read_only_mode() -> None:
     assert result == "观点"
     command = calls[0]["args"][0]
     if os.name == "nt":
-        assert command[0].lower().endswith((".cmd", ".bat"))
+        assert command[0].lower().endswith(".exe")
         command = ["codex", *command[1:]]
     assert command[:5] == [
         "codex",
@@ -380,6 +382,53 @@ def test_us_ai_output_accepts_derived_observation_count() -> None:
     output = "有 4 个标的因过热被排除。仅供观察，不构成投资建议。"
 
     assert validate_us_briefing_output(output, context) == output
+
+
+def test_us_ai_output_accepts_numbers_from_payload_keys() -> None:
+    context = _us_context()
+    output = "50日线上宽度为 58%。仅供观察，不构成投资建议。"
+
+    assert validate_us_briefing_output(output, context) == output
+
+
+def test_us_ai_output_accepts_uppercase_terms_present_in_payload() -> None:
+    context = _us_context().model_copy(
+        update={"regime": {"regime": "TREND", "breadth_above_50d": 0.58}}
+    )
+    output = "市场状态为 TREND。仅供观察，不构成投资建议。"
+
+    assert validate_us_briefing_output(output, context) == output
+
+
+def test_windows_codex_wrapper_resolves_to_packaged_native_binary(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    if os.name != "nt":
+        return
+    wrapper = tmp_path / "codex.cmd"
+    wrapper.write_text("@echo off", encoding="utf-8")
+    native = (
+        tmp_path
+        / "node_modules"
+        / "@openai"
+        / "codex"
+        / "node_modules"
+        / "@openai"
+        / "codex-win32-x64"
+        / "vendor"
+        / "x86_64-pc-windows-msvc"
+        / "bin"
+        / "codex.exe"
+    )
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"test")
+    monkeypatch.setattr(  # type: ignore[attr-defined]
+        "quant_signal.ai_briefing.shutil.which", lambda _: str(wrapper)
+    )
+
+    resolved = _resolve_windows_script_command(["codex", "exec"])
+
+    assert resolved == [str(native), "exec"]
 
 
 def test_prompt_without_execution_plans_omits_execution_rules() -> None:
