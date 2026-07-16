@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS us_briefing_runs (
     payload_json TEXT,
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    UNIQUE(report_kind, as_of, data_version)
+    UNIQUE(report_kind, as_of)
 );
 """
 
@@ -337,6 +337,21 @@ class SignalLedger:
         self._lock = threading.Lock()
         with self._lock:
             self._con.executescript(_SCHEMA)
+            self._con.execute(
+                "DELETE FROM us_briefing_runs WHERE rowid NOT IN ("
+                " SELECT rowid FROM ("
+                "  SELECT rowid, row_number() OVER ("
+                "   PARTITION BY report_kind, as_of ORDER BY"
+                "    CASE status WHEN 'DELIVERED' THEN 0 WHEN 'SHADOWED' THEN 1"
+                "     WHEN 'STARTED' THEN 2 ELSE 3 END, created_at DESC"
+                "  ) AS slot_rank FROM us_briefing_runs"
+                " ) WHERE slot_rank = 1"
+                ")"
+            )
+            self._con.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_us_briefing_run_slot"
+                " ON us_briefing_runs(report_kind, as_of)"
+            )
             self._con.execute(
                 "INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)"
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value"
@@ -1470,7 +1485,7 @@ class SignalLedger:
         *,
         now: datetime,
     ) -> USBriefingRun:
-        identity = f"{report_kind}|{as_of.isoformat()}|{data_version}"
+        identity = f"{report_kind}|{as_of.isoformat()}"
         run_id = sha256(identity.encode("utf-8")).hexdigest()[:20]
         with self._lock:
             cursor = self._con.execute(
@@ -1487,7 +1502,9 @@ class SignalLedger:
             )
             created = cursor.rowcount > 0
             row = self._con.execute(
-                "SELECT * FROM us_briefing_runs WHERE run_id = ?", (run_id,)
+                "SELECT * FROM us_briefing_runs"
+                " WHERE report_kind = ? AND as_of = ?",
+                (report_kind, as_of.isoformat()),
             ).fetchone()
             self._con.commit()
         assert row is not None

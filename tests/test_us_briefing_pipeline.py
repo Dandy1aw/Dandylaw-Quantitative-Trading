@@ -1,4 +1,5 @@
-from datetime import date, datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from quant_signal.notifier.base import Card
 from quant_signal.pipelines.us_briefing import (
     BriefingMode,
     _load_daily_bars,
+    _account_version,
     _observed_input,
     last_completed_us_session,
     run,
@@ -331,6 +333,19 @@ def test_screenshot_pnl_pct_is_always_converted_from_percentage_points() -> None
 
     assert position is not None
     assert position.pnl_pct == Decimal("0.0095")
+
+
+def test_account_version_ignores_retrieval_time_only_changes() -> None:
+    account = _account()
+    later = replace(
+        account,
+        snapshot=replace(
+            account.snapshot,
+            retrieved_at=account.snapshot.retrieved_at + timedelta(minutes=1),
+        ),
+    )
+
+    assert _account_version(account) == _account_version(later)
 
 
 def test_partial_volume_primary_uses_full_volume_fallback(tmp_path: Path) -> None:

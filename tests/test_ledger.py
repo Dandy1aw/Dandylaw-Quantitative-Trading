@@ -806,6 +806,29 @@ def test_us_briefing_run_key_is_idempotent(ledger: SignalLedger) -> None:
     assert ledger.count_us_briefing_runs() == 1
 
 
+def test_us_briefing_run_is_unique_per_report_slot_when_data_version_changes(
+    ledger: SignalLedger,
+) -> None:
+    first = ledger.begin_us_briefing_run(
+        "US_CLOSE", date(2026, 7, 14), "bars-v1", now=NOW
+    )
+    ledger.complete_us_briefing_run(
+        first.run_id, payload={"version": 1}, delivered=True, now=NOW
+    )
+
+    second = ledger.begin_us_briefing_run(
+        "US_CLOSE",
+        date(2026, 7, 14),
+        "bars-v2",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert second.run_id == first.run_id
+    assert second.created is False
+    assert second.status == "DELIVERED"
+    assert ledger.count_us_briefing_runs() == 1
+
+
 def test_market_regime_snapshot_round_trip(ledger: SignalLedger) -> None:
     payload = {
         "as_of": "2026-07-14",

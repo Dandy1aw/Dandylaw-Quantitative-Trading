@@ -141,20 +141,36 @@ def _bars_version(bars: pd.DataFrame, universe_hash: str, as_of: date) -> str:
 def _account_version(account: AccountState | None) -> str:
     if account is None:
         return "account-unavailable"
-    rows = [
-        account.snapshot.retrieved_at.astimezone(timezone.utc).isoformat(),
-        str(account.snapshot.equity),
-        str(account.positions_partial),
-    ]
-    rows.extend(
-        f"{row.symbol}|{row.qty}|{row.avg_entry_price}|{row.market_value}"
-        for row in sorted(account.positions, key=lambda item: item.symbol)
-    )
-    rows.extend(
-        f"{row.symbol}|{row.qty}|{row.avg_entry_price}|{row.current_price}|{row.pnl_pct}"
-        for row in sorted(account.observed_positions, key=lambda item: item.symbol)
-    )
-    return sha256("\n".join(rows).encode("utf-8")).hexdigest()[:16]
+    snapshot = account.snapshot
+    payload = {
+        "snapshot": {
+            "account_id": snapshot.account_id,
+            "equity": snapshot.equity,
+            "cash": snapshot.cash,
+            "buying_power": snapshot.buying_power,
+            "currency": snapshot.currency,
+            "source": snapshot.source,
+            "market_value": snapshot.market_value,
+            "capital_limit": snapshot.capital_limit,
+            "max_financing_ratio": snapshot.max_financing_ratio,
+        },
+        "positions": sorted(
+            (_mapping(row) for row in account.positions),
+            key=lambda row: str(row.get("symbol", "")),
+        ),
+        "observed_positions": sorted(
+            (_mapping(row) for row in account.observed_positions),
+            key=lambda row: str(row.get("symbol", "")),
+        ),
+        "open_orders": sorted(
+            (_mapping(row) for row in account.open_orders),
+            key=lambda row: str(row.get("order_id", "")),
+        ),
+        "positions_partial": account.positions_partial,
+        "reported_position_count": account.reported_position_count,
+    }
+    encoded = json.dumps(_plain(payload), ensure_ascii=False, sort_keys=True)
+    return sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
 def _ticker_frame(bars: pd.DataFrame, ticker: str) -> pd.DataFrame:
