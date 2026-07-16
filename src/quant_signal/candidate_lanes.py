@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from enum import Enum
 import math
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -191,6 +192,7 @@ def discover_candidates(
     as_of: date | datetime,
     settings: CandidateLaneSettings,
     earnings_blocked: set[str] | frozenset[str] = frozenset(),
+    risk_clusters: Mapping[str, Sequence[str]] | None = None,
     holdings: set[str] | frozenset[str] | None = None,
 ) -> CandidateDiscovery:
     """Discover Nasdaq candidates; `holdings` is intentionally ignored by design."""
@@ -332,6 +334,11 @@ def discover_candidates(
 
     selected: list[Candidate] = []
     seen: set[str] = set()
+    cluster_by_ticker: dict[str, str] = {}
+    for configured_cluster, symbols in (risk_clusters or {}).items():
+        for symbol in symbols:
+            cluster_by_ticker.setdefault(str(symbol).upper(), configured_cluster)
+    cluster_counts: dict[str, int] = {}
     lane_order = (
         CandidateLane.TREND_CONTINUATION,
         CandidateLane.TREND_PULLBACK,
@@ -342,8 +349,22 @@ def discover_candidates(
         for row in ranked:
             if row.ticker in seen:
                 continue
+            cluster_name = cluster_by_ticker.get(row.ticker)
+            if (
+                cluster_name is not None
+                and cluster_counts.get(cluster_name, 0)
+                >= settings.max_candidates_per_cluster
+            ):
+                observations.append(
+                    CandidateObservation(
+                        row.ticker, "CLUSTER_CAP", row.history_days, row.price
+                    )
+                )
+                continue
             selected.append(row)
             seen.add(row.ticker)
+            if cluster_name is not None:
+                cluster_counts[cluster_name] = cluster_counts.get(cluster_name, 0) + 1
             if sum(candidate.lane == lane for candidate in selected) >= settings.top_n_per_lane:
                 break
 

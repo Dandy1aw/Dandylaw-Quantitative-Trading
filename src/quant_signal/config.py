@@ -114,6 +114,8 @@ class CandidateLaneSettings(BaseModel):
     pullback_atr_multiple: float = Field(default=1.25, gt=0, le=5)
     stop_atr_multiple: float = Field(default=2.0, gt=0, le=10)
     target_reward_risk: float = Field(default=2.0, gt=1, le=10)
+    earnings_blackout_days: int = Field(default=2, ge=0, le=14)
+    max_candidates_per_cluster: int = Field(default=2, ge=1, le=10)
 
 
 class ProfitStageSettings(BaseModel):

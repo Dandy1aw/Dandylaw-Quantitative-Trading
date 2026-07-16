@@ -26,6 +26,7 @@ from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.pipelines.us_briefing import (
     BriefingMode,
+    _asia_context,
     _load_daily_bars,
     _account_version,
     _observed_input,
@@ -86,6 +87,18 @@ class FailingAccountProvider:
 class FailingAsiaSource:
     def fetch_daily_bars(self, tickers, start, end):  # type: ignore[no-untyped-def]
         raise TimeoutError("asia unavailable")
+
+
+class FixedEarningsSource:
+    def __init__(self) -> None:
+        self.requested: list[str] = []
+
+    def next_dates(self, tickers: list[str]) -> dict[str, date]:
+        self.requested = list(tickers)
+        return {tickers[0]: date(2026, 7, 15)} if tickers else {}
+
+    def recent_surprise(self, tickers: list[str], now: date) -> dict[str, float]:
+        return {}
 
 
 def _bars() -> tuple[pd.DataFrame, set[str]]:
@@ -288,6 +301,51 @@ def test_asia_failure_is_explicit_and_does_not_fail_report(tmp_path: Path) -> No
     assert len(notifier.cards) == 1
     assert "亚洲确认数据不可用" in notifier.cards[0].body_md
     assert "000660.KS" not in notifier.cards[0].body_md
+
+
+def test_asia_context_includes_us_futures_and_vix_without_trade_candidates(
+    tmp_path: Path,
+) -> None:
+    engine, _ = _engine(tmp_path)
+    symbols = ["^KS11", "^KQ11", "NQ=F", "ES=F", "^VIX"]
+    ts = pd.to_datetime(["2026-07-14", "2026-07-15"], utc=True)
+    frames = []
+    for index, symbol in enumerate(symbols):
+        close = np.array([100.0, 101.0 + index])
+        frames.append(
+            pd.DataFrame(
+                {
+                    "open": close,
+                    "high": close,
+                    "low": close,
+                    "close": close,
+                    "volume": [1_000_000, 1_000_000],
+                },
+                index=pd.MultiIndex.from_product(
+                    [[symbol], ts], names=["ticker", "ts"]
+                ),
+            )
+        )
+    engine._intl_source = FakeSource(pd.concat(frames))  # type: ignore[assignment]
+
+    context, text = _asia_context(engine, NOW_ASIA)
+
+    assert {"NQ=F", "ES=F", "^VIX"} <= context.keys()
+    assert "纳指期货" in text and "标普期货" in text and "VIX" in text
+
+
+def test_pipeline_removes_candidates_inside_earnings_blackout(tmp_path: Path) -> None:
+    engine, notifier = _engine(tmp_path)
+    earnings = FixedEarningsSource()
+    engine.earnings_source = earnings
+
+    run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
+
+    stored = engine.ledger.candidate_lane_snapshot("US_CLOSE", date(2026, 7, 14))
+    assert earnings.requested
+    assert len(stored) == 2
+    assert earnings.requested[0] not in {str(row["ticker"]) for row in stored}
+    assert "财报窗口 1" in notifier.cards[0].body_md
 
 
 def test_failed_delivery_retries_without_consuming_profit_stage(tmp_path: Path) -> None:

@@ -69,6 +69,15 @@ def test_repo_universe_uses_skhynix_ads_not_korean_listing() -> None:
     assert "KRW" not in settings.momentum_group_top_n
     assert settings.us_briefing.enabled is True
     assert settings.us_briefing.delivery_mode == "shadow"
+    assert settings.us_briefing.candidate_lanes.earnings_blackout_days == 2
+    assert settings.us_briefing.candidate_lanes.max_candidates_per_cluster == 2
+    assert set(settings.execution_plan.risk_clusters) >= {
+        "semiconductor_memory",
+        "mega_cap_platforms",
+        "enterprise_software",
+        "consumer_growth",
+        "biotech_healthcare",
+    }
 
 
 def test_env_credentials_default_empty(monkeypatch: pytest.MonkeyPatch) -> None:

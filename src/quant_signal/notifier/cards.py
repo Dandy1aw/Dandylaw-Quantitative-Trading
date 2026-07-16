@@ -414,6 +414,7 @@ def us_briefing_card(
         "OVERHEATED": "过热不追",
         "LIQUIDITY_FILTER": "流动性过滤",
         "EARNINGS_WINDOW": "财报窗口",
+        "CLUSTER_CAP": "主题集中限制",
         "INVALID_VOLATILITY": "波动数据异常",
     }
     observation_counts = Counter(

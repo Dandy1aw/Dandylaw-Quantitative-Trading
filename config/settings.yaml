@@ -135,6 +135,8 @@ us_briefing:
     pullback_atr_multiple: 1.25
     stop_atr_multiple: 2.0
     target_reward_risk: 2.0
+    earnings_blackout_days: 2
+    max_candidates_per_cluster: 2
   position_discipline:
     hard_loss_caps: {"1x": 0.08, "2x": 0.05, "3x": 0.035}
     breakeven_trigger: 0.10
@@ -155,6 +157,10 @@ execution_plan:
   cash_reserve: 0.0
   risk_clusters:
     semiconductor_memory: [DRAM, MU, RAM, SMH, SNXX, MUU, SNDK, AMD, NVDA, INTC, TSM, MRVL]
+    mega_cap_platforms: [AAPL, MSFT, GOOGL, GOOG, AMZN, META, TSLA]
+    enterprise_software: [ADBE, CRM, INTU, NOW, PANW, CRWD, PLTR, SNPS, CDNS, ADSK, FTNT, WDAY, TEAM, DDOG]
+    consumer_growth: [COST, NFLX, BKNG, ABNB, MELI, PDD, PEP, MDLZ, SBUX]
+    biotech_healthcare: [AMGN, GILD, REGN, VRTX, BIIB, MRNA, IDXX, ISRG]
   max_new_positions_per_day: 2
   min_stop_distance: 0.02
   max_stop_distance: 0.20

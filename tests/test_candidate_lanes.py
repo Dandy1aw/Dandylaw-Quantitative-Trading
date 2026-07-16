@@ -141,6 +141,23 @@ def test_lane_cap_and_cross_lane_deduplication() -> None:
     assert len({row.ticker for row in result.candidates}) == 3
 
 
+def test_cross_lane_cluster_cap_prevents_hidden_theme_concentration() -> None:
+    paths = _trend_paths(6)
+    settings = CFG.model_copy(update={"max_candidates_per_cluster": 2})
+
+    result = discover_candidates(
+        _bars(paths),
+        set(paths),
+        Regime.TREND,
+        as_of=DAY,
+        settings=settings,
+        risk_clusters={"single_theme": list(paths)},
+    )
+
+    assert len(result.candidates) == 2
+    assert all(row.ticker in paths for row in result.candidates)
+
+
 def test_earnings_veto_keeps_reason_without_trade_levels() -> None:
     paths = _trend_paths(1)
     result = discover_candidates(

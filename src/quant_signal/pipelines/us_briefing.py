@@ -49,7 +49,14 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 ET = ZoneInfo("America/New_York")
-ASIA_CONTEXT_SYMBOLS = ("^KS11", "^KQ11")
+ASIA_CONTEXT_LABELS = {
+    "^KS11": "韩国综合指数",
+    "^KQ11": "韩国科创指数",
+    "NQ=F": "纳指期货",
+    "ES=F": "标普期货",
+    "^VIX": "VIX",
+}
+ASIA_CONTEXT_SYMBOLS = tuple(ASIA_CONTEXT_LABELS)
 
 
 class BriefingMode(str, Enum):
@@ -384,6 +391,53 @@ def _skhy_observation(
     return CandidateObservation("SKHY", "INSUFFICIENT_HISTORY", days, price)
 
 
+def _apply_earnings_blackout(
+    engine: Engine,
+    discovery: CandidateDiscovery,
+    session: date,
+) -> tuple[CandidateDiscovery, str | None]:
+    source = engine.earnings_source
+    if source is None or not discovery.candidates:
+        return discovery, None
+    tickers = [candidate.ticker for candidate in discovery.candidates]
+    try:
+        dates = source.next_dates(tickers)
+    except Exception as error:  # noqa: BLE001
+        log.warning("us_briefing.earnings_failed", error=str(error))
+        return discovery, "财报日历不可用；候选未做财报窗口过滤"
+    window = engine.settings.us_briefing.candidate_lanes.earnings_blackout_days
+    blocked = {
+        ticker
+        for ticker, earnings_day in dates.items()
+        if 0 <= (earnings_day - session).days <= window
+    }
+    if not blocked:
+        return discovery, None
+    candidates = tuple(
+        candidate
+        for candidate in discovery.candidates
+        if candidate.ticker not in blocked
+    )
+    observations = (*discovery.observations, *(
+        CandidateObservation(
+            candidate.ticker,
+            "EARNINGS_WINDOW",
+            candidate.history_days,
+            candidate.price,
+        )
+        for candidate in discovery.candidates
+        if candidate.ticker in blocked
+    ))
+    return (
+        dataclasses.replace(
+            discovery,
+            candidates=candidates,
+            observations=observations,
+        ),
+        f"财报窗口过滤 {len(blocked)} 个候选",
+    )
+
+
 def _asia_context(engine: Engine, now: datetime) -> tuple[dict[str, float], str]:
     try:
         bars = engine._intl_source.fetch_daily_bars(
@@ -404,7 +458,10 @@ def _asia_context(engine: Engine, now: datetime) -> tuple[dict[str, float], str]
             output[ticker] = float(close.iloc[-1] / close.iloc[-2] - 1.0)
     if not output:
         return {}, "亚洲确认数据不可用；不据此推断方向"
-    text = "、".join(f"{ticker} {value:+.1%}" for ticker, value in output.items())
+    text = "、".join(
+        f"{ASIA_CONTEXT_LABELS[ticker]} {value:+.1%}"
+        for ticker, value in output.items()
+    )
     return output, f"亚洲非交易上下文：{text}"
 
 
@@ -463,6 +520,10 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         regime,
         as_of=as_of,
         settings=settings.candidate_lanes,
+        risk_clusters=engine.settings.execution_plan.risk_clusters,
+    )
+    discovery, earnings_quality = _apply_earnings_blackout(
+        engine, discovery, _upcoming_us_session(now)
     )
     skhy = _skhy_observation(bars, discovery.observations)
     if skhy is not None:
@@ -471,6 +532,8 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         )
     account: AccountState | None = None
     data_quality = [f"纳指100覆盖率 {regime.coverage:.1%}"]
+    if earnings_quality is not None:
+        data_quality.append(earnings_quality)
     if engine.account_provider is not None:
         try:
             account = engine.account_provider.snapshot(now)
