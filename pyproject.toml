@@ -24,11 +24,14 @@ research = ["vectorbt>=0.26,<0.27", "plotly<5.15"]
 
 [dependency-groups]
 dev = [
-    "pytest>=8,<9",
+    "pytest>=9.0.3,<10",
     "mypy>=1.10,<2",
     "freezegun>=1.5,<2",
     "types-PyYAML",
     "pandas-stubs>=3.0.3.260530",
+    "ruff>=0.12,<1",
+    "pytest-cov>=6,<8",
+    "pip-audit>=2.9,<3",
 ]
 
 [project.scripts]
@@ -43,6 +46,15 @@ packages = ["src/quant_signal"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["quant_signal"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 70
+skip_covered = true
 
 [tool.mypy]
 strict = true

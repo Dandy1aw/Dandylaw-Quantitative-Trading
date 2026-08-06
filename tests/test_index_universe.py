@@ -96,6 +96,7 @@ def test_symbol_aliases_are_canonical_and_provider_specific() -> None:
     assert to_canonical_symbol(" brk-b ") == "BRK.B"
     assert to_canonical_symbol("BF.B") == "BF.B"
     assert to_canonical_symbol("aapl") == "AAPL"
+    assert to_canonical_symbol("AKHY") == "SKHY"
     assert to_yfinance_symbol("BRK.B") == "BRK-B"
     assert to_yfinance_symbol("BF.B") == "BF-B"
     assert to_yfinance_symbol("AAPL") == "AAPL"

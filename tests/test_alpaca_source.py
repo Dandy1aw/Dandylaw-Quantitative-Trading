@@ -78,6 +78,30 @@ def test_fetch_sip_daily_bars_requests_full_market_feed() -> None:
     assert params["end"] == "2026-07-03"  # type: ignore[index]
 
 
+def test_fetch_minute_bars_prefers_realtime_iex_and_labels_partial_volume() -> None:
+    client = FakeClient([FAKE_PAGE])
+    out = AlpacaSource("k", "s", client=client).fetch_minute_bars(["SPY"])
+
+    params = client.calls[0]["params"]
+    assert params["feed"] == "iex"  # type: ignore[index]
+    assert params["timeframe"] == "1Min"  # type: ignore[index]
+    assert out.attrs["feed"] == "alpaca_iex_1m_realtime_partial"
+
+
+def test_fetch_minute_bars_labels_sip_fallback_as_delayed() -> None:
+    client = FakeClient(
+        [
+            {"status": 403, "json": {"message": "IEX unavailable"}},
+            FAKE_PAGE,
+        ]
+    )
+    out = AlpacaSource("k", "s", client=client).fetch_minute_bars(["SPY"])
+
+    assert client.calls[0]["params"]["feed"] == "iex"  # type: ignore[index]
+    assert client.calls[1]["params"]["feed"] == "sip"  # type: ignore[index]
+    assert out.attrs["feed"] == "alpaca_sip_1m_delayed"
+
+
 @pytest.mark.parametrize(
     "error",
     [

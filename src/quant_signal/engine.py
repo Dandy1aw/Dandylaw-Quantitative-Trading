@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
@@ -22,6 +23,7 @@ from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.dedup import DedupResult, apply_dedup
 from quant_signal.pipelines.deviation import run as run_deviation_pipeline
 from quant_signal.pipelines.enrichment import run as run_enrichment_pipeline
+from quant_signal.pipelines.holding_price_alert import run as run_holding_price_alert_pipeline
 from quant_signal.pipelines.execution_plan import (
     run_daily as run_execution_brief_pipeline,
     run_watch as run_execution_watch_pipeline,
@@ -100,6 +102,8 @@ class Engine:
         self.ledger = ledger
         self.notifier = notifier
         self.enrichers = enrichers or []
+        self._execution_brief_lock = threading.Lock()
+        self._last_execution_brief_at: datetime | None = None
         if index_universe_provider is None and settings.index_universe.enabled:
             cache_path = Path(settings.index_universe.cache_path)
             if not cache_path.is_absolute():
@@ -333,14 +337,17 @@ class Engine:
             )
             return {ticker: None for ticker in ordered}
 
-    def run_premarket(self, now: datetime) -> None:
-        run_premarket_pipeline(self, now)
+    def run_premarket(self, now: datetime) -> bool:
+        return run_premarket_pipeline(self, now)
 
     def run_intraday(self, now: datetime) -> None:
         run_intraday_pipeline(self, now)
 
     def run_watch_deviation(self, now: datetime) -> None:
         run_deviation_pipeline(self, now)
+
+    def run_holding_price_alert(self, now: datetime) -> None:
+        run_holding_price_alert_pipeline(self, now)
 
     def run_enrichment(self, now: datetime) -> None:
         run_enrichment_pipeline(self, now)
@@ -351,17 +358,40 @@ class Engine:
     def run_postmarket(self, now: datetime) -> None:
         run_postmarket_pipeline(self, now)
 
-    def run_data_qa(self, now: datetime) -> None:
-        run_dataqa_pipeline(self, now)
+    def run_data_qa(self, now: datetime) -> bool:
+        return run_dataqa_pipeline(self, now)
 
-    def run_market_scan(self, now: datetime) -> None:
-        run_market_scan_pipeline(self, now)
+    def run_market_scan(self, now: datetime) -> bool:
+        return run_market_scan_pipeline(self, now)
 
     def run_negative_overreaction(self, now: datetime) -> None:
         run_negative_overreaction_pipeline(self, now)
 
-    def run_execution_brief(self, now: datetime) -> None:
-        run_execution_brief_pipeline(self, now)
+    def run_execution_brief(
+        self,
+        now: datetime,
+        *,
+        skip_if_run_within: timedelta | None = None,
+    ) -> bool:
+        """Build and deliver one action card, serializing manual and scheduled runs."""
+        with self._execution_brief_lock:
+            if (
+                skip_if_run_within is not None
+                and self._last_execution_brief_at is not None
+                and timedelta(0)
+                <= now - self._last_execution_brief_at
+                <= skip_if_run_within
+            ):
+                log.info(
+                    "execution_brief.coalesced",
+                    last_run=self._last_execution_brief_at.isoformat(),
+                    requested_at=now.isoformat(),
+                )
+                return True
+            delivered = run_execution_brief_pipeline(self, now)
+            if delivered:
+                self._last_execution_brief_at = now
+            return delivered
 
     def run_execution_watch(self, now: datetime) -> None:
         run_execution_watch_pipeline(self, now)
@@ -375,5 +405,16 @@ class Engine:
     def run_option_intel(self, now: datetime) -> None:
         run_option_intel_pipeline(self, now)
 
-    def run_us_briefing(self, now: datetime, mode: BriefingMode) -> None:
-        run_us_briefing_pipeline(self, now, mode)
+    def run_us_briefing(
+        self,
+        now: datetime,
+        mode: BriefingMode,
+        *,
+        deliver: bool | None = None,
+    ) -> bool:
+        return run_us_briefing_pipeline(self, now, mode, deliver=deliver)
+
+    def run_daily_action_briefing(self, now: datetime) -> bool:
+        return run_us_briefing_pipeline(
+            self, now, BriefingMode.DAILY_ACTION, deliver=True
+        )

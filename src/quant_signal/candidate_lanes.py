@@ -35,6 +35,12 @@ class Candidate:
     atr: float
     history_days: int
     reasons: tuple[str, ...]
+    profit_targets: tuple[float, ...] = ()
+    recommended_target_stage: int = 1
+    recent_buying_notional: float = 0.0
+    buying_pressure_score: float = 0.0
+    buying_pressure_label: str = "偏弱"
+    nearby_resistance: float | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +130,53 @@ def _rsi(close: pd.Series, period: int = 14) -> float:
     return 100.0 - 100.0 / (1.0 + strength)
 
 
+def _buying_pressure(frame: pd.DataFrame) -> tuple[float, float, str, int]:
+    """Estimate recent buying turnover from daily OHLCV; this is not trade flow."""
+    recent = frame.tail(5)
+    close = pd.to_numeric(frame["close"], errors="coerce")
+    recent_close = close.tail(5)
+    previous_close = close.shift(1).tail(5)
+    high = pd.to_numeric(recent["high"], errors="coerce")
+    low = pd.to_numeric(recent["low"], errors="coerce")
+    volume = pd.to_numeric(recent["volume"], errors="coerce")
+    turnover = recent_close * volume
+    daily_range = (high - low).replace(0, np.nan)
+    close_location = ((recent_close - low) / daily_range).clip(0, 1).fillna(0.5)
+    up_day = recent_close > previous_close
+    buy_weight = pd.Series(
+        np.where(up_day, 0.5 + 0.5 * close_location, 0.25 * close_location),
+        index=recent.index,
+        dtype=float,
+    )
+    buying_notional = float((turnover * buy_weight).sum())
+    baseline_turnover = float(
+        (close.tail(20) * pd.to_numeric(frame["volume"], errors="coerce").tail(20)).mean()
+        * len(recent)
+    )
+    score = (
+        min(max(buying_notional / baseline_turnover, 0.0), 1.0)
+        if math.isfinite(baseline_turnover) and baseline_turnover > 0
+        else 0.0
+    )
+    if score >= 0.65:
+        return buying_notional, score, "强", 3
+    if score >= 0.40:
+        return buying_notional, score, "中等", 2
+    return buying_notional, score, "偏弱", 1
+
+
+def _nearby_resistance(frame: pd.DataFrame, entry_high: float) -> float | None:
+    close = pd.to_numeric(frame["close"], errors="coerce").dropna()
+    history = close.iloc[-125:-5]
+    if len(history) < 3:
+        return None
+    swing_highs = history[(history >= history.shift(1)) & (history > history.shift(-1))]
+    candidates = swing_highs[swing_highs >= entry_high * 1.02]
+    if candidates.empty:
+        return None
+    return round(float(candidates.min()), 4)
+
+
 def _levels(
     price: float,
     ma20: float,
@@ -144,8 +197,7 @@ def _levels(
     entry_low = min(entry_low, entry_high)
     invalidation = min(entry_low - atr * settings.stop_atr_multiple, ma50 - atr * 0.25)
     invalidation = max(0.01, invalidation)
-    risk = entry_high - invalidation
-    target = entry_high + risk * settings.target_reward_risk
+    target = entry_high * 1.05
     return tuple(round(value, 4) for value in (entry_low, entry_high, invalidation, target))  # type: ignore[return-value]
 
 
@@ -167,6 +219,22 @@ def _candidate(
     entry_low, entry_high, invalidation, target = _levels(
         price, ma20, ma50, atr, lane, settings
     )
+    profit_targets = tuple(
+        round(entry_high * (1.0 + stage * 0.05), 4) for stage in (1, 2, 3)
+    )
+    buying_notional, pressure_score, pressure_label, target_stage = _buying_pressure(
+        frame
+    )
+    resistance = _nearby_resistance(frame, entry_high)
+    if resistance is not None:
+        stages_before_resistance = [
+            stage
+            for stage, target_value in enumerate(profit_targets, start=1)
+            if target_value <= resistance
+        ]
+        resistance_stage = max(stages_before_resistance, default=1)
+        target_stage = min(target_stage, resistance_stage)
+    target = profit_targets[target_stage - 1]
     if not (0 < invalidation < entry_low <= entry_high < target):
         return None
     return Candidate(
@@ -181,6 +249,12 @@ def _candidate(
         atr=round(atr, 4),
         history_days=len(close),
         reasons=reasons,
+        profit_targets=profit_targets,
+        recommended_target_stage=target_stage,
+        recent_buying_notional=round(buying_notional, 2),
+        buying_pressure_score=round(pressure_score, 4),
+        buying_pressure_label=pressure_label,
+        nearby_resistance=resistance,
     )
 
 

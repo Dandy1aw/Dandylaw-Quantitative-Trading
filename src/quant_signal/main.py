@@ -38,6 +38,11 @@ def main() -> None:
             venues=tuple(settings.option_flow.venues),
             discovery_limit=settings.option_flow.discovery_limit,
             top_n=settings.option_flow.top_n,
+            min_venue_coverage=settings.option_flow.min_venue_coverage,
+            circuit_breaker_failures=settings.option_flow.circuit_breaker_failures,
+            circuit_breaker_cooldown_minutes=(
+                settings.option_flow.circuit_breaker_cooldown_minutes
+            ),
             excluded_index_roots=frozenset(
                 settings.option_flow.excluded_index_roots
             ),
@@ -79,7 +84,7 @@ def main() -> None:
     )
     from quant_signal.scheduler import JobRuntime
 
-    runtime = JobRuntime()
+    runtime = JobRuntime(ledger=ledger)
     if settings.feishu_bot.enabled:
         if settings.feishu_app_id and settings.feishu_app_secret:
             import threading
@@ -93,14 +98,23 @@ def main() -> None:
             bot = FeishuBotService(
                 ledger,
                 settings,
-                LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
+                LarkTransport(
+                    settings.feishu_app_id,
+                    settings.feishu_app_secret,
+                    settings.feishu_proxy,
+                ),
                 runtime=runtime,
                 engine=engine,
             )
             bot.start()
             threading.Thread(
                 target=run_ws_forever,
-                args=(bot, settings.feishu_app_id, settings.feishu_app_secret),
+                args=(
+                    bot,
+                    settings.feishu_app_id,
+                    settings.feishu_app_secret,
+                    settings.feishu_proxy,
+                ),
                 name="feishu-bot-ws",
                 daemon=True,
             ).start()

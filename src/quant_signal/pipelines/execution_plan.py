@@ -267,7 +267,7 @@ def _ai_explanation(
     except Exception as error:  # noqa: BLE001
         log.warning("execution_brief.ai_failed", error=str(error))
         return None
-    return body.strip()[:300] if body else None
+    return body.strip() if body else None
 
 
 def _screenshot_account_warning(engine: Engine, now: datetime) -> str | None:
@@ -293,10 +293,10 @@ def _screenshot_account_warning(engine: Engine, now: datetime) -> str | None:
     )
 
 
-def run_daily(engine: Engine, now: datetime) -> None:
+def run_daily(engine: Engine, now: datetime) -> bool:
     cfg = engine.settings.execution_plan
     if not cfg.enabled:
-        return
+        return False
     account_state: AccountState | None = None
     if engine.account_provider is not None:
         try:
@@ -347,7 +347,7 @@ def run_daily(engine: Engine, now: datetime) -> None:
     for plan in plans:
         engine.ledger.upsert_execution_plan(plan)
     ai_summary = _ai_explanation(engine, now, plans, account_state)
-    engine.notifier.send(
+    delivered = engine.notifier.send(
         execution_plan_card(
             account_state,
             plans,
@@ -362,7 +362,9 @@ def run_daily(engine: Engine, now: datetime) -> None:
         actionable_candidates=sum(
             1 for plan in plans if plan.state is PlanState.CANDIDATE
         ),
+        delivered=delivered,
     )
+    return delivered
 
 
 def _trend_long(engine: Engine, ticker: str, now: datetime) -> bool:

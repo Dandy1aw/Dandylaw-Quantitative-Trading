@@ -104,7 +104,7 @@ def test_action_card_only_premarket_calculates_without_duplicate_pushes(
     assert ledger.get_strategy_targets("momentum_rotation")
 
 
-def test_premarket_sends_ai_briefing_card_when_cli_returns_text(
+def test_premarket_does_not_send_standalone_ai_briefing_card(
     env, daily_bars, monkeypatch: pytest.MonkeyPatch
 ) -> None:  # type: ignore[no-untyped-def]
     settings, store, ledger, notifier = env
@@ -115,14 +115,8 @@ def test_premarket_sends_ai_briefing_card_when_cli_returns_text(
             )
         }
     )
-    captured = {}
-
     def fake_ai_briefing(settings, context):  # type: ignore[no-untyped-def]
-        captured["provider"] = settings.provider
-        captured["signals"] = context.signals
-        captured["ranking"] = context.ranking
-        captured["analysis_cards"] = context.analysis_cards
-        return "今日偏观察，等待回踩。仅供观察，不构成投资建议。"
+        raise AssertionError("premarket must not call standalone AI briefing")
 
     monkeypatch.setattr(premarket_pipeline, "run_ai_briefing", fake_ai_briefing)
 
@@ -131,13 +125,7 @@ def test_premarket_sends_ai_briefing_card_when_cli_returns_text(
     engine.run_premarket(last_bar_ts + timedelta(hours=32))
 
     titles = [card.title for card in notifier.cards]
-    assert "🤖 AI早报观点" in titles
-    assert captured["provider"] == "claude_code_cli"
-    assert captured["signals"]
-    assert captured["ranking"]
-    assert captured["analysis_cards"]
-    assert any("盘前早报" in card["title"] for card in captured["analysis_cards"])
-    assert any("动量全池榜单" in card["title"] for card in captured["analysis_cards"])
+    assert "🤖 AI早报观点" not in titles
 
 
 def test_premarket_skips_ai_briefing_card_when_cli_returns_none(

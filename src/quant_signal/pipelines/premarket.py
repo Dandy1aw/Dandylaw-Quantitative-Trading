@@ -154,8 +154,9 @@ def _maybe_send_ai_briefing(
         engine.notifier.send(build_ai_briefing_card(body))
 
 
-def run(engine: Engine, now: datetime) -> None:
+def run(engine: Engine, now: datetime) -> bool:
     action_card_only = engine.settings.notify.action_card_only
+    delivery_ok = True
     bars = engine._refresh_daily(now)
     engine._refresh_fx_rates()
     ranking = engine.momentum.rank(bars)
@@ -250,6 +251,8 @@ def run(engine: Engine, now: datetime) -> None:
             else []
         )
         delivered = bool(cards) and bool(delivery_results) and all(delivery_results)
+        if not action_card_only:
+            delivery_ok = delivery_ok and delivered
         for signal in to_push:
             engine.ledger.insert(signal, pushed=delivered, now=now)
     engine.ledger.set_holdings(engine.momentum.strategy_id, target_tickers)
@@ -282,16 +285,9 @@ def run(engine: Engine, now: datetime) -> None:
         footer_md=concentration_note,
     )
     if not action_card_only:
-        engine.notifier.send(ranking_card)
+        ranking_delivered = engine.notifier.send(ranking_card)
+        delivery_ok = ranking_delivered and delivery_ok
     analysis_cards.append({"title": ranking_card.title, "body": ranking_card.body_md})
-    if not action_card_only:
-        _maybe_send_ai_briefing(
-            engine,
-            now,
-            to_push,
-            ranking,
-            target_tickers,
-            [concentration_note] if concentration_note else [],
-            analysis_cards,
-        )
+    # AI 只在统一每日行动简报中调用一次，不再发送独立早报观点卡。
     log.info("premarket.done", signals=len(all_signals), pushed=len(result.to_push))
+    return delivery_ok

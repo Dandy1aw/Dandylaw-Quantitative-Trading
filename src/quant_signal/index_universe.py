@@ -29,7 +29,11 @@ _COUNT_RANGES: dict[str, tuple[int, int]] = {
     "sp500": (490, 510),
     "nasdaq100": (95, 110),
 }
-_ALIASES_TO_CANONICAL = {"BRK-B": "BRK.B", "BF-B": "BF.B"}
+_ALIASES_TO_CANONICAL = {
+    "BRK-B": "BRK.B",
+    "BF-B": "BF.B",
+    "AKHY": "SKHY",
+}
 _ALIASES_TO_YFINANCE = {"BRK.B": "BRK-B", "BF.B": "BF-B"}
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,4}(?:\.[A-Z])?$")
 _EQUITY_SECTORS = {

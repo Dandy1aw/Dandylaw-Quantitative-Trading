@@ -16,6 +16,7 @@ import structlog
 from quant_signal.account import AccountState, BrokerPosition, ObservedPosition
 from quant_signal.ai_briefing import (
     USBriefingAIContext,
+    parse_company_rationales,
     run_ai_briefing,
     validate_us_briefing_output,
 )
@@ -26,6 +27,12 @@ from quant_signal.candidate_lanes import (
     CandidateObservation,
     discover_candidates,
 )
+from quant_signal.company_profiles import (
+    CompanyProfile,
+    RankedSectorCandidate,
+    select_sector_candidates,
+)
+from quant_signal.company_analysis import run_company_rationales
 from quant_signal.execution import (
     ExecutionPlan,
     PlanCandidate,
@@ -34,7 +41,7 @@ from quant_signal.execution import (
     portfolio_budget_from_state,
 )
 from quant_signal.market_regime import RegimeSnapshot, classify_market_regime
-from quant_signal.notifier.cards import us_briefing_card
+from quant_signal.notifier.cards import us_briefing_card, us_briefing_cards
 from quant_signal.position_discipline import (
     PortfolioRiskSummary,
     PositionAdvice,
@@ -62,6 +69,7 @@ ASIA_CONTEXT_SYMBOLS = tuple(ASIA_CONTEXT_LABELS)
 class BriefingMode(str, Enum):
     US_CLOSE = "US_CLOSE"
     ASIA_CONFIRM = "ASIA_CONFIRM"
+    DAILY_ACTION = "DAILY_ACTION"
 
 
 def last_completed_us_session(now: datetime) -> date:
@@ -491,20 +499,26 @@ def _payloads(
     )
 
 
-def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
+def run(
+    engine: Engine,
+    now: datetime,
+    mode: BriefingMode,
+    *,
+    deliver: bool | None = None,
+) -> bool:
     settings = engine.settings.us_briefing
     if not settings.enabled:
-        return
+        return True
     provider = engine.index_universe_provider
     if provider is None:
         log.warning("us_briefing.skip", reason="index_universe_unavailable")
-        return
+        return False
     as_of = last_completed_us_session(now)
     try:
         universe = provider.load(now)
     except Exception as error:  # noqa: BLE001
         log.warning("us_briefing.skip", reason="index_universe_failed", error=str(error))
-        return
+        return False
     members = _nasdaq_members(universe)
     bars = _load_daily_bars(engine, members, as_of)
     regime = classify_market_regime(
@@ -514,13 +528,21 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         settings=settings.market_regime,
         min_coverage=settings.min_coverage,
     )
+    discovery_settings = settings.candidate_lanes
+    if discovery_settings.sector_quality_filter_enabled:
+        discovery_settings = discovery_settings.model_copy(
+            update={"top_n_per_lane": 10, "max_candidates_per_cluster": 10}
+        )
     discovery = discover_candidates(
         bars,
         members,
         regime,
         as_of=as_of,
-        settings=settings.candidate_lanes,
+        settings=discovery_settings,
         risk_clusters=engine.settings.execution_plan.risk_clusters,
+    )
+    discovery, ranked_candidates, sector_quality = _apply_sector_quality_filter(
+        engine, discovery, members, now
     )
     discovery, earnings_quality = _apply_earnings_blackout(
         engine, discovery, _upcoming_us_session(now)
@@ -532,6 +554,8 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         )
     account: AccountState | None = None
     data_quality = [f"纳指100覆盖率 {regime.coverage:.1%}"]
+    if settings.candidate_lanes.sector_quality_filter_enabled:
+        data_quality.append(sector_quality)
     if earnings_quality is not None:
         data_quality.append(earnings_quality)
     if engine.account_provider is not None:
@@ -554,13 +578,52 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         account,
         now,
     )
-    if mode == BriefingMode.ASIA_CONFIRM:
+    for candidate in candidates:
+        ticker = str(candidate.get("ticker", ""))
+        ranked = ranked_candidates.get(ticker)
+        if ranked is None:
+            continue
+        profile = ranked.profile
+        candidate.update(
+            {
+                "company_name": profile.company_name,
+                "gics_sector": profile.gics_sector,
+                "candidate_group": ranked.candidate_group,
+                "industry": profile.industry,
+                "market_cap_usd": profile.market_cap_usd,
+                "sector_strategy_rank": ranked.sector_strategy_rank,
+                "sector_market_cap_rank": ranked.sector_market_cap_rank,
+                "profile_as_of": profile.as_of.isoformat(),
+                "business_summary": profile.business_summary,
+                "total_revenue": profile.total_revenue,
+                "revenue_growth": profile.revenue_growth,
+                "earnings_growth": profile.earnings_growth,
+                "profit_margin": profile.profit_margin,
+                "return_on_equity": profile.return_on_equity,
+                "free_cash_flow": profile.free_cash_flow,
+            }
+        )
+    if mode in (BriefingMode.ASIA_CONFIRM, BriefingMode.DAILY_ACTION):
         asia, asia_quality = _asia_context(engine, now)
         regime_payload["asia_context"] = asia
         data_quality.append(asia_quality)
     universe_hash = str(getattr(universe, "content_hash", "unknown"))
+    config_payload = {
+        "us_briefing": engine.settings.us_briefing.model_dump(mode="json"),
+        "execution_plan": engine.settings.execution_plan.model_dump(mode="json"),
+        "forward_evaluation": engine.settings.forward_evaluation.model_dump(mode="json"),
+    }
+    config_hash = sha256(
+        json.dumps(
+            config_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    account_version = _account_version(account)
     data_version = sha256(
-        f"{_bars_version(bars, universe_hash, as_of)}|{_account_version(account)}".encode()
+        f"{_bars_version(bars, universe_hash, as_of)}|{account_version}".encode()
     ).hexdigest()[:20]
     report_kind = mode.value
     report_run = engine.ledger.begin_us_briefing_run(
@@ -568,7 +631,7 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
     )
     if not report_run.created and report_run.status in {"DELIVERED", "SHADOWED"}:
         log.info("us_briefing.duplicate", run_id=report_run.run_id)
-        return
+        return True
     engine.ledger.save_market_regime_snapshot(report_kind, regime_payload, now=now)
     engine.ledger.replace_candidate_lane_snapshot(
         report_kind, as_of, candidates, now=now
@@ -584,7 +647,7 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         observations=observations,
         data_quality=data_quality,
     )
-    if engine.settings.ai_briefing.enabled:
+    if engine.settings.ai_briefing.enabled and mode is BriefingMode.DAILY_ACTION:
         try:
             raw_ai = run_ai_briefing(engine.settings.ai_briefing, ai_context)
             ai_summary = (
@@ -592,34 +655,102 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
             )
         except Exception as error:  # noqa: BLE001
             log.warning("us_briefing.ai_failed", error=str(error))
-    card = us_briefing_card(
-        report_kind=report_kind,
-        as_of=as_of.isoformat(),
-        regime=regime_payload,
-        candidates=candidates,
-        discipline=discipline,
-        portfolio_risk=portfolio_risk,
-        observations=observations,
-        data_quality=data_quality,
-        ai_summary=ai_summary,
-    )
-    delivered = False
-    if settings.delivery_mode == "live":
-        delivered = engine.notifier.send(card)
-    shadowed = settings.delivery_mode == "shadow"
-    if delivered:
-        for plan in execution_plans:
-            engine.ledger.upsert_execution_plan(plan)
-        for item in advice:
-            engine.ledger.save_position_discipline_state(item.next_state, now=now)
-    payload: dict[str, object] = {
+    company_rationales: dict[str, str] = {}
+    if (
+        engine.settings.ai_briefing.enabled
+        and mode is BriefingMode.DAILY_ACTION
+        and candidates
+    ):
+        company_rationales = _run_company_rationales(
+            engine,
+            candidates,
+            news=_load_company_news(engine, candidates, now),
+            as_of=as_of,
+        )
+    card_args = {
+        "report_kind": report_kind,
+        "as_of": as_of.isoformat(),
         "regime": regime_payload,
         "candidates": candidates,
         "discipline": discipline,
         "portfolio_risk": portfolio_risk,
         "observations": observations,
         "data_quality": data_quality,
+        "ai_summary": ai_summary,
+        "company_rationales": company_rationales,
+        "news_lookback_days": settings.candidate_lanes.ai_news_lookback_days,
+    }
+    cards = (
+        us_briefing_cards(**card_args)  # type: ignore[arg-type]
+        if mode is BriefingMode.DAILY_ACTION
+        else (us_briefing_card(**card_args),)  # type: ignore[arg-type]
+    )
+    card = cards[0]
+    delivered = False
+    should_deliver = (
+        settings.delivery_mode == "live" if deliver is None else deliver
+    )
+    if should_deliver:
+        delivery_results = [engine.notifier.send(item) for item in cards]
+        delivered = all(delivery_results)
+    shadowed = not should_deliver
+    if delivered:
+        for plan in execution_plans:
+            engine.ledger.upsert_execution_plan(plan)
+        for item in advice:
+            engine.ledger.save_position_discipline_state(item.next_state, now=now)
+    semantic_input = {
+        "report_kind": report_kind,
+        "as_of": as_of.isoformat(),
+        "regime": regime_payload,
+        "candidates": candidates,
+        "discipline": discipline,
+        "portfolio_risk": portfolio_risk,
+        "observations": observations,
+        "data_quality": data_quality,
+    }
+    input_semantic_hash = sha256(
+        json.dumps(
+            _plain(semantic_input),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    payload: dict[str, object] = {
+        "rule_version": "daily-action-v2",
+        "model_version": (
+            engine.settings.ai_briefing.provider
+            if engine.settings.ai_briefing.enabled
+            else "disabled"
+        ),
+        "data_version": data_version,
+        "account_version": account_version,
+        "input_semantic_hash": input_semantic_hash,
+        "config_hash": config_hash,
+        "universe_hash": universe_hash,
+        "point_in_time": {
+            "status": "LIVE_SNAPSHOT",
+            "as_of": as_of.isoformat(),
+            "captured_at": now.astimezone(timezone.utc).isoformat(),
+            "historical_membership_certified": False,
+        },
+        "cost_model": {
+            "kind": "fixed_round_trip_bps",
+            "transaction_cost_bps": (
+                engine.settings.forward_evaluation.transaction_cost_bps_per_side
+                * 2.0
+            ),
+        },
+        "regime": regime_payload,
+        "candidates": candidates,
+        "discipline": discipline,
+        "portfolio_risk": portfolio_risk,
+        "observations": observations,
+        "data_quality": data_quality,
+        "company_rationales": company_rationales,
         "card_title": card.title,
+        "card_titles": [item.title for item in cards],
     }
     engine.ledger.complete_us_briefing_run(
         report_run.run_id,
@@ -634,5 +765,141 @@ def run(engine: Engine, now: datetime, mode: BriefingMode) -> None:
         regime=regime.regime.value,
         candidates=len(candidates),
         positions=len(discipline),
+        cards=len(cards),
         delivered=delivered,
     )
+    return delivered or shadowed
+
+
+def _load_company_profiles(
+    engine: Engine,
+    members: set[str],
+    now: datetime,
+) -> dict[str, CompanyProfile]:
+    settings = engine.settings.us_briefing.candidate_lanes
+    cached = engine.ledger.cached_company_profiles(
+        sorted(members),
+        now=now,
+        success_max_age=timedelta(days=settings.profile_max_age_days),
+        failure_max_age=timedelta(hours=settings.profile_failure_ttl_hours),
+    )
+    missing = sorted(members - set(cached))
+    source = engine.fundamentals_source
+    if not missing or source is None:
+        return cached
+    try:
+        fetched = source.profiles(missing)
+    except Exception as error:  # noqa: BLE001
+        log.warning("us_briefing.company_profiles_failed", error=str(error))
+        return cached
+    if fetched:
+        engine.ledger.save_company_profiles(tuple(fetched.values()), fetched_at=now)
+        cached.update(fetched)
+    return cached
+
+
+def _load_company_news(
+    engine: Engine,
+    candidates: Sequence[Mapping[str, object]],
+    now: datetime,
+) -> dict[str, list[dict[str, object]]]:
+    source = engine.news_source
+    if source is None:
+        return {}
+    settings = engine.settings.us_briefing.candidate_lanes
+    tickers = [str(row.get("ticker", "")) for row in candidates if row.get("ticker")]
+    start = now - timedelta(days=settings.ai_news_lookback_days)
+    try:
+        articles = source.fetch(tickers, start, now)
+    except Exception as error:  # noqa: BLE001
+        log.warning("us_briefing.company_news_failed", error=str(error))
+        return {}
+    if engine.news_store is not None and articles:
+        try:
+            engine.news_store.put_many(articles, seen_at=now)
+        except Exception as error:  # noqa: BLE001
+            log.warning("us_briefing.company_news_store_failed", error=str(error))
+    output: dict[str, list[dict[str, object]]] = {}
+    for ticker in tickers:
+        relevant = [article for article in articles if ticker in article.symbols]
+        relevant.sort(key=lambda article: article.created_at, reverse=True)
+        output[ticker] = [
+            {
+                "created_at": article.created_at.isoformat(),
+                "headline": article.headline,
+                "summary": article.summary[:500],
+                "source": article.source,
+            }
+            for article in relevant[: settings.ai_news_max_items]
+        ]
+    return output
+
+
+def _run_company_rationales(
+    engine: Engine,
+    candidates: Sequence[dict[str, object]],
+    *,
+    news: Mapping[str, list[dict[str, object]]],
+    as_of: date,
+) -> dict[str, str]:
+    settings = engine.settings.us_briefing.candidate_lanes
+    return run_company_rationales(
+        list(candidates),
+        news=news,
+        as_of=as_of,
+        candidate_settings=settings,
+        ai_settings=engine.settings.ai_briefing,
+        run_ai=run_ai_briefing,
+        parse=parse_company_rationales,
+    )
+
+
+def _apply_sector_quality_filter(
+    engine: Engine,
+    discovery: CandidateDiscovery,
+    members: set[str],
+    now: datetime,
+) -> tuple[CandidateDiscovery, dict[str, RankedSectorCandidate], str]:
+    settings = engine.settings.us_briefing.candidate_lanes
+    if not settings.sector_quality_filter_enabled:
+        return discovery, {}, "行业/市值过滤未启用"
+    profiles = _load_company_profiles(engine, members, now)
+    selection = select_sector_candidates(
+        discovery.candidates,
+        profiles,
+        min_market_cap_usd=settings.min_market_cap_usd,
+        top_n_per_sector=settings.top_n_per_sector,
+        max_sectors=settings.max_sectors,
+        top_n_overrides=settings.candidate_group_top_n_overrides,
+    )
+    ranked = {row.candidate.ticker: row for row in selection.selected}
+    candidate_by_ticker = {
+        candidate.ticker: candidate for candidate in discovery.candidates
+    }
+    rejected_observations = tuple(
+        CandidateObservation(
+            ticker,
+            reason,
+            candidate_by_ticker[ticker].history_days,
+            candidate_by_ticker[ticker].price,
+        )
+        for ticker, reason in selection.rejected.items()
+        if ticker in candidate_by_ticker
+    )
+    filtered = dataclasses.replace(
+        discovery,
+        candidates=tuple(row.candidate for row in selection.selected),
+        observations=(*discovery.observations, *rejected_observations),
+    )
+    eligible_profiles = sum(
+        profile.data_status == "ok"
+        and profile.market_cap_usd is not None
+        and profile.market_cap_usd >= settings.min_market_cap_usd
+        for profile in profiles.values()
+    )
+    quality = (
+        f"行业分散：{len(selection.selected)} 个候选 / "
+        f"{len({row.candidate_group for row in selection.selected})} 个分组；"
+        f"市值资料可用 {len(profiles)}/{len(members)}，合格 {eligible_profiles}"
+    )
+    return filtered, ranked, quality

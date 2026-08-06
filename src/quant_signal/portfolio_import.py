@@ -15,7 +15,7 @@ import tempfile
 from typing import Any
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from quant_signal.index_universe import to_canonical_symbol
 
@@ -29,6 +29,19 @@ _HARD_CAPITAL_LIMIT = Decimal("6000")
 _HARD_FINANCING_RATIO = Decimal("0.20")
 
 
+def _nullish_to_none(value: object) -> object:
+    if isinstance(value, str) and value.strip().casefold() in {
+        "",
+        "null",
+        "none",
+        "n/a",
+        "na",
+        "-",
+    }:
+        return None
+    return value
+
+
 class ImportStatus(str, Enum):
     EXTRACTED = "EXTRACTED"
     VALIDATED = "VALIDATED"
@@ -40,25 +53,43 @@ class ImportStatus(str, Enum):
 class ExtractedAccount(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    equity: Decimal
-    market_value: Decimal
-    cash: Decimal
-    buying_power: Decimal
-    frozen_cash: Decimal = Decimal("0")
-    processing_cash: Decimal = Decimal("0")
+    # 截图识别是观测边界：看不清的数值必须能表达为 null，再由校验层 fail closed。
+    # 否则 structured output 会为了满足 Decimal schema 生成字符串 "null"，导致整次
+    # 导入被误报成 JSON 格式错误。
+    equity: Decimal | None = None
+    market_value: Decimal | None = None
+    cash: Decimal | None = None
+    buying_power: Decimal | None = None
+    frozen_cash: Decimal | None = None
+    processing_cash: Decimal | None = None
     total_unrealized_pnl: Decimal | None = None
     day_pnl: Decimal | None = None
-    currency: str = "USD"
+    currency: str | None = "USD"
     reported_position_count: int = Field(ge=0)
     observed_at: datetime | None = None
 
+    @field_validator(
+        "equity",
+        "market_value",
+        "cash",
+        "buying_power",
+        "frozen_cash",
+        "processing_cash",
+        "total_unrealized_pnl",
+        "day_pnl",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_decimal(cls, value: object) -> object:
+        return _nullish_to_none(value)
+
     @field_validator("currency")
     @classmethod
-    def normalize_currency(cls, value: str) -> str:
-        value = value.strip().upper()
-        if not value:
-            raise ValueError("currency is required")
-        return value
+    def normalize_currency(cls, value: object) -> str | None:
+        normalized = _nullish_to_none(value)
+        if normalized is None:
+            return None
+        return str(normalized).strip().upper() or None
 
 
 class ExtractedPosition(BaseModel):
@@ -74,6 +105,21 @@ class ExtractedPosition(BaseModel):
     pnl_pct: Decimal | None = None
     weight_pct: Decimal | None = None
     precision: str = "ESTIMATED"
+
+    @field_validator(
+        "qty",
+        "avg_entry_price",
+        "current_price",
+        "market_value",
+        "estimated_market_value",
+        "pnl",
+        "pnl_pct",
+        "weight_pct",
+        mode="before",
+    )
+    @classmethod
+    def normalize_optional_decimal(cls, value: object) -> object:
+        return _nullish_to_none(value)
 
     @field_validator("symbol")
     @classmethod
@@ -111,16 +157,15 @@ class ValidatedPortfolioImport(BaseModel):
 
 
 def _non_negative_account(account: ExtractedAccount) -> bool:
-    return all(
-        value >= 0
-        for value in (
-            account.equity,
-            account.market_value,
-            account.cash,
-            account.buying_power,
-            account.frozen_cash,
-            account.processing_cash,
-        )
+    required = (
+        account.equity,
+        account.market_value,
+        account.cash,
+        account.buying_power,
+    )
+    optional = (account.frozen_cash, account.processing_cash)
+    return all(value is not None and value >= 0 for value in required) and all(
+        value is None or value >= 0 for value in optional
     )
 
 
@@ -143,11 +188,35 @@ def validate_extraction(
     if len(symbols) != len(set(symbols)):
         errors.append("DUPLICATE_SYMBOL")
 
-    account_valid = _non_negative_account(account) and account.equity > 0
-    if not account_valid:
+    required_account_values = (
+        account.equity,
+        account.market_value,
+        account.cash,
+        account.buying_power,
+    )
+    account_summary_present = all(
+        value is not None for value in required_account_values
+    )
+    if not account_summary_present:
+        account_valid = False
+        errors.append("MISSING_ACCOUNT_SUMMARY")
+    else:
+        assert account.equity is not None
+        account_valid = _non_negative_account(account) and account.equity > 0
+    if account_summary_present and not account_valid:
         errors.append("INVALID_ACCOUNT_VALUES")
-    if require_account_reconciliation:
-        reconciled = account.cash + account.market_value + account.processing_cash
+    if account.currency is None:
+        account_valid = False
+        errors.append("MISSING_ACCOUNT_CURRENCY")
+    if require_account_reconciliation and account_valid:
+        assert account.equity is not None
+        assert account.cash is not None
+        assert account.market_value is not None
+        reconciled = (
+            account.cash
+            + account.market_value
+            + (account.processing_cash or Decimal("0"))
+        )
         if abs(account.equity - reconciled) > _ACCOUNT_TOLERANCE:
             account_valid = False
             errors.append("ACCOUNT_RECONCILIATION_FAILED")
@@ -164,7 +233,12 @@ def validate_extraction(
         )
         details_complete = details_complete and exact
         estimate = row.estimated_market_value
-        if row.market_value is None and estimate is None and row.weight_pct is not None:
+        if (
+            row.market_value is None
+            and estimate is None
+            and row.weight_pct is not None
+            and account.equity is not None
+        ):
             estimate = (account.equity * row.weight_pct / Decimal("100")).quantize(_CENT)
         positions.append(
             row.model_copy(
@@ -179,7 +253,12 @@ def validate_extraction(
 
     if require_account_reconciliation and extraction.positions:
         weights = [row.weight_pct for row in extraction.positions]
-        if all(weight is not None for weight in weights) and account.equity > 0:
+        if (
+            all(weight is not None for weight in weights)
+            and account.equity is not None
+            and account.market_value is not None
+            and account.equity > 0
+        ):
             expected = account.market_value / account.equity * Decimal("100")
             actual = sum((weight or Decimal("0")) for weight in weights)
             if abs(expected - actual) > _WEIGHT_TOLERANCE_PCT:
@@ -296,7 +375,9 @@ class CodexPortfolioExtractor:
         prompt = (
             "只读取所附券商持仓截图并输出符合 schema 的 JSON。"
             "禁止读取文件、运行命令或联网；禁止推测截图未展示的标的、数量、成本、现价或日期。"
-            "缺失字段必须为 null；reported_position_count 使用页面显示的持仓数量。"
+            "缺失字段必须使用 JSON null（不能输出字符串‘null’）；"
+            "reported_position_count 使用页面显示的持仓数量。"
+            "currency 未显示但持仓全部是美股或美股 ETF 时填 USD，否则填 null。"
             "weight_pct 和 pnl_pct 使用百分数数值，例如 14.80 而不是 0.148。"
         )
         with tempfile.TemporaryDirectory(prefix="quant-signal-portfolio-") as temp:
@@ -339,10 +420,25 @@ class CodexPortfolioExtractor:
                     f"portfolio screenshot extraction failed: {detail or error.returncode}"
                 ) from error
             try:
-                payload: Any = json.loads(output_path.read_text(encoding="utf-8"))
+                payload: Any = json.loads(output_path.read_text(encoding="utf-8-sig"))
+            except OSError as error:
+                raise RuntimeError(
+                    "portfolio screenshot extraction output was not created"
+                ) from error
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    "portfolio screenshot extraction returned malformed JSON"
+                ) from error
+            try:
                 return PortfolioExtraction.model_validate(payload)
-            except (OSError, json.JSONDecodeError, ValueError) as error:
-                raise RuntimeError("portfolio screenshot extraction returned invalid JSON") from error
+            except ValidationError as error:
+                fields = ", ".join(
+                    ".".join(str(part) for part in item["loc"])
+                    for item in error.errors()[:8]
+                )
+                raise RuntimeError(
+                    f"portfolio screenshot extraction failed schema validation: {fields}"
+                ) from error
 
 
 def _uploaded_at(images: Sequence[Path]) -> datetime:

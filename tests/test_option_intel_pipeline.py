@@ -1,7 +1,7 @@
 """管道+卡片：持仓期权情报（覆盖集合、降级、落库、发送、📌交叉标记）。"""
 
 from dataclasses import replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,7 +19,13 @@ from quant_signal.options_intel import (
     OptionChainFetchResult,
     OptionIntel,
 )
-from quant_signal.pipelines.option_intel import holdings_universe, run
+from quant_signal.position_tactical import (
+    OpexContext,
+    OptionStructure,
+    PositionTacticalAnalysis,
+    WeeklyTechnical,
+)
+from quant_signal.pipelines.option_intel import build_intel, holdings_universe, run
 
 NOW = datetime(2026, 7, 10, 20, 40, tzinfo=UTC)  # 16:40 ET
 SESSION = date(2026, 7, 10)
@@ -157,6 +163,42 @@ def test_run_sends_card_and_persists(tmp_path: Path) -> None:
     assert engine.ledger.option_intel_history("MU")
 
 
+def test_build_intel_reuses_one_chain_and_loads_long_weekly_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    engine, _, source = make_engine(tmp_path)
+    starts: list[datetime | None] = []
+
+    def read_daily_bars(
+        tickers: list[str],
+        start: datetime | None = None,
+        end: datetime | None = None,
+        *,
+        bar_state: str | None = "final",
+    ) -> pd.DataFrame:
+        del tickers, end, bar_state
+        starts.append(start)
+        index = pd.MultiIndex.from_arrays(
+            [[], []], names=["ticker", "ts"]
+        )
+        return pd.DataFrame(
+            columns=["open", "high", "low", "close", "volume"],
+            index=index,
+        )
+
+    monkeypatch.setattr(engine.store, "read_daily_bars", read_daily_bars)
+
+    intel = build_intel(engine, "MU", NOW)
+
+    assert intel is not None
+    assert intel.tactical is not None
+    assert intel.tactical.technical.state == "DATA_INSUFFICIENT"
+    assert source.requested == ["MU"]
+    assert starts and starts[0] is not None
+    assert starts[0] <= NOW - timedelta(days=420)
+
+
 def test_run_skips_send_when_no_symbol_has_data(tmp_path: Path) -> None:
     engine, notifier, _ = make_engine(
         tmp_path, chain_source=ChainSource(), spot_prices={"MU": 100.0}
@@ -226,6 +268,46 @@ def intel(symbol: str = "MU", **overrides: object) -> OptionIntel:
     return replace(base, **overrides)  # type: ignore[arg-type]
 
 
+def tactical(symbol: str = "MU") -> PositionTacticalAnalysis:
+    return PositionTacticalAnalysis(
+        symbol=symbol,
+        spot=Decimal("100"),
+        technical=WeeklyTechnical(
+            state="OVERSOLD_AT_LOWER_BAND",
+            weekly_rsi=28.4,
+            bollinger_lower=92.0,
+            bollinger_mid=110.0,
+            bollinger_upper=128.0,
+            middle_slope_4w=-0.01,
+            weekly_atr=4.0,
+            reversal_confirmed=True,
+            latest_week_partial=False,
+            recent_four_week_low=94.0,
+            history_weeks=30,
+        ),
+        options=OptionStructure(
+            expiry=date(2026, 7, 17),
+            put_wall=Decimal("95"),
+            call_wall=Decimal("105"),
+            max_pain=Decimal("100"),
+            put_buffer_pct=0.05,
+            call_upside_pct=0.05,
+            gamma_pin_score=0.40,
+            dealer_gamma_state="UNKNOWN",
+            reliability="HIGH",
+            oi_coverage=0.90,
+            quote_coverage=0.80,
+            truncated=False,
+        ),
+        opex=OpexContext(date(2026, 7, 17), 0, "OPEX_DAY"),
+        conclusion="TACTICAL_REBOUND",
+        invalidation_price=Decimal("93"),
+        target_1=Decimal("105"),
+        target_2=Decimal("110"),
+        holding_note="月度OPEX当日不追单，避免依据旧墙位隔夜加仓。",
+    )
+
+
 class TestOptionIntelCard:
     def test_renders_fields(self) -> None:
         card = option_intel_card([intel()], session=SESSION)
@@ -257,6 +339,23 @@ class TestOptionIntelCard:
             [intel("DRAM", data_note="无可用期权数据")], session=SESSION
         )
         assert "无可用期权数据" in card.body_md
+
+    def test_renders_weekly_walls_gamma_opex_and_risk_references(self) -> None:
+        card = option_intel_card(
+            [intel(tactical=tactical())],
+            session=SESSION,
+        )
+
+        assert "周线 RSI" in card.body_md
+        assert "布林下轨" in card.body_md
+        assert "Put墙" in card.body_md
+        assert "Call墙" in card.body_md
+        assert "Max Pain" in card.body_md
+        assert "Gamma集中度" in card.body_md
+        assert "做市商净Gamma方向不可由公开OI判定" in card.body_md
+        assert "月度OPEX" in card.body_md
+        assert "战术反弹" in card.body_md
+        assert "失效参考" in card.body_md
 
 
 def test_option_flow_card_marks_held_underlyings(tmp_path: Path) -> None:

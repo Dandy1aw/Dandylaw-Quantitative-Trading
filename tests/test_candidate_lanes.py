@@ -5,6 +5,8 @@ import pandas as pd
 
 from quant_signal.candidate_lanes import (
     CandidateLane,
+    _buying_pressure,
+    _candidate,
     discover_candidates,
 )
 from quant_signal.config import CandidateLaneSettings
@@ -167,3 +169,88 @@ def test_earnings_veto_keeps_reason_without_trade_levels() -> None:
 
     assert result.candidates == ()
     assert result.observations[0].reason == "EARNINGS_WINDOW"
+
+
+def test_candidate_uses_three_fixed_five_percent_profit_targets() -> None:
+    paths = _trend_paths(1)
+
+    result = discover_candidates(
+        _bars(paths), set(paths), Regime.TREND, as_of=DAY, settings=CFG
+    )
+
+    row = result.candidates[0]
+    assert row.profit_targets == (
+        round(row.entry_high * 1.05, 4),
+        round(row.entry_high * 1.10, 4),
+        round(row.entry_high * 1.15, 4),
+    )
+    assert row.target_price == row.profit_targets[row.recommended_target_stage - 1]
+
+
+def test_sustained_rise_with_strong_buying_pressure_recommends_third_target() -> None:
+    paths = _trend_paths(1)
+
+    result = discover_candidates(
+        _bars(paths), set(paths), Regime.TREND, as_of=DAY, settings=CFG
+    )
+
+    row = result.candidates[0]
+    assert row.recent_buying_notional > 0
+    assert row.buying_pressure_score >= 0.65
+    assert row.buying_pressure_label == "强"
+    assert row.recommended_target_stage == 3
+    assert row.target_price == row.profit_targets[2]
+
+
+def test_mixed_recent_buying_pressure_recommends_second_target() -> None:
+    close = np.asarray([100.0] * 15 + [101.0, 100.0, 101.0, 100.0, 101.0])
+    frame = pd.DataFrame(
+        {
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(len(close), 1_000_000),
+        }
+    )
+
+    buying_notional, score, label, stage = _buying_pressure(frame)
+
+    assert buying_notional > 0
+    assert 0.40 <= score < 0.65
+    assert label == "中等"
+    assert stage == 2
+
+
+def test_nearby_resistance_caps_strong_buying_pressure_target_stage() -> None:
+    close = np.concatenate(
+        (
+            np.linspace(80.0, 115.0, 141),
+            np.linspace(110.0, 100.0, 74),
+            np.asarray([101.0, 102.0, 103.0, 104.0, 105.0]),
+        )
+    )
+    frame = pd.DataFrame(
+        {
+            "open": close - 0.5,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": np.full(len(close), 1_000_000),
+        }
+    )
+
+    row = _candidate(
+        "RESIST",
+        frame,
+        CandidateLane.TREND_PULLBACK,
+        1.0,
+        ("TEST",),
+        CFG,
+    )
+
+    assert row is not None
+    assert row.buying_pressure_label == "强"
+    assert row.nearby_resistance is not None
+    assert row.profit_targets[0] < row.nearby_resistance < row.profit_targets[1]
+    assert row.recommended_target_stage == 1
+    assert row.target_price == row.profit_targets[0]

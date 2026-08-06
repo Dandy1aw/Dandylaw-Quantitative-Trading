@@ -5,6 +5,8 @@ from decimal import Decimal
 from quant_signal.notifier.base import CardKind
 from quant_signal.notifier.cards import option_flow_card
 from quant_signal.options_flow import (
+    HoldingOptionFlow,
+    HoldingOptionFlowSnapshot,
     OptionContractVolume,
     OptionEnrichment,
     OptionFlowChange,
@@ -54,18 +56,41 @@ def snapshot() -> OptionFlowSnapshot:
     )
 
 
-def test_option_flow_card_has_two_top10_sections_without_tables() -> None:
-    current = snapshot()
-    card = option_flow_card(current, (), "baseline")
+def test_option_flow_card_has_one_underlying_section_with_full_side_names() -> None:
+    original = snapshot()
+    spy_call = replace(
+        original.rows[0],
+        underlying="SPY",
+        contract_symbol="SPY260717C00750000",
+        strike=Decimal("750"),
+    )
+    spy_put = replace(
+        original.rows[10],
+        underlying="SPY",
+        contract_symbol="SPY260717P00740000",
+        strike=Decimal("740"),
+    )
+    current = replace(
+        original,
+        rows=(spy_call, *original.rows[1:10], spy_put, *original.rows[11:]),
+    )
+    card = option_flow_card(
+        current, (), "baseline", etf_underlyings=frozenset({"SPY"})
+    )
 
     assert card.kind is CardKind.REPORT
     assert "Cboe四市场" in card.title
-    assert len(card.sections) == 5
-    assert "CALL Top10" in card.body_md and "PUT Top10" in card.body_md
+    assert len(card.sections) == 4
+    assert "标的热度 Top10" in card.body_md
+    assert "CALL Top10" not in card.body_md and "PUT Top10" not in card.body_md
+    assert "#1 SPY · ETF" in card.body_md
+    assert "Call 19,500 / Put 19,500 · 总量 39,000" in card.body_md
+    assert "可见量 Call/Put 比 1.00 · Call/Put 相对均衡 0%" in card.body_md
+    assert "首次可见，无 15 分钟可比增量" in card.body_md
     assert "|---" not in card.body_md
     assert "INDICATIVE" in card.body_md and "约15分钟" in card.body_md
     assert "Call成交不等于看涨" in card.body_md
-    assert "可见榜单量下限近似" in card.body_md
+    assert "不是全 OPRA 总量" in card.body_md
     assert len(card.body_md) <= 3_500
 
 
@@ -93,7 +118,7 @@ def test_change_card_renders_rank_delta_turnover_and_premium() -> None:
     assert "+11,000/15m" in card.body_md
     assert "V/OI" in card.body_md
     assert "估算权利金" in card.body_md
-    assert "+1,000/15m" in card.body_md
+    assert "15 分钟增量 Call +1,000 / Put +1,000" in card.body_md
 
 
 def test_first_seen_contract_renders_indeterminate_delta() -> None:
@@ -132,7 +157,7 @@ def test_card_distinguishes_unconfigured_enrichment_from_failure() -> None:
     assert "失败" not in card.body_md
 
 
-def test_rank_section_dedupes_underlying_and_puts_near_expiry_first() -> None:
+def test_underlying_section_sums_multiple_contracts_once() -> None:
     current = snapshot()
     spy_near = replace(
         current.rows[0],
@@ -151,48 +176,51 @@ def test_rank_section_dedupes_underlying_and_puts_near_expiry_first() -> None:
         volume=39_000,
         rank=2,
     )
-    card = option_flow_card(
-        replace(current, rows=(spy_near, spy_far) + current.rows[2:]), (), "baseline"
-    )
-    body = card.body_md
-
-    assert body.count("SPY") == 1              # 同标的只显示最高量那张
-    assert "(+1)" in body                      # 折叠标注：原始榜还有1张 SPY
-    assert "#1 SPY 07/13 750C" in body         # 行首为原始每侧排名
-    assert "755C" not in body
-    assert body.index("#1 SPY") < body.index("#3 MSFT")  # 近月排最前
-
-
-def test_rank_section_switches_revert_to_raw_order() -> None:
-    current = snapshot()
-    spy_near = replace(
-        current.rows[0],
+    spy_put = replace(
+        current.rows[10],
         underlying="SPY",
-        contract_symbol="SPY260713C00750000",
-        strike=Decimal("750"),
-        expiration=date(2026, 7, 13),
-        volume=40_000,
+        contract_symbol="SPY260717P00740000",
+        strike=Decimal("740"),
+        volume=20_000,
         rank=1,
     )
-    spy_far = replace(
-        current.rows[1],
-        underlying="SPY",
-        contract_symbol="SPY260717C00755000",
-        strike=Decimal("755"),
-        volume=39_000,
-        rank=2,
-    )
+    rows = (spy_near, spy_far, *current.rows[2:10], spy_put, *current.rows[11:])
     card = option_flow_card(
-        replace(current, rows=(spy_near, spy_far) + current.rows[2:]),
+        replace(current, rows=rows),
         (),
         "baseline",
-        display_dedupe=False,
-        display_sort_by_expiry=False,
+        etf_underlyings=frozenset({"SPY"}),
     )
     body = card.body_md
-    assert "750C" in body and "755C" in body   # 不去重
-    assert "(+" not in body
-    assert body.index("#1 SPY") < body.index("#2 SPY")  # 按原始排名顺序
+
+    assert body.count("SPY") == 1
+    assert "#1 SPY · ETF" in body
+    assert "Call 79,000 / Put 20,000 · 总量 99,000" in body
+    assert "可见量 Call/Put 比 3.95 · Call 显著占优 60%" in body
+
+
+def test_underlying_section_marks_partial_comparable_delta() -> None:
+    current = snapshot()
+    existing = current.rows[0]
+    new_call = replace(
+        current.rows[1],
+        underlying=existing.underlying,
+        contract_symbol="AAPL260717C00310000",
+        strike=Decimal("310"),
+        volume=40_000,
+    )
+    prior = replace(current, rows=(replace(existing, volume=10_000), *current.rows[2:]))
+    present = replace(
+        current,
+        rows=(replace(existing, volume=19_500), new_call, *current.rows[2:]),
+    )
+    card = option_flow_card(
+        present,
+        (),
+        "change",
+        previous=prior,
+    )
+    assert "15 分钟已知增量 Call +9,500（部分可比）" in card.body_md
 
 
 def test_strike_display_strips_trailing_zeros() -> None:
@@ -203,10 +231,37 @@ def test_strike_display_strips_trailing_zeros() -> None:
         strike=Decimal("61.020"),
         contract_symbol="NVDA260717C00061020",
     )
+    changes = (
+        OptionFlowChange(padded, None, None, 0, ("NEW_TOP10",), 55),
+        OptionFlowChange(fractional, None, None, 0, ("NEW_TOP10",), 55),
+    )
     card = option_flow_card(
         replace(current, rows=(padded, fractional) + current.rows[2:]),
-        (),
-        "baseline",
+        changes,
+        "change",
     )
-    assert "201C" in card.body_md and "201.000" not in card.body_md
-    assert "61.02C" in card.body_md and "61.020" not in card.body_md
+    assert "201 Call" in card.body_md and "201.000" not in card.body_md
+    assert "61.02 Call" in card.body_md and "61.020" not in card.body_md
+
+
+def test_card_lists_all_observed_holdings_before_market_top10() -> None:
+    holdings = HoldingOptionFlowSnapshot(
+        slot=scan_slot(NOW),
+        captured_at=NOW,
+        provider="alpaca-option-snapshots",
+        rows=(
+            HoldingOptionFlow("NVDA", 82_140, 61_900, 8_240, 3_110, "ok"),
+            HoldingOptionFlow("SKHY", 0, 0, None, None, "no_chain"),
+            HoldingOptionFlow("MRVL", 0, 0, None, None, "unavailable"),
+        ),
+    )
+
+    card = option_flow_card(snapshot(), (), "baseline", holding_snapshot=holdings)
+
+    assert "📌 我的持仓期权" in card.body_md
+    assert card.body_md.index("📌 我的持仓期权") < card.body_md.index("标的热度 Top10")
+    assert "Call 82,140 / Put 61,900 · 总量 144,040" in card.body_md
+    assert "Call/Put 1.33 · Call占优 14%" in card.body_md
+    assert "15分钟增量 Call +8,240 / Put +3,110" in card.body_md
+    assert "SKHY · 无可用期权链" in card.body_md
+    assert "MRVL · 期权数据暂不可用" in card.body_md

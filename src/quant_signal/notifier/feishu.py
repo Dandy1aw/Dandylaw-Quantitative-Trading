@@ -116,7 +116,11 @@ def get_notifier(settings: Settings) -> Notifier:
         from quant_signal.feishu_bot import LarkTransport
 
         return FeishuAppNotifier(
-            LarkTransport(settings.feishu_app_id, settings.feishu_app_secret),
+            LarkTransport(
+                settings.feishu_app_id,
+                settings.feishu_app_secret,
+                settings.feishu_proxy,
+            ),
             bot.push_receive_id,
         )
     if settings.feishu_webhook:

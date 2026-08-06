@@ -418,6 +418,231 @@ def test_us_briefing_card_is_compact_and_action_oriented() -> None:
     assert len(card.sections) <= 7
 
 
+def test_us_briefing_card_groups_large_caps_by_sector_with_company_rationale() -> None:
+    candidates = [
+        {
+            "ticker": "MSFT",
+            "company_name": "Microsoft",
+            "gics_sector": "Information Technology",
+            "candidate_group": "Technology",
+            "industry": "Software - Infrastructure",
+            "market_cap_usd": 3_500_000_000_000,
+            "sector_strategy_rank": 1,
+            "sector_market_cap_rank": 1,
+            "profile_as_of": "2026-07-14",
+            "lane": "TREND_CONTINUATION",
+            "entry_low": 500.0,
+            "entry_high": 505.0,
+            "invalidation_price": 480.0,
+            "target_price": 550.0,
+            "suggested_qty": 1,
+            "suggested_notional": 500.0,
+        },
+        {
+            "ticker": "NVDA",
+            "company_name": "NVIDIA",
+            "gics_sector": "Information Technology",
+            "candidate_group": "Semiconductors",
+            "industry": "Semiconductors",
+            "market_cap_usd": 2_300_000_000_000,
+            "sector_strategy_rank": 1,
+            "sector_market_cap_rank": 1,
+            "profile_as_of": "2026-07-14",
+            "lane": "TREND_PULLBACK",
+            "entry_low": 220.0,
+            "entry_high": 225.0,
+            "invalidation_price": 210.0,
+            "target_price": 250.0,
+            "suggested_qty": 2,
+            "suggested_notional": 440.0,
+        },
+    ]
+    rationale = (
+        "上涨逻辑：云业务需求支持增长。\n"
+        "行业地位：行业策略第1，合格同行市值第1。\n"
+        "壁垒：客户迁移成本较高。\n"
+        "反证：云增速下降会令逻辑失效。"
+    )
+    card = us_briefing_card(
+        report_kind="DAILY_ACTION",
+        as_of="2026-07-14",
+        regime={"regime": "TREND", "reasons": ["TREND_AND_BREADTH_HEALTHY"]},
+        candidates=candidates,
+        discipline=[],
+        portfolio_risk={},
+        observations=[],
+        data_quality=["纳指100覆盖率 99%"],
+        company_rationales={"MSFT": rationale},
+    )
+
+    assert "行业分组候选 · 市值门槛 ≥ 1000亿美元" in card.body_md
+    assert "**科技**" in card.body_md
+    assert "**半导体**" in card.body_md
+    assert card.body_md.count("**Information Technology**") == 0
+    assert "策略 #1 · 合格同行市值 #1 · 市值 3.50万亿美元" in card.body_md
+    assert "画像 2026-07-14 · 新闻窗口近7日" in card.body_md
+    assert "上涨逻辑：云业务需求支持增长" in card.body_md
+
+
+def test_us_briefing_card_uses_chinese_labels_and_three_stage_targets() -> None:
+    candidates = [
+        {
+            "ticker": "MSFT",
+            "company_name": "Microsoft",
+            "candidate_group": "Technology",
+            "industry": "Computer Hardware",
+            "market_cap_usd": 3_500_000_000_000,
+            "lane": "TREND_CONTINUATION",
+            "entry_low": 500.0,
+            "entry_high": 505.0,
+            "invalidation_price": 480.0,
+            "target_price": 555.5,
+            "profit_targets": [530.25, 555.5, 580.75],
+            "recommended_target_stage": 2,
+            "recent_buying_notional": 2_260_000_000,
+            "buying_pressure_score": 0.58,
+            "buying_pressure_label": "中等",
+            "nearby_resistance": 570.0,
+            "suggested_qty": 1,
+            "suggested_notional": 505.0,
+        },
+        {
+            "ticker": "SNDK",
+            "company_name": "Sandisk Corporation",
+            "candidate_group": "Semiconductors",
+            "industry": "Semiconductors",
+            "market_cap_usd": 236_000_000_000,
+            "lane": "TREND_PULLBACK",
+            "entry_low": 1600.0,
+            "entry_high": 1621.0,
+            "invalidation_price": 1199.0,
+            "target_price": 1702.05,
+            "profit_targets": [1702.05, 1783.1, 1864.15],
+            "recommended_target_stage": 1,
+            "recent_buying_notional": 800_000_000,
+            "buying_pressure_score": 0.30,
+            "buying_pressure_label": "偏弱",
+            "suggested_qty": None,
+            "suggested_notional": None,
+            "block_reason": "STOP_TOO_WIDE",
+        },
+    ]
+
+    card = us_briefing_card(
+        report_kind="DAILY_ACTION",
+        as_of="2026-07-22",
+        regime={"regime": "TREND", "reasons": []},
+        candidates=candidates,
+        discipline=[],
+        portfolio_risk={},
+        observations=[],
+        data_quality=[],
+    )
+
+    assert "**科技**" in card.body_md
+    assert "**半导体**" in card.body_md
+    assert "计算机硬件" in card.body_md
+    assert "止盈1 530.25 · 止盈2 555.50 · 止盈3 580.75" in card.body_md
+    assert "建议第2档" in card.body_md
+    assert "近5日买盘资金估算 22.60亿美元 · 强度中等 58%" in card.body_md
+    blocked_line = next(line for line in card.body_md.splitlines() if "SNDK ·" in line)
+    assert "仅观察：止损距离过大" in blocked_line
+    assert "买入" not in blocked_line
+    assert "STOP_TOO_WIDE" not in card.body_md
+
+
+def test_us_briefing_card_translates_live_block_reasons_and_industries() -> None:
+    card = us_briefing_card(
+        report_kind="DAILY_ACTION",
+        as_of="2026-07-22",
+        regime={"regime": "PULLBACK", "reasons": []},
+        candidates=[
+            {
+                "ticker": "CSCO",
+                "company_name": "Cisco Systems, Inc.",
+                "candidate_group": "Technology",
+                "industry": "Communication Equipment",
+                "lane": "TREND_PULLBACK",
+                "block_reason": "ZERO_QTY",
+            },
+            {
+                "ticker": "APP",
+                "company_name": "Applovin Corporation",
+                "candidate_group": "Communication Services",
+                "industry": "Advertising Agencies",
+                "lane": "RANGE_REVERSION",
+                "block_reason": "MAX_NEW_POSITIONS",
+            },
+        ],
+        discipline=[],
+        portfolio_risk={},
+        observations=[],
+        data_quality=[],
+    )
+
+    assert "通信设备" in card.body_md
+    assert "广告代理" in card.body_md
+    assert "仅观察：可用资金不足，建议股数为0" in card.body_md
+    assert "仅观察：当日新开仓数量已达上限" in card.body_md
+    assert "ZERO_QTY" not in card.body_md
+    assert "MAX_NEW_POSITIONS" not in card.body_md
+
+
+def test_us_briefing_cards_split_action_summary_from_sector_candidates() -> None:
+    from quant_signal.notifier import cards as cards_module
+
+    candidates = [
+        {
+            "ticker": "MSFT",
+            "candidate_group": "Technology",
+            "lane": "TREND_CONTINUATION",
+            "entry_low": 500.0,
+            "entry_high": 505.0,
+            "invalidation_price": 480.0,
+            "target_price": 530.25,
+            "suggested_qty": 1,
+            "suggested_notional": 505.0,
+        },
+        {
+            "ticker": "NVDA",
+            "candidate_group": "Semiconductors",
+            "lane": "TREND_PULLBACK",
+            "entry_low": 200.0,
+            "entry_high": 205.0,
+            "invalidation_price": 190.0,
+            "target_price": 215.25,
+            "suggested_qty": 2,
+            "suggested_notional": 410.0,
+        },
+    ]
+    rationales = {
+        "MSFT": "上涨逻辑：云业务需求支持增长。",
+        "NVDA": "上涨逻辑：加速计算需求支持增长。",
+    }
+
+    cards = cards_module.us_briefing_cards(
+        report_kind="DAILY_ACTION",
+        as_of="2026-07-22",
+        regime={"regime": "TREND", "reasons": []},
+        candidates=candidates,
+        discipline=[],
+        portfolio_risk={},
+        observations=[],
+        data_quality=[],
+        company_rationales=rationales,
+    )
+
+    assert len(cards) == 3
+    assert "今日美股行动简报" in cards[0].title
+    assert "MSFT" not in cards[0].body_md
+    assert "NVDA" not in cards[0].body_md
+    assert "上涨逻辑" not in cards[0].body_md
+    tech = next(card for card in cards[1:] if "科技" in card.title)
+    chips = next(card for card in cards[1:] if "半导体" in card.title)
+    assert "MSFT" in tech.body_md and "NVDA" not in tech.body_md
+    assert "NVDA" in chips.body_md and "MSFT" not in chips.body_md
+
+
 def test_us_briefing_card_summarizes_large_observation_pool() -> None:
     observations = [
         {"ticker": f"HOT{index:02d}", "reason": "OVERHEATED", "history_days": 220}

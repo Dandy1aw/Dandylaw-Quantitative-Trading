@@ -261,6 +261,7 @@ class TestDegradation:
             "DRAM", [], spot=Decimal("20"), session=SESSION,
             closes=[], earnings_date=None, policy=POLICY,
         )
+        assert intel.tactical is None
         assert intel.data_note == "无可用期权数据"
         assert intel.expected_move_pct is None
         assert intel.atm_iv is None

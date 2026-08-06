@@ -6,16 +6,22 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import structlog
 
 from quant_signal.notifier.cards import option_intel_card
 from quant_signal.options_intel import OptionIntel, OptionIntelPolicy, compute_intel
+from quant_signal.position_tactical import (
+    PositionTacticalPolicy,
+    analyze_position_tactical,
+)
 
 if TYPE_CHECKING:
     from quant_signal.engine import Engine
@@ -47,22 +53,29 @@ def holdings_universe(engine: "Engine") -> list[str]:
 
 def _spot_and_closes(
     engine: "Engine", symbol: str, now: datetime
-) -> tuple[Decimal | None, list[float]]:
+) -> tuple[Decimal | None, list[float], pd.DataFrame]:
     closes: list[float] = []
+    daily = pd.DataFrame(
+        columns=["open", "high", "low", "close", "volume"]
+    )
     try:
         bars = engine.store.read_daily_bars(
-            [symbol], start=now - timedelta(days=90)
+            [symbol], start=now - timedelta(days=420)
         )
-        series = bars.xs(symbol, level="ticker")["close"].dropna()
+        daily = cast(
+            pd.DataFrame,
+            bars.xs(symbol, level="ticker").sort_index().copy(),
+        )
+        series = daily["close"].dropna()
         closes = [float(value) for value in series.sort_index()]
     except Exception:  # noqa: BLE001 - 行情缺失只是降级,不中断
         closes = []
     live = engine._fetch_live_price(symbol)
     if live is not None and live > 0:
-        return Decimal(str(round(live, 4))), closes
+        return Decimal(str(round(live, 4))), closes, daily
     if closes and closes[-1] > 0:
-        return Decimal(str(round(closes[-1], 4))), closes
-    return None, closes
+        return Decimal(str(round(closes[-1], 4))), closes, daily
+    return None, closes, daily
 
 
 def build_intel(
@@ -73,7 +86,7 @@ def build_intel(
         return None
     cfg = engine.settings.option_intel
     session = now.astimezone(_ET).date()
-    spot, closes = _spot_and_closes(engine, symbol, now)
+    spot, closes, daily = _spot_and_closes(engine, symbol, now)
     if spot is None:
         log.warning("option_intel.no_spot", symbol=symbol)
         return None
@@ -101,9 +114,27 @@ def build_intel(
             top_oi_strikes=cfg.top_oi_strikes,
         ),
     )
+    intel = replace(
+        intel,
+        tactical=analyze_position_tactical(
+            symbol,
+            daily,
+            result.contracts,
+            spot=spot,
+            session=session,
+            chain_truncated=result.truncated,
+            policy=PositionTacticalPolicy(
+                wall_high_min_oi_each_side=cfg.wall_high_min_oi_each_side,
+                wall_medium_min_oi_each_side=cfg.wall_medium_min_oi_each_side,
+                wall_high_min_oi_coverage=cfg.wall_high_min_oi_coverage,
+                wall_medium_min_oi_coverage=cfg.wall_medium_min_oi_coverage,
+                wall_high_min_quote_coverage=cfg.wall_high_min_quote_coverage,
+                wall_high_min_concentration=cfg.wall_high_min_concentration,
+                gamma_near_spot_pct=cfg.gamma_near_spot_pct,
+            ),
+        ),
+    )
     if result.truncated and intel.data_note is None:
-        from dataclasses import replace
-
         intel = replace(intel, data_note="期权链数据不完整(分页超限)")
     return intel
 

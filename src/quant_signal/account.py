@@ -84,6 +84,7 @@ class BrokerOrder:
     submitted_at: datetime | None
     filled_qty: Decimal
     filled_avg_price: Decimal | None
+    filled_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def _parse_order(row: Mapping[str, object]) -> BrokerOrder:
         filled_avg_price=_optional_decimal(
             row.get("filled_avg_price"), "order.filled_avg_price"
         ),
+        filled_at=_optional_datetime(row.get("filled_at")),
     )
 
 

@@ -1,0 +1,26 @@
+{
+  "pipeline_result": true,
+  "dry_run_status": "DELIVERED",
+  "candidate_count": 10,
+  "groups": {
+    "Technology": 3,
+    "Semiconductors": 6,
+    "Communication Services": 1
+  },
+  "candidate_tickers": [
+    "SNDK",
+    "WDC",
+    "CSCO",
+    "MRVL",
+    "MU",
+    "ARM",
+    "AMAT",
+    "LRCX",
+    "KLAC",
+    "APP"
+  ],
+  "company_rationale_count": 8,
+  "notifier": "FeishuAppNotifier",
+  "feishu_sent": true,
+  "card_title": "?? ?? ? ??/????? ? 📌 今日美股行动简报 · 2026-07-21"
+}

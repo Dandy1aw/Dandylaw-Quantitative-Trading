@@ -38,6 +38,16 @@ def test_find_missing_sessions(tmp_path: Path) -> None:
     assert missing == [date(2026, 1, 9)]
 
 
+def test_find_missing_sessions_uses_final_coverage_only(tmp_path: Path) -> None:
+    store = BarStore(tmp_path / "b.duckdb")
+    bars = FakeSource().fetch_daily_bars(["SPY"], date(2026, 1, 1), date(2026, 2, 1))
+    store.write_daily_bars(bars.iloc[:1], source="alpaca", bar_state="live")
+
+    assert find_missing_sessions(store, "SPY", [date(2026, 1, 5)]) == [
+        date(2026, 1, 5)
+    ]
+
+
 class RecordingSource:
     def __init__(self, tag: str, calls: list[tuple[str, list[str]]]) -> None:
         self.tag = tag

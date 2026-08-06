@@ -4,10 +4,11 @@ import os
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
+from urllib.parse import urlsplit
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,6 +70,36 @@ class AIBriefingSettings(BaseModel):
     command: str = ""
     timeout_seconds: int = 90
     max_chars: int = 6000
+    output_max_chars: int = Field(default=180, ge=60, le=500)
+
+
+class DataQASettings(BaseModel):
+    """Independent cross-provider data-quality service-level objectives."""
+
+    min_coverage: float = Field(default=0.98, ge=0.8, le=1.0)
+    divergence_threshold: float = Field(default=0.005, gt=0, le=0.10)
+    batch_size: int = Field(default=50, ge=10, le=200)
+    lookback_days: int = Field(default=7, ge=3, le=30)
+
+
+class ForwardEvaluationSettings(BaseModel):
+    """Immutable post-publication candidate outcome measurements."""
+
+    horizons: tuple[int, ...] = (5, 10, 20, 21, 63)
+    benchmark: str = "QQQ"
+    transaction_cost_bps_per_side: float = Field(default=5.0, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def normalize_horizons_and_benchmark(self) -> Self:
+        horizons = tuple(sorted(set(self.horizons)))
+        if not horizons or any(value < 1 or value > 252 for value in horizons):
+            raise ValueError("forward evaluation horizons must be between 1 and 252")
+        benchmark = self.benchmark.strip().upper()
+        if not benchmark:
+            raise ValueError("forward evaluation benchmark must not be empty")
+        self.horizons = horizons
+        self.benchmark = benchmark
+        return self
 
 
 class IndexUniverseSettings(BaseModel):
@@ -116,6 +147,20 @@ class CandidateLaneSettings(BaseModel):
     target_reward_risk: float = Field(default=2.0, gt=1, le=10)
     earnings_blackout_days: int = Field(default=2, ge=0, le=14)
     max_candidates_per_cluster: int = Field(default=2, ge=1, le=10)
+    sector_quality_filter_enabled: bool = True
+    min_market_cap_usd: int = Field(default=100_000_000_000, ge=1)
+    top_n_per_sector: int = Field(default=3, ge=1, le=10)
+    max_sectors: int = Field(default=5, ge=1, le=11)
+    candidate_group_top_n_overrides: dict[str, int] = Field(
+        default_factory=lambda: {"Semiconductors": 10, "Technology": 10}
+    )
+    profile_max_age_days: int = Field(default=7, ge=1, le=30)
+    profile_failure_ttl_hours: int = Field(default=6, ge=1, le=24)
+    ai_company_max_chars: int = Field(default=220, ge=80, le=500)
+    ai_news_lookback_days: int = Field(default=7, ge=1, le=30)
+    ai_news_max_items: int = Field(default=5, ge=0, le=10)
+    ai_company_batch_size: int = Field(default=8, ge=1, le=10)
+    ai_company_total_timeout_seconds: int = Field(default=120, ge=15, le=600)
 
 
 class ProfitStageSettings(BaseModel):
@@ -259,10 +304,19 @@ class OptionFlowSettings(BaseModel):
     intraday_expiry_minutes: int = Field(default=45, ge=15, le=180)
     closing_expiry_hours: int = Field(default=12, ge=1, le=24)
     retention_days: int = Field(default=120, ge=30)
-    min_venue_coverage: float = Field(default=1.0, ge=1.0, le=1.0)
+    min_venue_coverage: float = Field(default=0.75, ge=0.5, le=1.0)
+    circuit_breaker_failures: int = Field(default=2, ge=1, le=10)
+    circuit_breaker_cooldown_minutes: int = Field(default=10, ge=1, le=60)
     # 展示层开关：只影响卡片显示，不改变排名/异动/落库口径
     display_dedupe_underlying: bool = True
     display_sort_by_expiry: bool = True
+    holding_monitor_enabled: bool = True
+    holding_max_expiry_days: int = Field(default=14, ge=1, le=60)
+    holding_max_tickers: int = Field(default=12, ge=1, le=50)
+    holding_min_delta_volume: int = Field(default=5_000, ge=0)
+    holding_dominance_threshold: float = Field(default=0.20, ge=0, le=1)
+    holding_cooldown_minutes: int = Field(default=60, ge=15, le=240)
+    holding_max_alerts_per_day: int = Field(default=4, ge=1, le=12)
 
     @model_validator(mode="after")
     def validate_option_flow_policy(self) -> Self:
@@ -298,6 +352,65 @@ class OptionIntelSettings(BaseModel):
     iv_rv_warn_ratio: float = Field(default=1.5, gt=1.0)
     retention_days: int = Field(default=400, ge=90)
     max_tickers: int = Field(default=12, ge=1, le=30)
+    wall_high_min_oi_each_side: int = Field(default=5_000, ge=1)
+    wall_medium_min_oi_each_side: int = Field(default=1_000, ge=1)
+    wall_high_min_oi_coverage: float = Field(default=0.80, ge=0, le=1)
+    wall_medium_min_oi_coverage: float = Field(default=0.50, ge=0, le=1)
+    wall_high_min_quote_coverage: float = Field(default=0.60, ge=0, le=1)
+    wall_high_min_concentration: float = Field(default=0.10, ge=0, le=1)
+    gamma_near_spot_pct: float = Field(default=0.02, gt=0, le=0.20)
+
+    @model_validator(mode="after")
+    def validate_tactical_thresholds(self) -> Self:
+        if self.wall_high_min_oi_each_side < self.wall_medium_min_oi_each_side:
+            raise ValueError("high wall OI threshold must be at least medium")
+        if self.wall_high_min_oi_coverage < self.wall_medium_min_oi_coverage:
+            raise ValueError("high wall OI coverage must be at least medium")
+        return self
+
+
+class PriceMoveCauseSearchSettings(BaseModel):
+    """Codex 联网搜索异动原因；失败时告警仍必须发出。"""
+
+    enabled: bool = False
+    command: str = "codex"
+    model: str = "gpt-5.6-terra"
+    reasoning_effort: Literal["low", "medium"] = "low"
+    timeout_seconds: int = Field(default=60, ge=5, le=120)
+    lookback_hours: int = Field(default=24, ge=1, le=168)
+    max_sources: int = Field(default=3, ge=1, le=5)
+    max_alerts_per_batch: int = Field(default=8, ge=1, le=10)
+    max_summary_chars: int = Field(default=220, ge=60, le=500)
+
+
+class HoldingPriceAlertSettings(BaseModel):
+    """真实持仓的分钟级股价异动监控。
+
+    固定涨跌幅是最低门槛；实际门槛会根据最近的分钟波动率自适应抬高，
+    避免高波动个股在正常噪声中频繁告警。
+    """
+
+    enabled: bool = False
+    lookback_minutes: int = Field(default=45, ge=20, le=240)
+    max_bar_age_seconds: int = Field(default=120, ge=30, le=600)
+    stock_1m_pct: float = Field(default=0.015, gt=0, le=0.20)
+    stock_5m_pct: float = Field(default=0.030, gt=0, le=0.30)
+    stock_15m_pct: float = Field(default=0.050, gt=0, le=0.50)
+    stock_session_pct: float = Field(default=0.080, gt=0, le=1.0)
+    etf_1m_pct: float = Field(default=0.010, gt=0, le=0.20)
+    etf_5m_pct: float = Field(default=0.020, gt=0, le=0.30)
+    etf_15m_pct: float = Field(default=0.035, gt=0, le=0.50)
+    etf_session_pct: float = Field(default=0.050, gt=0, le=1.0)
+    volatility_sigma_multiple_1m: float = Field(default=4.0, gt=0, le=20)
+    volatility_sigma_multiple_5m: float = Field(default=3.0, gt=0, le=20)
+    volatility_sigma_multiple_15m: float = Field(default=2.5, gt=0, le=20)
+    volatility_sigma_multiple_session: float = Field(default=2.0, gt=0, le=20)
+    volume_spike_multiple: float = Field(default=4.0, gt=1, le=50)
+    min_volume_spike_move_pct: float = Field(default=0.0075, gt=0, le=0.10)
+    cooldown_minutes: int = Field(default=30, ge=5, le=240)
+    max_alerts_per_day: int = Field(default=12, ge=1, le=50)
+    max_tickers: int = Field(default=20, ge=1, le=100)
+    cause_search: PriceMoveCauseSearchSettings = PriceMoveCauseSearchSettings()
 
 
 class LegacyPriceDeviationSettings(BaseModel):
@@ -310,6 +423,104 @@ class TickerSettings(BaseModel):
     # 杠杆倍数(产品构造事实, 如 2x 日内杠杆 ETF 填 2)。建议仓位按 等权÷倍数 归一,
     # 让同一份权重承担的风险与 1x 标的对齐。回测: research/backtest_lev_adjust.py
     leverage: float = 1.0
+
+
+class MomentumStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lookback_days: int = Field(default=60, ge=2, le=500)
+    top_n: int = Field(default=3, ge=1, le=100)
+    min_dollar_volume: float = Field(default=50_000_000, ge=0)
+
+
+class BreakoutStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    high_lookback_days: int = Field(default=20, ge=2, le=252)
+    volume_multiplier: float = Field(default=1.5, gt=0, le=20)
+
+
+class PriceDeviationStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    threshold: float = Field(default=0.02, gt=0, le=1)
+
+
+class RSIStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    period: int = Field(default=14, ge=2, le=100)
+    oversold: float = Field(default=30, ge=0, lt=50)
+    overbought: float = Field(default=70, gt=50, le=100)
+
+    @model_validator(mode="after")
+    def validate_bands(self) -> Self:
+        if self.oversold >= self.overbought:
+            raise ValueError("RSI oversold must be below overbought")
+        return self
+
+
+class MACDStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fast: int = Field(default=12, ge=1, le=200)
+    slow: int = Field(default=26, ge=2, le=400)
+    signal: int = Field(default=9, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_windows(self) -> Self:
+        if self.fast >= self.slow:
+            raise ValueError("MACD fast window must be below slow window")
+        return self
+
+
+class BollingerStrategySettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    period: int = Field(default=20, ge=2, le=252)
+    num_std: float = Field(default=2.0, gt=0, le=10)
+
+
+class StrategiesSettings(BaseModel):
+    """Typed strategy configuration with mapping compatibility for research scripts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    momentum_rotation: MomentumStrategySettings = MomentumStrategySettings()
+    breakout_20d: BreakoutStrategySettings = BreakoutStrategySettings()
+    price_deviation: PriceDeviationStrategySettings = PriceDeviationStrategySettings()
+    rsi_reversion: RSIStrategySettings = RSIStrategySettings()
+    macd_cross: MACDStrategySettings = MACDStrategySettings()
+    bollinger_breakout: BollingerStrategySettings = BollingerStrategySettings()
+
+    def __getitem__(self, name: str) -> dict[str, float | int]:
+        value = getattr(self, name)
+        if not isinstance(value, BaseModel):
+            raise KeyError(name)
+        return value.model_dump()
+
+    def get(
+        self, name: str, default: dict[str, float | int] | None = None
+    ) -> dict[str, float | int]:
+        try:
+            return self[name]
+        except (AttributeError, KeyError):
+            return default or {}
+
+
+class BackupSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keep_days: int = Field(default=14, ge=1, le=365)
+    mirror_dir: str = ""
+    require_mirror: bool = False
+
+    @model_validator(mode="after")
+    def validate_mirror(self) -> Self:
+        self.mirror_dir = self.mirror_dir.strip()
+        if self.require_mirror and not self.mirror_dir:
+            raise ValueError("backup.mirror_dir is required when require_mirror=true")
+        return self
 
 
 class FeishuBotSettings(BaseModel):
@@ -334,12 +545,14 @@ class FeishuBotSettings(BaseModel):
 
 
 class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     data_source: Literal["yfinance", "alpaca"] = "yfinance"
     db_dir: str = "data"
     tickers: dict[str, TickerSettings] = Field(default_factory=dict)
     universe: list[str] = Field(default_factory=list)
     watchlist: list[str] = Field(default_factory=list)
-    strategies: dict[str, dict[str, float | int]]
+    strategies: StrategiesSettings = StrategiesSettings()
     leverage_factor: dict[str, float] = Field(default_factory=dict)   # 由 tickers.leverage 派生
     momentum_group_top_n: dict[str, int] = Field(default_factory=dict)
     momentum_default_group_top_n: dict[str, int] = Field(default_factory=dict)
@@ -348,20 +561,38 @@ class Settings(BaseModel):
     notify: NotifySettings = NotifySettings()
     enrichment: EnrichmentSettings = EnrichmentSettings()
     ai_briefing: AIBriefingSettings = AIBriefingSettings()
+    data_qa: DataQASettings = DataQASettings()
+    forward_evaluation: ForwardEvaluationSettings = ForwardEvaluationSettings()
     trend_gate: TrendGateSettings = TrendGateSettings()
     index_universe: IndexUniverseSettings = IndexUniverseSettings()
     us_briefing: USBriefingSettings = USBriefingSettings()
     execution_plan: ExecutionPlanSettings = ExecutionPlanSettings()
     option_flow: OptionFlowSettings = OptionFlowSettings()
     option_intel: OptionIntelSettings = OptionIntelSettings()
+    holding_price_alert: HoldingPriceAlertSettings = HoldingPriceAlertSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     feishu_bot: FeishuBotSettings = FeishuBotSettings()
+    backup: BackupSettings = BackupSettings()
     # 凭证来自 .env，不出现在 yaml
     alpaca_key: str = ""
     alpaca_secret: str = ""
     feishu_webhook: str = ""
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+    feishu_proxy: str = ""
+
+    @field_validator("feishu_proxy")
+    @classmethod
+    def validate_feishu_proxy(cls, value: str) -> str:
+        proxy = value.strip()
+        if not proxy:
+            return ""
+        parsed = urlsplit(proxy)
+        if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.hostname:
+            raise ValueError(
+                "FEISHU_PROXY must be an http(s) or socks5 proxy URL"
+            )
+        return proxy
 
     @model_validator(mode="after")
     def validate_universe_classification(self) -> Self:
@@ -418,4 +649,8 @@ def load_settings(path: Path | None = None) -> Settings:
     raw["feishu_webhook"] = os.environ.get("FEISHU_WEBHOOK", "")
     raw["feishu_app_id"] = os.environ.get("FEISHU_APP_ID", "")
     raw["feishu_app_secret"] = os.environ.get("FEISHU_APP_SECRET", "")
+    raw["feishu_proxy"] = os.environ.get("FEISHU_PROXY", "")
+    mirror_dir = os.environ.get("BACKUP_MIRROR_DIR", "").strip()
+    if mirror_dir:
+        raw.setdefault("backup", {})["mirror_dir"] = mirror_dir
     return Settings(**raw)

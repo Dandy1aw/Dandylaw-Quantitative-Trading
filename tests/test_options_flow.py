@@ -5,13 +5,19 @@ from decimal import Decimal
 import pytest
 
 from quant_signal.options_flow import (
+    HoldingOptionFlow,
+    HoldingOptionFlowSnapshot,
     OptionContractVolume,
     OptionEnrichment,
     OptionFlowPolicy,
     OptionFlowSnapshot,
+    UnderlyingOptionFlow,
     VenueOptionVolume,
     aggregate_and_rank,
+    build_holding_option_flow_snapshot,
+    aggregate_underlying_flows,
     detect_material_changes,
+    detect_holding_option_flow_changes,
     display_top_by_side,
     occ_symbol,
     scan_slot,
@@ -322,3 +328,241 @@ def test_focus_limits_each_underlying_to_two_contracts() -> None:
         snapshot(*previous_rows), snapshot(*current_rows), OptionFlowPolicy()
     )
     assert len(changes) == 2
+
+
+def test_aggregate_underlying_flow_combines_sides_and_known_deltas() -> None:
+    current = snapshot(
+        contract(
+            "SPY260717C00750000", underlying="SPY", strike="750",
+            volume=1_000_000, rank=1,
+        ),
+        contract(
+            "SPY260717C00755000", underlying="SPY", strike="755",
+            volume=250_000, rank=2,
+        ),
+        contract(
+            "SPY260717P00740000", underlying="SPY", side="put", strike="740",
+            volume=820_000, rank=1,
+        ),
+        contract(
+            "AAPL260717C00300000", underlying="AAPL", strike="300",
+            volume=100_000, rank=3,
+        ),
+        contract(
+            "AAPL260717P00290000", underlying="AAPL", side="put", strike="290",
+            volume=100_000, rank=2,
+        ),
+    )
+    previous = snapshot(
+        replace(current.rows[0], volume=930_000),
+        replace(current.rows[1], volume=235_000),
+        replace(current.rows[2], volume=788_000),
+        replace(current.rows[3], volume=95_000),
+        replace(current.rows[4], volume=94_000),
+    )
+
+    flows = aggregate_underlying_flows(current, previous, top_n=10)
+
+    assert [item.underlying for item in flows] == ["SPY", "AAPL"]
+    spy = flows[0]
+    assert spy.call_volume == 1_250_000
+    assert spy.put_volume == 820_000
+    assert spy.total_volume == 2_070_000
+    assert spy.call_contract_count == 2
+    assert spy.put_contract_count == 1
+    assert spy.call_put_ratio == pytest.approx(1_250_000 / 820_000)
+    assert spy.dominance == pytest.approx(430_000 / 2_070_000)
+    assert spy.structure_label == "Call 占优"
+    assert spy.known_call_delta == 85_000
+    assert spy.known_put_delta == 32_000
+    assert spy.call_delta_partial is False
+    assert spy.put_delta_partial is False
+
+
+def test_underlying_flow_marks_new_contract_delta_as_partial() -> None:
+    prior_call = contract(volume=100, rank=1)
+    prior_put = contract(
+        "NVDA260717P00200000", side="put", strike="200", volume=100, rank=1
+    )
+    current = snapshot(
+        replace(prior_call, volume=150),
+        contract(
+            "NVDA260717C00220000", strike="220", volume=400, rank=2
+        ),
+        replace(prior_put, volume=130),
+    )
+
+    flow = aggregate_underlying_flows(
+        current, snapshot(prior_call, prior_put), top_n=1
+    )[0]
+
+    assert flow.known_call_delta == 50
+    assert flow.call_delta_partial is True
+    assert flow.known_put_delta == 30
+    assert flow.put_delta_partial is False
+
+
+@pytest.mark.parametrize(
+    ("call_volume", "put_volume", "label"),
+    [
+        (300, 100, "Call 显著占优"),
+        (200, 100, "Call 占优"),
+        (100, 100, "Call/Put 相对均衡"),
+        (50, 100, "Put 占优"),
+        (30, 100, "Put 显著占优"),
+        (100, 0, "仅 Call 可见"),
+        (0, 100, "仅 Put 可见"),
+    ],
+)
+def test_underlying_flow_structure_labels(
+    call_volume: int, put_volume: int, label: str
+) -> None:
+    flow = UnderlyingOptionFlow(
+        underlying="SPY",
+        call_volume=call_volume,
+        put_volume=put_volume,
+        call_contract_count=int(call_volume > 0),
+        put_contract_count=int(put_volume > 0),
+        known_call_delta=None,
+        known_put_delta=None,
+        call_delta_partial=False,
+        put_delta_partial=False,
+    )
+
+    assert flow.structure_label == label
+    if call_volume == 0 or put_volume == 0:
+        assert flow.call_put_ratio is None
+        assert flow.dominance is None
+
+
+def test_underlying_flow_first_snapshot_has_no_comparable_delta() -> None:
+    flow = aggregate_underlying_flows(snapshot(contract()), top_n=1)[0]
+    assert flow.known_call_delta is None
+    assert flow.known_put_delta is None
+    assert flow.call_delta_partial is False
+    assert flow.put_delta_partial is False
+
+
+def test_underlying_flow_rejects_non_positive_limit() -> None:
+    with pytest.raises(ValueError, match="top_n"):
+        aggregate_underlying_flows(snapshot(contract()), top_n=0)
+
+
+def test_holding_option_flow_models_are_immutable_and_compute_structure() -> None:
+    row = HoldingOptionFlow(
+        underlying="NVDA",
+        call_volume=82_140,
+        put_volume=61_900,
+        call_delta=8_240,
+        put_delta=3_110,
+        data_status="ok",
+    )
+    assert row.total_volume == 144_040
+    assert row.call_put_ratio == pytest.approx(82_140 / 61_900)
+    assert row.dominance == pytest.approx((82_140 - 61_900) / 144_040)
+    assert row.structure_label == "Call 占优"
+    with pytest.raises(FrozenInstanceError):
+        row.call_volume = 1  # type: ignore[misc]
+
+
+def test_holding_option_flow_handles_zero_denominator_and_no_volume() -> None:
+    call_only = HoldingOptionFlow("NVDA", 100, 0, None, None, "ok")
+    empty = HoldingOptionFlow("SKHY", 0, 0, None, None, "no_chain")
+    assert call_only.call_put_ratio == float("inf")
+    assert call_only.dominance == 1.0
+    assert call_only.structure_label == "Call 占优"
+    assert empty.call_put_ratio is None
+    assert empty.dominance is None
+    assert empty.structure_label == "无可用期权链"
+
+
+def test_build_holding_snapshot_uses_same_session_delta_and_resets_cross_day() -> None:
+    prior = HoldingOptionFlowSnapshot(
+        slot="2026-07-10T10:00:00-04:00",
+        captured_at=datetime(2026, 7, 10, 14, 0, tzinfo=UTC),
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 1_000, 500, None, None, "ok"),),
+    )
+    same_day = build_holding_option_flow_snapshot(
+        {"NVDA": (contract(volume=1_300), contract(
+            "NVDA260717P00200000", side="put", strike="200", volume=650
+        ))},
+        at=NOW,
+        previous=prior,
+    )
+    assert same_day.rows[0].call_delta == 300
+    assert same_day.rows[0].put_delta == 150
+    assert same_day.rows[0].data_status == "ok"
+
+    next_day = build_holding_option_flow_snapshot(
+        {"NVDA": (contract(volume=100),)},
+        at=datetime(2026, 7, 11, 14, 15, tzinfo=UTC),
+        previous=same_day,
+    )
+    assert next_day.rows[0].call_delta is None
+    assert next_day.rows[0].put_delta is None
+
+
+def test_holding_snapshot_marks_cumulative_volume_reset_and_failures() -> None:
+    prior = HoldingOptionFlowSnapshot(
+        slot="2026-07-10T10:00:00-04:00",
+        captured_at=datetime(2026, 7, 10, 14, 0, tzinfo=UTC),
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 1_000, 500, None, None, "ok"),),
+    )
+    current = build_holding_option_flow_snapshot(
+        {
+            "NVDA": (contract(volume=100),),
+            "SKHY": (),
+            "MRVL": None,
+        },
+        at=NOW,
+        previous=prior,
+    )
+    rows = {row.underlying: row for row in current.rows}
+    assert rows["NVDA"].data_status == "reset"
+    assert rows["NVDA"].call_delta is None
+    assert rows["SKHY"].data_status == "no_chain"
+    assert rows["MRVL"].data_status == "unavailable"
+
+
+def test_holding_change_detects_direction_flip_and_material_increment() -> None:
+    previous = HoldingOptionFlowSnapshot(
+        slot="2026-07-10T10:00:00-04:00",
+        captured_at=datetime(2026, 7, 10, 14, 0, tzinfo=UTC),
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 1_000, 2_000, None, None, "ok"),),
+    )
+    current = HoldingOptionFlowSnapshot(
+        slot=scan_slot(NOW),
+        captured_at=NOW,
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 9_000, 2_500, 8_000, 500, "ok"),),
+    )
+
+    changes = detect_holding_option_flow_changes(
+        previous,
+        current,
+        min_delta_volume=5_000,
+        dominance_threshold=0.20,
+    )
+
+    assert len(changes) == 1
+    assert changes[0].previous_direction == "put"
+    assert changes[0].flags == ("DIRECTION_FLIP", "VOLUME_IMBALANCE")
+
+
+def test_holding_change_ignores_small_increment_and_reset() -> None:
+    previous = HoldingOptionFlowSnapshot(
+        slot="2026-07-10T10:00:00-04:00",
+        captured_at=datetime(2026, 7, 10, 14, 0, tzinfo=UTC),
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 1_000, 900, None, None, "ok"),),
+    )
+    current = HoldingOptionFlowSnapshot(
+        slot=scan_slot(NOW),
+        captured_at=NOW,
+        provider="alpaca-option-snapshots",
+        rows=(HoldingOptionFlow("NVDA", 1_100, 900, 100, 0, "reset"),),
+    )
+    assert detect_holding_option_flow_changes(previous, current) == ()

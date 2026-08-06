@@ -1,0 +1,14 @@
+{
+  "pipeline_result": true,
+  "status": "SHADOWED",
+  "candidates": 4,
+  "sectors": [
+    "Communication Services",
+    "Information Technology"
+  ],
+  "all_large_cap": true,
+  "max_per_sector": 3,
+  "company_rationale_count": 0,
+  "company_rationale_tickers": [],
+  "feishu_cards_sent": 0
+}

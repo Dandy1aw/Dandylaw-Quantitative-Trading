@@ -9,6 +9,7 @@ import pandas as pd
 import structlog
 
 from quant_signal.performance import (
+    broker_fill_performance,
     build_horizon_trades,
     build_round_trips,
     performance_card,
@@ -81,7 +82,10 @@ def run(engine: Engine, now: datetime) -> None:
     open_tickers = sorted({t.ticker for t in trades if not t.closed})
     marks = _last_close(engine, open_tickers, now)
     card = performance_card(
-        strategy_summary(trades, marks), WINDOW_DAYS, _benchmark_note(engine, now)
+        strategy_summary(trades, marks),
+        WINDOW_DAYS,
+        _benchmark_note(engine, now),
+        broker_fill_performance(engine.ledger.broker_fills()),
     )
     engine.notifier.send(card)
     log.info(

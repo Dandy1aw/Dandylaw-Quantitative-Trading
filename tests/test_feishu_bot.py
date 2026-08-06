@@ -5,8 +5,10 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
+import pytest
+
 from conftest import make_test_settings
-from quant_signal.config import FeishuBotSettings
+from quant_signal.config import ExecutionPlanSettings, FeishuBotSettings
 from quant_signal.feishu_bot import (
     BotIntent,
     BotMessage,
@@ -54,14 +56,21 @@ def make_service(
     *,
     transport: FakeTransport | None = None,
     extractor: object | None = None,
+    engine: object | None = None,
 ) -> tuple[FeishuBotService, FakeTransport, SignalLedger]:
     ledger = SignalLedger(tmp_path / "signals.db")
     settings = make_test_settings(
-        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"]),
+        execution_plan=ExecutionPlanSettings(enabled=engine is not None),
     )
     out = transport or FakeTransport()
     service = FeishuBotService(
-        ledger, settings, out, extractor=extractor, clock=lambda: NOW
+        ledger,
+        settings,
+        out,
+        extractor=extractor,
+        clock=lambda: NOW,
+        engine=engine,  # type: ignore[arg-type]
     )
     return service, out, ledger
 
@@ -96,6 +105,39 @@ def test_group_without_mention_is_ignored() -> None:
         route(msg(chat_type="group", content={"text": "期权"}), ALLOWED)
         is BotIntent.IGNORE
     )
+
+
+def test_feishu_proxy_is_scoped_to_sdk_http_and_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lark_oapi.core.http.transport as lark_http
+    import lark_oapi.ws.client as lark_ws
+    import requests
+
+    from quant_signal.feishu_bot import configure_lark_proxy
+
+    calls: list[dict[str, object]] = []
+
+    def fake_request(*args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return object()
+
+    # Register restoration for attributes that configure_lark_proxy replaces.
+    monkeypatch.setattr(lark_http, "requests", lark_http.requests)
+    monkeypatch.setattr(lark_ws, "_ws_connect_kwargs", lark_ws._ws_connect_kwargs)
+    monkeypatch.setattr(requests, "request", fake_request)
+
+    configure_lark_proxy("http://127.0.0.1:7890")
+    lark_http.requests.request("GET", "https://open.feishu.cn")
+
+    expected = {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+    assert calls == [{"proxies": expected}]
+    assert lark_ws._ws_connect_kwargs() == {
+        "proxy": "http://127.0.0.1:7890"
+    }
 
 
 def test_group_mention_routes_readonly_commands_for_allowed_sender() -> None:
@@ -214,7 +256,7 @@ def test_service_options_without_scan_then_with_scan(tmp_path: Path) -> None:
             venues=("cone",),
             captured_at=NOW,
         )
-        for root, side in (("NVDA", "C"), ("TSLA", "P"))
+        for root, side in (("SPY", "C"), ("SPY", "P"))
     )
     snapshot = OptionFlowSnapshot(
         slot=scan_slot(NOW),
@@ -227,6 +269,7 @@ def test_service_options_without_scan_then_with_scan(tmp_path: Path) -> None:
     service.handle(msg(message_id="om_b", content={"text": "期权"}))
     assert len(out.cards) == 1
     assert "Cboe四市场" in out.cards[0][1].title
+    assert "SPY · ETF" in out.cards[0][1].body_md
 
 
 def portfolio_extraction(
@@ -272,6 +315,21 @@ class FakeExtractor:
         return self.extraction
 
 
+class FakeRefreshEngine:
+    def __init__(
+        self, *, delivered: bool = True, error: Exception | None = None
+    ) -> None:
+        self.delivered = delivered
+        self.error = error
+        self.calls: list[datetime] = []
+
+    def run_execution_brief(self, now: datetime) -> bool:
+        self.calls.append(now)
+        if self.error is not None:
+            raise self.error
+        return self.delivered
+
+
 def image_msg(message_id: str = "om_img") -> BotMessage:
     return msg(
         message_id=message_id,
@@ -282,7 +340,10 @@ def image_msg(message_id: str = "om_img") -> BotMessage:
 
 def test_validated_screenshot_is_applied_automatically(tmp_path: Path) -> None:
     extractor = FakeExtractor(portfolio_extraction())
-    service, out, ledger = make_service(tmp_path, extractor=extractor)
+    engine = FakeRefreshEngine()
+    service, out, ledger = make_service(
+        tmp_path, extractor=extractor, engine=engine
+    )
     service.handle(image_msg())
 
     assert out.downloads == [("om_img", "img_v3_key")]
@@ -291,7 +352,37 @@ def test_validated_screenshot_is_applied_automatically(tmp_path: Path) -> None:
     assert account is not None and account["equity"] == "1000"
     receipt = out.texts[-1][1]
     assert "NVDA" in receipt and "1000" in receipt
+    assert engine.calls == [NOW]
+    assert "重新推送今日行动计划" in receipt
     assert extractor.seen_paths and not extractor.seen_paths[0].exists()  # 临时文件已删
+
+
+def test_screenshot_import_survives_automatic_refresh_failure(tmp_path: Path) -> None:
+    engine = FakeRefreshEngine(error=RuntimeError("brief unavailable"))
+    service, out, ledger = make_service(
+        tmp_path,
+        extractor=FakeExtractor(portfolio_extraction()),
+        engine=engine,
+    )
+
+    service.handle(image_msg())
+
+    assert ledger.latest_observed_account() is not None
+    assert engine.calls == [NOW]
+    assert "自动重算失败" in out.texts[-1][1]
+
+
+def test_screenshot_import_defers_refresh_outside_action_window(
+    tmp_path: Path,
+) -> None:
+    engine = FakeRefreshEngine()
+    service, _, _ = make_service(tmp_path, engine=engine)
+    before_window = datetime(2026, 7, 10, 11, 0, tzinfo=UTC)  # 07:00 ET
+
+    status = service._refresh_execution_plan(before_window)
+
+    assert engine.calls == []
+    assert "08:15–15:45 ET" in status
 
 
 def test_partial_screenshot_confirmation_survives_service_rebuild(
@@ -385,6 +476,35 @@ def test_rejected_screenshot_is_never_applied(tmp_path: Path) -> None:
 
     service.handle(msg(message_id="om_c", content={"text": "确认导入"}))
     assert "没有待确认" in out.texts[-1][1]  # REJECTED 不进入待确认
+
+
+def test_missing_account_summary_gives_actionable_screenshot_guidance(
+    tmp_path: Path,
+) -> None:
+    extraction = portfolio_extraction()
+    extraction = extraction.model_copy(
+        update={
+            "account": extraction.account.model_copy(
+                update={
+                    "equity": None,
+                    "market_value": None,
+                    "cash": None,
+                    "buying_power": None,
+                }
+            )
+        }
+    )
+    service, out, ledger = make_service(
+        tmp_path, extractor=FakeExtractor(extraction)
+    )
+
+    service.handle(image_msg())
+
+    receipt = out.texts[-1][1]
+    assert "导入被拒绝" in receipt
+    assert "账户总资产" in receipt
+    assert "完整原图" in receipt
+    assert ledger.latest_observed_account() is None
 
 
 def test_extraction_failure_reports_and_leaves_no_state(tmp_path: Path) -> None:
@@ -484,6 +604,26 @@ def test_health_command_renders_runtime_or_degrades(tmp_path: Path) -> None:
     bare, bare_out, _ = make_service(tmp_path / "bare")
     bare.handle(msg(content={"text": "health"}))
     assert "运行状态不可用" in bare_out.texts[0][1]
+
+
+def test_health_command_exposes_consecutive_failure(tmp_path: Path) -> None:
+    from quant_signal.scheduler import JobReportedFailure, JobRuntime
+
+    runtime = JobRuntime(now_fn=lambda: NOW)
+    with pytest.raises(JobReportedFailure):
+        runtime.wrap("market_scan", lambda: False)()
+    ledger = SignalLedger(tmp_path / "signals.db")
+    settings = make_test_settings(
+        feishu_bot=FeishuBotSettings(enabled=True, allowed_open_ids=["ou_owner"])
+    )
+    out = FakeTransport()
+    service = FeishuBotService(
+        ledger, settings, out, clock=lambda: NOW, runtime=runtime
+    )
+
+    service.handle(msg(content={"text": "健康"}))
+
+    assert "连续失败 1 次" in out.texts[0][1]
 
 
 def test_options_query_falls_back_to_last_trading_day(tmp_path: Path) -> None:

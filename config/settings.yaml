@@ -100,6 +100,17 @@ ai_briefing:                     # 盘前早报后调用 AI CLI 输出观点卡�
   command: codex                  # provider=claude_code_cli 时改为 claude
   timeout_seconds: 90
   max_chars: 6000
+  output_max_chars: 180          # 统一行动简报 AI 三行硬上限
+
+data_qa:
+  min_coverage: 0.98             # 与生产选股口径一致，不允许 90%-98% 区间假绿
+  divergence_threshold: 0.005    # Alpaca/IEX 与 yfinance 收盘价偏差 0.5% 告警
+  batch_size: 50
+  lookback_days: 7
+forward_evaluation:
+  horizons: [5, 10, 20, 21, 63]  # 短中期并列评估，避免只看单一持有周期
+  benchmark: QQQ                 # 同期基准，用于计算超额收益
+  transaction_cost_bps_per_side: 5
 
 index_universe:
   enabled: true
@@ -113,8 +124,8 @@ index_universe:
   min_dollar_volume: 50000000
 
 us_briefing:
-  enabled: true                   # 独立分支先影子运行；delivery_mode=shadow 不发送生产卡片
-  delivery_mode: shadow           # shadow 只计算/落库，不替换生产推送
+  enabled: true
+  delivery_mode: live             # 收盘/亚洲仅落库，08:15 ET 只推一张行动简报
   candidate_index: nasdaq100
   min_coverage: 0.98
   morning_hour_utc: 0             # 北京 08:00
@@ -137,6 +148,20 @@ us_briefing:
     target_reward_risk: 2.0
     earnings_blackout_days: 2
     max_candidates_per_cluster: 2
+    sector_quality_filter_enabled: true
+    min_market_cap_usd: 100000000000
+    top_n_per_sector: 3
+    max_sectors: 5
+    candidate_group_top_n_overrides:
+      Semiconductors: 10
+      Technology: 10
+    profile_max_age_days: 7
+    profile_failure_ttl_hours: 6
+    ai_company_max_chars: 220
+    ai_news_lookback_days: 7
+    ai_news_max_items: 5
+    ai_company_batch_size: 8
+    ai_company_total_timeout_seconds: 120
   position_discipline:
     hard_loss_caps: {"1x": 0.08, "2x": 0.05, "3x": 0.035}
     breakeven_trigger: 0.10
@@ -156,7 +181,7 @@ execution_plan:
   max_cluster_weight: 0.35
   cash_reserve: 0.0
   risk_clusters:
-    semiconductor_memory: [DRAM, MU, RAM, SMH, SNXX, MUU, SNDK, AMD, NVDA, INTC, TSM, MRVL]
+    semiconductor_memory: [DRAM, MU, RAM, SMH, SNXX, MUU, SNDK, AMD, NVDA, INTC, TSM, MRVL, SKHY]
     mega_cap_platforms: [AAPL, MSFT, GOOGL, GOOG, AMZN, META, TSLA]
     enterprise_software: [ADBE, CRM, INTU, NOW, PANW, CRWD, PLTR, SNPS, CDNS, ADSK, FTNT, WDAY, TEAM, DDOG]
     consumer_growth: [COST, NFLX, BKNG, ABNB, MELI, PDD, PEP, MDLZ, SBUX]
@@ -184,9 +209,18 @@ option_flow:
   intraday_expiry_minutes: 45
   closing_expiry_hours: 12
   retention_days: 120
-  min_venue_coverage: 1.0
+  circuit_breaker_failures: 2
+  circuit_breaker_cooldown_minutes: 10
+  min_venue_coverage: 0.75        # Cboe 四市场至少三个成功；缺失市场会在卡片标注覆盖率
   display_dedupe_underlying: true   # 每侧同标的只显示最高量合约
   display_sort_by_expiry: true      # 展示按到期日升序(近月优先)
+  holding_monitor_enabled: true     # 真实券商持仓单独监控，不参与全市场排名
+  holding_max_expiry_days: 14       # 高频监控只汇总未来 14 天内合约
+  holding_max_tickers: 12
+  holding_min_delta_volume: 5000
+  holding_dominance_threshold: 0.20
+  holding_cooldown_minutes: 60     # 持仓异动独立冷却，不与全市场榜抢额度
+  holding_max_alerts_per_day: 4    # 持仓异动独立日额度
 
 option_intel:                     # 持仓期权情报(只观察, 不推荐任何期权交易)
   enabled: true
@@ -196,6 +230,45 @@ option_intel:                     # 持仓期权情报(只观察, 不推荐任�
   iv_rv_warn_ratio: 1.5           # ATM IV / 20日RV 超过此值提示"事件定价"
   retention_days: 400             # 日度快照保留天数(留足一年做分位数)
   max_tickers: 12                 # 每日最多处理的持仓标的数
+  wall_high_min_oi_each_side: 5000
+  wall_medium_min_oi_each_side: 1000
+  wall_high_min_oi_coverage: 0.80
+  wall_medium_min_oi_coverage: 0.50
+  wall_high_min_quote_coverage: 0.60
+  wall_high_min_concentration: 0.10
+  gamma_near_spot_pct: 0.02
+
+holding_price_alert:              # 真实持仓分钟级股价异动
+  enabled: true
+  lookback_minutes: 45
+  max_bar_age_seconds: 120
+  stock_1m_pct: 0.015
+  stock_5m_pct: 0.030
+  stock_15m_pct: 0.050
+  stock_session_pct: 0.080
+  etf_1m_pct: 0.010
+  etf_5m_pct: 0.020
+  etf_15m_pct: 0.035
+  etf_session_pct: 0.050
+  volatility_sigma_multiple_1m: 4.0
+  volatility_sigma_multiple_5m: 3.0
+  volatility_sigma_multiple_15m: 2.5
+  volatility_sigma_multiple_session: 2.0
+  volume_spike_multiple: 4.0
+  min_volume_spike_move_pct: 0.0075
+  cooldown_minutes: 30
+  max_alerts_per_day: 12
+  max_tickers: 20
+  cause_search:
+    enabled: true
+    command: codex
+    model: gpt-5.6-terra          # 低延迟查因专用，不影响其他深度分析
+    reasoning_effort: low
+    timeout_seconds: 60           # 实测联网查因约 49 秒；超时仍发告警
+    lookback_hours: 24
+    max_sources: 3
+    max_alerts_per_batch: 8       # 同一分钟多标的批量搜索，覆盖组合共振
+    max_summary_chars: 220
 
 feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
   enabled: true
@@ -208,3 +281,9 @@ feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_I
 
 legacy_price_deviation:
   enabled: false
+
+backup:
+  keep_days: 14
+  # 当前机器使用 OneDrive 同步目录；BACKUP_MIRROR_DIR 仍可在环境中覆盖
+  mirror_dir: "C:/Users/syw/OneDrive/quant-signal-backups"
+  require_mirror: true

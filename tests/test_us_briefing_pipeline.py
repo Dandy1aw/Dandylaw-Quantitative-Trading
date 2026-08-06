@@ -19,7 +19,9 @@ from quant_signal.config import (
     MarketRegimeSettings,
     USBriefingSettings,
 )
+from quant_signal.company_profiles import CompanyProfile
 from quant_signal.datafeed.store import BarStore
+from quant_signal.datafeed.news import NewsArticle
 from quant_signal.engine import Engine
 from quant_signal.index_universe import merge_members
 from quant_signal.ledger import SignalLedger
@@ -28,6 +30,8 @@ from quant_signal.pipelines.us_briefing import (
     BriefingMode,
     _asia_context,
     _load_daily_bars,
+    _load_company_news,
+    _run_company_rationales,
     _account_version,
     _observed_input,
     last_completed_us_session,
@@ -99,6 +103,47 @@ class FixedEarningsSource:
 
     def recent_surprise(self, tickers: list[str], now: date) -> dict[str, float]:
         return {}
+
+
+class FixedFundamentalsSource:
+    def __init__(self, members: set[str]) -> None:
+        sectors = (
+            "Information Technology",
+            "Communication Services",
+            "Consumer Discretionary",
+            "Health Care",
+        )
+        self.profiles_by_ticker = {
+            ticker: CompanyProfile(
+                ticker=ticker,
+                as_of=date(2026, 7, 14),
+                market_cap_usd=150_000_000_000 + index * 10_000_000_000,
+                gics_sector=sectors[index % len(sectors)],
+                industry=f"Industry {index % len(sectors)}",
+                company_name=f"Company {ticker}",
+                business_summary=f"Business summary for {ticker}",
+                total_revenue=50_000_000_000,
+                revenue_growth=0.12,
+                earnings_growth=0.15,
+                profit_margin=0.22,
+                return_on_equity=0.30,
+                free_cash_flow=8_000_000_000,
+                quote_type="EQUITY",
+                source="test",
+                data_status="ok",
+            )
+            for index, ticker in enumerate(sorted(members))
+        }
+
+    def quality_flags(self, tickers: list[str]) -> dict[str, str]:
+        return {}
+
+    def profiles(self, tickers: list[str]) -> dict[str, CompanyProfile]:
+        return {
+            ticker: self.profiles_by_ticker[ticker]
+            for ticker in tickers
+            if ticker in self.profiles_by_ticker
+        }
 
 
 def _bars() -> tuple[pd.DataFrame, set[str]]:
@@ -188,6 +233,8 @@ def _engine(
     delivery_mode: str = "live",
     account_provider: object | None = None,
     notifier: FakeNotifier | None = None,
+    sector_filter: bool = False,
+    fundamentals_source: object | None = None,
 ) -> tuple[Engine, FakeNotifier]:
     bars, members = _bars()
     settings = make_test_settings(
@@ -209,6 +256,7 @@ def _engine(
             candidate_lanes=CandidateLaneSettings(
                 min_dollar_volume=1_000_000,
                 top_n_per_lane=3,
+                sector_quality_filter_enabled=sector_filter,
             ),
         ),
     )
@@ -221,9 +269,177 @@ def _engine(
         notifier,
         index_universe_provider=FakeUniverseProvider(members),  # type: ignore[arg-type]
         account_provider=account_provider,  # type: ignore[arg-type]
+        fundamentals_source=fundamentals_source,  # type: ignore[arg-type]
     )
     engine._intl_source = FailingAsiaSource()  # type: ignore[assignment]
     return engine, notifier
+
+
+def test_sector_filter_enriches_and_caps_final_candidates(tmp_path: Path) -> None:
+    _, members = _bars()
+    fundamentals = FixedFundamentalsSource(members)
+    engine, notifier = _engine(
+        tmp_path,
+        sector_filter=True,
+        fundamentals_source=fundamentals,
+        account_provider=FixedAccountProvider(_account()),
+    )
+
+    run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
+
+    stored = engine.ledger.candidate_lane_snapshot("US_CLOSE", date(2026, 7, 14))
+    assert stored
+    sectors = {str(row["candidate_group"]) for row in stored}
+    assert len(sectors) <= 5
+    assert all(
+        sum(row["candidate_group"] == sector for row in stored)
+        <= (10 if sector in {"Semiconductors", "Technology"} else 3)
+        for sector in sectors
+    )
+    assert all(int(row["market_cap_usd"]) >= 100_000_000_000 for row in stored)
+    assert all(int(row["sector_strategy_rank"]) >= 1 for row in stored)
+    assert all(int(row["sector_market_cap_rank"]) >= 1 for row in stored)
+    assert "行业分组候选 · 市值门槛 ≥ 1000亿美元" in notifier.cards[0].body_md
+
+
+def test_sector_filter_expands_wide_pool_cluster_cap(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import quant_signal.pipelines.us_briefing as module
+
+    _, members = _bars()
+    engine, _ = _engine(
+        tmp_path,
+        sector_filter=True,
+        fundamentals_source=FixedFundamentalsSource(members),
+    )
+    observed: list[tuple[int, int]] = []
+    original = module.discover_candidates
+
+    def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+        settings = kwargs["settings"]
+        observed.append((settings.top_n_per_lane, settings.max_candidates_per_cluster))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "discover_candidates", wrapped)  # type: ignore[attr-defined]
+
+    run(engine, NOW_CLOSE, BriefingMode.US_CLOSE)
+
+    assert observed == [(10, 10)]
+
+
+def test_company_news_only_returns_selected_tickers_and_caps_items(tmp_path: Path) -> None:
+    engine, _ = _engine(tmp_path)
+
+    class FixedNewsSource:
+        def fetch(self, symbols, start, end):  # type: ignore[no-untyped-def]
+            return [
+                NewsArticle(
+                    article_id=str(index),
+                    created_at=NOW_CLOSE - timedelta(hours=index),
+                    updated_at=NOW_CLOSE - timedelta(hours=index),
+                    symbols=("N01",) if index < 7 else ("N02",),
+                    headline=f"headline {index}",
+                    summary=f"summary {index}",
+                    content="",
+                    url="https://example.invalid",
+                    source="test",
+                )
+                for index in range(8)
+            ]
+
+    engine.news_source = FixedNewsSource()  # type: ignore[assignment]
+    result = _load_company_news(engine, [{"ticker": "N01"}], NOW_CLOSE)
+
+    assert set(result) == {"N01"}
+    assert len(result["N01"]) == 5
+    assert result["N01"][0]["headline"] == "headline 0"
+
+
+def test_company_rationales_are_batched_and_merged(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import quant_signal.pipelines.us_briefing as module
+
+    engine, _ = _engine(tmp_path)
+    engine.settings.ai_briefing.enabled = True
+    candidates = [
+        {
+            "ticker": f"T{index:02d}",
+            "candidate_group": "Technology",
+            "sector_strategy_rank": 1,
+            "sector_market_cap_rank": 1,
+        }
+        for index in range(18)
+    ]
+    batch_sizes: list[int] = []
+
+    def fake_run_ai(settings, context):  # type: ignore[no-untyped-def]
+        batch_sizes.append(len(context.candidates))
+        return "\n\n".join(
+            f"[{row['ticker']}]\n"
+            "上涨逻辑：收入与盈利趋势支持继续观察。\n"
+            "行业地位：行业策略第1，合格同行市值第1。\n"
+            "壁垒：客户迁移成本与产品协同较难复制。\n"
+            "反证：增长或利润率持续转弱时逻辑失效。"
+            for row in context.candidates
+        )
+
+    monkeypatch.setattr(module, "run_ai_briefing", fake_run_ai)  # type: ignore[attr-defined]
+
+    result = _run_company_rationales(
+        engine,
+        candidates,
+        news={},
+        as_of=date(2026, 7, 14),
+    )
+
+    assert batch_sizes == [8, 8, 2]
+    assert set(result) == {f"T{index:02d}" for index in range(18)}
+
+
+def test_company_rationales_retry_missing_candidates_individually(
+    tmp_path: Path, monkeypatch: object
+) -> None:
+    import quant_signal.pipelines.us_briefing as module
+
+    engine, _ = _engine(tmp_path)
+    engine.settings.ai_briefing.enabled = True
+    candidates = [
+        {
+            "ticker": ticker,
+            "candidate_group": "Technology",
+            "sector_strategy_rank": 1,
+            "sector_market_cap_rank": 1,
+        }
+        for ticker in ("AAA", "BBB", "CCC")
+    ]
+    calls: list[list[str]] = []
+
+    def fake_run_ai(settings, context):  # type: ignore[no-untyped-def]
+        tickers = [str(row["ticker"]) for row in context.candidates]
+        calls.append(tickers)
+        returned = tickers[:1]
+        return "\n\n".join(
+            f"[{ticker}]\n"
+            "上涨逻辑：收入与盈利趋势支持继续观察。\n"
+            "行业地位：行业策略第1，合格同行市值第1。\n"
+            "壁垒：客户迁移成本与产品协同较难复制。\n"
+            "反证：增长或利润率持续转弱时逻辑失效。"
+            for ticker in returned
+        )
+
+    monkeypatch.setattr(module, "run_ai_briefing", fake_run_ai)  # type: ignore[attr-defined]
+
+    result = _run_company_rationales(
+        engine,
+        candidates,
+        news={},
+        as_of=date(2026, 7, 14),
+    )
+
+    assert set(result) == {"AAA", "BBB", "CCC"}
+    assert calls == [["AAA", "BBB", "CCC"], ["BBB"], ["CCC"]]
 
 
 def test_last_completed_session_uses_same_day_after_close_and_previous_before() -> None:
@@ -275,6 +491,95 @@ def test_shadow_mode_persists_without_delivery(tmp_path: Path) -> None:
     assert engine.ledger.count_us_briefing_runs() == 1
     assert engine.ledger.active_execution_plans() == []
     assert engine.ledger.position_discipline_state("RAM") is None
+
+
+def test_close_and_asia_store_only_then_daily_action_sends_split_cards(
+    tmp_path: Path,
+) -> None:
+    engine, notifier = _engine(
+        tmp_path, account_provider=FixedAccountProvider(_account())
+    )
+
+    assert run(engine, NOW_CLOSE, BriefingMode.US_CLOSE, deliver=False)
+    assert run(engine, NOW_ASIA, BriefingMode.ASIA_CONFIRM, deliver=False)
+    assert notifier.cards == []
+
+    assert run(engine, NOW_ASIA, BriefingMode.DAILY_ACTION, deliver=True)
+    assert len(notifier.cards) == 2
+    assert "今日美股行动简报" in notifier.cards[0].title
+    assert "今日结论" in notifier.cards[0].body_md
+    assert "持仓纪律" in notifier.cards[0].body_md
+    assert "纳指100候选" not in notifier.cards[0].body_md
+    assert "纳指100候选" in notifier.cards[1].body_md
+    assert engine.ledger.count_us_briefing_runs() == 3
+    daily_runs = [
+        engine.ledger.us_briefing_run(run_id)
+        for run_id in _run_ids(engine.ledger)
+    ]
+    daily_run = next(
+        item for item in daily_runs
+        if item is not None and item["report_kind"] == "DAILY_ACTION"
+    )
+    payload = daily_run["payload"]
+    assert isinstance(payload, dict)
+    assert payload["rule_version"] == "daily-action-v2"
+    assert payload["data_version"]
+    assert payload["account_version"]
+    assert len(str(payload["input_semantic_hash"])) == 64
+    assert len(str(payload["config_hash"])) == 64
+    assert payload["universe_hash"]
+    assert payload["point_in_time"]["status"] == "LIVE_SNAPSHOT"  # type: ignore[index]
+    assert payload["cost_model"]["transaction_cost_bps"] == 10.0  # type: ignore[index]
+
+    assert run(engine, NOW_ASIA, BriefingMode.DAILY_ACTION, deliver=True)
+    assert len(notifier.cards) == 2
+
+
+def test_daily_action_sends_summary_and_separate_sector_candidate_cards(
+    tmp_path: Path,
+) -> None:
+    _, members = _bars()
+    engine, notifier = _engine(
+        tmp_path,
+        sector_filter=True,
+        fundamentals_source=FixedFundamentalsSource(members),
+        account_provider=FixedAccountProvider(_account()),
+    )
+
+    assert run(engine, NOW_ASIA, BriefingMode.DAILY_ACTION, deliver=True)
+
+    assert len(notifier.cards) > 1
+    assert "今日美股行动简报" in notifier.cards[0].title
+    assert "行业分组候选" not in notifier.cards[0].body_md
+    assert all("候选" in card.title for card in notifier.cards[1:])
+    assert all("今日结论" not in card.body_md for card in notifier.cards[1:])
+    run_id = next(iter(_run_ids(engine.ledger)))
+    stored = engine.ledger.us_briefing_run(run_id)
+    assert stored is not None
+    payload = stored["payload"]
+    assert isinstance(payload, dict)
+    assert payload["card_titles"] == [card.title for card in notifier.cards]
+
+
+def test_daily_action_attempts_every_split_card_when_one_send_fails(
+    tmp_path: Path,
+) -> None:
+    _, members = _bars()
+    notifier = FakeNotifier([False])
+    engine, _ = _engine(
+        tmp_path,
+        sector_filter=True,
+        fundamentals_source=FixedFundamentalsSource(members),
+        account_provider=FixedAccountProvider(_account()),
+        notifier=notifier,
+    )
+
+    assert run(engine, NOW_ASIA, BriefingMode.DAILY_ACTION, deliver=True) is False
+
+    assert len(notifier.cards) > 1
+    run_id = next(iter(_run_ids(engine.ledger)))
+    stored = engine.ledger.us_briefing_run(run_id)
+    assert stored is not None and stored["status"] == "FAILED"
 
 
 def test_partial_screenshot_outputs_percentage_not_invented_qty(tmp_path: Path) -> None:

@@ -1,0 +1,19 @@
+{
+  "pipeline_result": true,
+  "status": "SHADOWED",
+  "scheduler_jobs": 16,
+  "required_jobs": {
+    "us_close_briefing": true,
+    "asia_confirm_briefing": true,
+    "daily_action_briefing": true
+  },
+  "candidates": 4,
+  "sectors": [
+    "Communication Services",
+    "Information Technology"
+  ],
+  "all_large_cap": true,
+  "max_per_sector": 3,
+  "company_rationale_count": 0,
+  "feishu_cards_sent": 0
+}

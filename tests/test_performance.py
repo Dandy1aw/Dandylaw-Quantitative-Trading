@@ -1,7 +1,9 @@
 import pandas as pd
+from decimal import Decimal
 
 from quant_signal.performance import (
     Trade,
+    broker_fill_performance,
     build_horizon_trades,
     build_round_trips,
     performance_card,
@@ -97,3 +99,34 @@ def test_performance_card_renders_table_and_empty() -> None:
     assert "动量轮动" in card.body_md and "50%" in card.body_md and "SPY" in card.body_md
     empty = performance_card({}, window_days=90)
     assert "暂无" in empty.body_md
+
+
+def test_broker_fill_performance_uses_fifo_and_exposes_missing_basis() -> None:
+    rows = [
+        {"source": "alpaca_paper", "currency": "USD", "symbol": "MU", "side": "buy",
+         "filled_qty": "2", "filled_avg_price": "100"},
+        {"source": "alpaca_paper", "currency": "USD", "symbol": "MU", "side": "buy",
+         "filled_qty": "1", "filled_avg_price": "110"},
+        {"source": "alpaca_paper", "currency": "USD", "symbol": "MU", "side": "sell",
+         "filled_qty": "4", "filled_avg_price": "120"},
+    ]
+
+    summary = broker_fill_performance(rows)[0]
+
+    assert summary.realized_pnl == Decimal("50")
+    assert summary.matched_cost == Decimal("310")
+    assert summary.matched_quantity == Decimal("3")
+    assert summary.unmatched_sell_quantity == Decimal("1")
+    assert summary.is_live_source is False
+
+
+def test_performance_card_labels_paper_fills_without_calling_them_live() -> None:
+    fills = broker_fill_performance(
+        [{"source": "alpaca_paper", "currency": "USD", "symbol": "MU", "side": "buy",
+          "filled_qty": "1", "filled_avg_price": "100"}]
+    )
+
+    card = performance_card({}, 90, fill_performance=fills)
+
+    assert "模拟/观察源" in card.body_md
+    assert "真实成交" not in card.body_md

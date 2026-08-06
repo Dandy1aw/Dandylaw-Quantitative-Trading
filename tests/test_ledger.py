@@ -18,10 +18,13 @@ from quant_signal.execution import ExecutionPlan, PlanState
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.options_flow import (
+    HoldingOptionFlow,
+    HoldingOptionFlowSnapshot,
     OptionContractVolume,
     OptionFlowSnapshot,
     scan_slot,
 )
+from quant_signal.company_profiles import CompanyProfile
 from quant_signal.position_discipline import DisciplineState
 from quant_signal.strategies.base import Direction, Signal, dedup_key
 
@@ -74,6 +77,18 @@ def option_card() -> Card:
     return Card(CardKind.REPORT, "美股期权热度 · Cboe四市场", "CALL Top10")
 
 
+def holding_option_snapshot(at: datetime = NOW) -> HoldingOptionFlowSnapshot:
+    return HoldingOptionFlowSnapshot(
+        slot=scan_slot(at),
+        captured_at=at,
+        provider="alpaca-option-snapshots",
+        rows=(
+            HoldingOptionFlow("NVDA", 82_140, 61_900, 8_240, 3_110, "ok"),
+            HoldingOptionFlow("SKHY", 0, 0, None, None, "no_chain"),
+        ),
+    )
+
+
 def test_insert_and_query_day(ledger: SignalLedger) -> None:
     ledger.insert(sig(), pushed=True)
     ledger.insert(sig("QQQ"), pushed=False)
@@ -81,6 +96,38 @@ def test_insert_and_query_day(ledger: SignalLedger) -> None:
     assert len(rows) == 2
     assert {r["ticker"] for r in rows} == {"SPY", "QQQ"}
     assert [r["pushed"] for r in sorted(rows, key=lambda r: str(r["ticker"]))] == [0, 1]
+
+
+def test_company_profile_cache_uses_separate_success_and_failure_ttl(
+    ledger: SignalLedger,
+) -> None:
+    success = CompanyProfile(
+        "MSFT", NOW.date(), 3_800_000_000_000, "Information Technology",
+        "Software", "Microsoft", "Cloud", None, None, None, None, None, None,
+        "EQUITY", "test", "ok",
+    )
+    failure = CompanyProfile(
+        "FAIL", NOW.date(), None, None, None, None, None, None, None, None,
+        None, None, None, None, "test", "unavailable",
+    )
+    ledger.save_company_profiles((success, failure), fetched_at=NOW)
+
+    assert set(
+        ledger.cached_company_profiles(
+            ["MSFT", "FAIL"], now=NOW + timedelta(hours=5),
+            success_max_age=timedelta(days=7), failure_max_age=timedelta(hours=6),
+        )
+    ) == {"MSFT", "FAIL"}
+    assert set(
+        ledger.cached_company_profiles(
+            ["MSFT", "FAIL"], now=NOW + timedelta(hours=7),
+            success_max_age=timedelta(days=7), failure_max_age=timedelta(hours=6),
+        )
+    ) == {"MSFT"}
+    assert ledger.cached_company_profiles(
+        ["MSFT"], now=NOW + timedelta(days=8),
+        success_max_age=timedelta(days=7), failure_max_age=timedelta(hours=6),
+    ) == {}
 
 
 def test_ledger_usable_from_another_thread(ledger: SignalLedger) -> None:
@@ -446,6 +493,34 @@ def test_strategy_targets_are_separate_from_legacy_holdings(
     assert ledger.get_holdings("momentum_rotation") == ["SPY"]
 
 
+def test_forward_evaluation_schema_migrates_additively(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-forward.db"
+    con = sqlite3.connect(str(db_path))
+    con.execute(
+        "CREATE TABLE candidate_forward_evaluations ("
+        "report_kind TEXT NOT NULL, as_of TEXT NOT NULL, rank INTEGER NOT NULL,"
+        "ticker TEXT NOT NULL, horizon_sessions INTEGER NOT NULL,"
+        "entry_price REAL NOT NULL, exit_price REAL NOT NULL,"
+        "return_pct REAL NOT NULL, evaluated_at TEXT NOT NULL,"
+        "PRIMARY KEY(report_kind, as_of, rank, horizon_sessions))"
+    )
+    con.execute(
+        "INSERT INTO candidate_forward_evaluations VALUES "
+        "('DAILY_ACTION', '2026-01-02', 1, 'MEGA', 21, 100, 110, 0.1, ?) ",
+        (NOW.isoformat(),),
+    )
+    con.commit()
+    con.close()
+
+    ledger = SignalLedger(db_path)
+    row = ledger.candidate_forward_evaluations()[0]
+    assert ledger.schema_version() >= 15
+    assert row["ticker"] == "MEGA"
+    assert row["benchmark_ticker"] == "QQQ"
+    assert row["transaction_cost_bps"] == 0.0
+    assert row["max_favorable_excursion_pct"] is None
+
+
 def test_replace_account_state_keeps_only_latest_positions_and_orders(
     ledger: SignalLedger,
 ) -> None:
@@ -466,6 +541,33 @@ def test_replace_account_state_keeps_only_latest_positions_and_orders(
     orders = ledger.broker_orders()
     assert len(orders) == 1
     assert orders[0]["order_id"] == "order-1"
+
+
+def test_broker_fills_survive_later_account_snapshots(ledger: SignalLedger) -> None:
+    filled = BrokerOrder(
+        order_id="fill-1",
+        symbol="MU",
+        side="buy",
+        status="filled",
+        qty=Decimal("2"),
+        limit_price=Decimal("100"),
+        submitted_at=NOW,
+        filled_qty=Decimal("2"),
+        filled_avg_price=Decimal("99.50"),
+        filled_at=NOW + timedelta(minutes=1),
+    )
+    first = replace(
+        account_state(), open_orders=(), recent_orders=(filled,)
+    )
+    ledger.replace_account_state(first)
+    ledger.replace_account_state(account_state(NOW + timedelta(minutes=5)))
+
+    fills = ledger.broker_fills()
+    assert len(fills) == 1
+    assert fills[0]["source"] == "alpaca_paper"
+    assert fills[0]["order_id"] == "fill-1"
+    assert fills[0]["filled_qty"] == "2"
+    assert fills[0]["filled_at"] == (NOW + timedelta(minutes=1)).isoformat()
 
 
 def test_empty_ledger_has_no_account_snapshot(ledger: SignalLedger) -> None:
@@ -571,6 +673,34 @@ def test_quiet_option_scan_is_saved_without_outbox(ledger: SignalLedger) -> None
     assert ledger.save_option_flow_scan(snap, "quiet", None, now=NOW)
     assert ledger.latest_option_flow_snapshot(snap.session_date) == snap
     assert ledger.due_option_flow_alerts(NOW) == []
+
+
+def test_holding_option_snapshot_is_idempotent_and_reconstructable(
+    ledger: SignalLedger,
+) -> None:
+    snap = holding_option_snapshot()
+    assert ledger.save_holding_option_flow_snapshot(snap, now=NOW) is True
+    assert ledger.save_holding_option_flow_snapshot(snap, now=NOW) is False
+    assert ledger.latest_holding_option_flow_snapshot(snap.session_date) == snap
+
+
+def test_prune_holding_option_flow_removes_old_scans_and_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "signals.db"
+    ledger = SignalLedger(db_path)
+    old = holding_option_snapshot(NOW - timedelta(days=2))
+    boundary = holding_option_snapshot(NOW)
+    assert ledger.save_holding_option_flow_snapshot(old, now=old.captured_at)
+    assert ledger.save_holding_option_flow_snapshot(boundary, now=boundary.captured_at)
+
+    assert ledger.prune_holding_option_flow(NOW) == 1
+
+    with sqlite3.connect(db_path) as con:
+        assert con.execute(
+            "SELECT count(*) FROM holding_option_flow_scans"
+        ).fetchone() == (1,)
+        assert con.execute(
+            "SELECT count(*) FROM holding_option_flow_rows"
+        ).fetchone() == (2,)
 
 
 def test_expired_option_alert_is_cancelled_not_delivered(ledger: SignalLedger) -> None:

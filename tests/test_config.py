@@ -4,8 +4,10 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from quant_signal.config import (
+    DataQASettings,
     EnrichmentSettings,
     ExecutionPlanSettings,
+    ForwardEvaluationSettings,
     IndexUniverseSettings,
     NotifySettings,
     OptionFlowSettings,
@@ -45,6 +47,15 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.option_flow.top_n == 10
     assert s.option_flow.max_alerts_per_day == 4
     assert s.option_flow.retention_days == 120
+    assert s.holding_price_alert.enabled is True
+    assert s.holding_price_alert.stock_1m_pct == 0.015
+    assert s.holding_price_alert.etf_1m_pct == 0.010
+    assert s.holding_price_alert.cooldown_minutes == 30
+    assert s.holding_price_alert.cause_search.enabled is True
+    assert s.holding_price_alert.cause_search.command == "codex"
+    assert s.holding_price_alert.cause_search.model == "gpt-5.6-terra"
+    assert s.holding_price_alert.cause_search.reasoning_effort == "low"
+    assert s.holding_price_alert.cause_search.timeout_seconds == 60
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
 
@@ -61,14 +72,33 @@ def test_us_briefing_defaults_are_safe() -> None:
     assert settings.position_discipline.allow_financing_for_leveraged is False
 
 
+def test_data_qa_defaults_match_production_decision_coverage() -> None:
+    settings = DataQASettings()
+    assert settings.min_coverage == 0.98
+    assert settings.divergence_threshold == 0.005
+    assert settings.batch_size == 50
+    assert settings.lookback_days == 7
+
+
+def test_forward_evaluation_defaults_capture_multiple_horizons_and_costs() -> None:
+    settings = ForwardEvaluationSettings(horizons=(21, 5, 21), benchmark=" qqq ")
+    assert settings.horizons == (5, 21)
+    assert settings.benchmark == "QQQ"
+    assert settings.transaction_cost_bps_per_side == 5.0
+
+
 def test_repo_universe_uses_skhynix_ads_not_korean_listing() -> None:
     settings = load_settings()
     assert "000660.KS" not in settings.tickers
     assert "SKHY" in settings.tickers
     assert settings.tickers["SKHY"].currency == "USD"
+    assert "SKHY" in settings.execution_plan.risk_clusters["semiconductor_memory"]
+    assert settings.option_intel.wall_high_min_oi_each_side == 5_000
+    assert settings.option_intel.wall_medium_min_oi_each_side == 1_000
+    assert settings.option_intel.gamma_near_spot_pct == 0.02
     assert "KRW" not in settings.momentum_group_top_n
     assert settings.us_briefing.enabled is True
-    assert settings.us_briefing.delivery_mode == "shadow"
+    assert settings.us_briefing.delivery_mode == "live"
     assert settings.us_briefing.candidate_lanes.earnings_blackout_days == 2
     assert settings.us_briefing.candidate_lanes.max_candidates_per_cluster == 2
     assert set(settings.execution_plan.risk_clusters) >= {
@@ -251,7 +281,7 @@ def test_execution_plan_risk_clusters_are_unique_and_normalized() -> None:
         ("cooldown_minutes", 14),
         ("max_alerts_per_day", 1),
         ("intraday_expiry_minutes", 14),
-        ("min_venue_coverage", 0.99),
+        ("min_venue_coverage", 0.49),
         ("retention_days", 29),
     ],
 )
@@ -262,6 +292,24 @@ def test_option_flow_rejects_unsafe_policy(field: str, value: object) -> None:
 
 def test_option_flow_retention_defaults_to_120_days() -> None:
     assert OptionFlowSettings().retention_days == 120
+
+
+def test_option_flow_holding_monitor_defaults_and_limits() -> None:
+    settings = OptionFlowSettings()
+    assert settings.holding_monitor_enabled is True
+    assert settings.holding_max_expiry_days == 14
+    assert settings.holding_max_tickers == 12
+    assert settings.holding_min_delta_volume == 5_000
+    assert settings.holding_dominance_threshold == pytest.approx(0.20)
+
+    for field, value in (
+        ("holding_max_expiry_days", 0),
+        ("holding_max_tickers", 0),
+        ("holding_min_delta_volume", -1),
+        ("holding_dominance_threshold", 1.01),
+    ):
+        with pytest.raises(ValidationError, match=field):
+            OptionFlowSettings(**{field: value})
 
 
 def test_option_flow_requires_complete_unique_venues_when_enabled() -> None:
@@ -323,3 +371,34 @@ def test_option_flow_normalizes_roots_and_threshold_order() -> None:
     assert settings.etf_roots == ["SPY", "QQQ"]
     with pytest.raises(ValidationError, match="zero_dte_surge_volume"):
         OptionFlowSettings(surge_volume=20_000, zero_dte_surge_volume=19_999)
+
+
+def test_settings_reject_unknown_top_level_and_strategy_fields() -> None:
+    with pytest.raises(ValidationError, match="unexpected"):
+        Settings(unexpected=True)  # type: ignore[call-arg]
+    with pytest.raises(ValidationError, match="typo_days"):
+        Settings(strategies={"momentum_rotation": {"typo_days": 60}})
+
+
+def test_strategy_settings_validate_cross_field_windows() -> None:
+    with pytest.raises(ValidationError, match="fast window"):
+        Settings(strategies={"macd_cross": {"fast": 30, "slow": 20}})
+
+
+def test_proxy_and_backup_mirror_are_loaded_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FEISHU_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("BACKUP_MIRROR_DIR", str(tmp_path / "mirror"))
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text("data_source: yfinance\nstrategies: {}\n", encoding="utf-8")
+
+    settings = load_settings(cfg)
+
+    assert settings.feishu_proxy == "http://127.0.0.1:7890"
+    assert settings.backup.mirror_dir == str(tmp_path / "mirror")
+
+
+def test_feishu_proxy_rejects_invalid_url() -> None:
+    with pytest.raises(ValidationError, match="FEISHU_PROXY"):
+        Settings(feishu_proxy="file:///tmp/socket")

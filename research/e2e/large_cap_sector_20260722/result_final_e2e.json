@@ -1,0 +1,15 @@
+{
+  "pipeline_result": true,
+  "status": "SHADOWED",
+  "candidates": 4,
+  "company_rationale_count": 4,
+  "company_rationale_tickers": [
+    "APP",
+    "MU",
+    "SNDK",
+    "WDC"
+  ],
+  "all_large_cap": true,
+  "max_per_sector": 3,
+  "feishu_cards_sent": 0
+}

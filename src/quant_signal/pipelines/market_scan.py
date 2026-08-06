@@ -178,7 +178,7 @@ def _execution_levels(bars: pd.DataFrame) -> dict[str, object]:
     return output
 
 
-def _run_index_scan(engine: Engine, now: datetime) -> None:
+def _run_index_scan(engine: Engine, now: datetime) -> bool:
     market_as_of = previous_trading_day(
         now.astimezone(ZoneInfo("America/New_York")).date()
     )
@@ -187,18 +187,18 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
     if provider is None or sip_fetcher is None:
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="missing_index_or_sip_provider")
-        return
+        return False
     try:
         snapshot = provider.load(now)
     except Exception as error:  # noqa: BLE001
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="universe_unavailable", error=str(error))
-        return
+        return False
     symbols = list(snapshot.symbols)
     if not symbols:
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="empty_index_universe")
-        return
+        return False
     cached_before = _cached_scan_window(engine, symbols, market_as_of)
     counts = (
         cached_before.groupby(level="ticker").size().to_dict()
@@ -234,7 +234,7 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
         # 超时 fail closed: 已写入的 bar 保留, 但当日不产生候选
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.warning("market_scan.index_skip", reason="deadline_exceeded")
-        return
+        return False
     bars = _cached_scan_window(engine, symbols, market_as_of)
     validation = validate_scan_bars(bars, symbols, market_as_of)
     config = engine.settings.index_universe
@@ -246,7 +246,7 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
             required=config.min_coverage,
             rejected=dict(validation.rejected),
         )
-        return
+        return False
     liquid = liquidity_filter(
         validation.bars,
         min_dollar_volume=config.min_dollar_volume,
@@ -255,7 +255,7 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
     if not liquid:
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.info("market_scan.index_skip", reason="no_liquid_candidates")
-        return
+        return True
     liquid_bars = validation.bars.loc[
         validation.bars.index.get_level_values("ticker").isin(liquid)
     ]
@@ -264,7 +264,7 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
     if not top:
         engine.ledger.replace_scan_candidates(now.date(), [], as_of=market_as_of)
         log.info("market_scan.index_skip", reason="no_scores")
-        return
+        return True
     candidate_rows: list[Mapping[str, object]] = []
     extras: list[dict[str, object]] = []
     for rank, result in enumerate(top, start=1):
@@ -327,17 +327,18 @@ def _run_index_scan(engine: Engine, now: datetime) -> None:
         persisted=len(top),
         top1=first.ticker,
     )
+    return delivered if _standalone_card_enabled(engine) else True
 
 
-def _run_legacy_scan(engine: Engine, now: datetime) -> None:
+def _run_legacy_scan(engine: Engine, now: datetime) -> bool:
     lister = getattr(engine.source, "list_active_symbols", None)
     if lister is None:
         log.info("market_scan.skip", reason="source_without_asset_list")
-        return
+        return False
     symbols = [s for s in lister() if s not in engine.settings.international_tickers]
     if not symbols:
         log.info("market_scan.skip", reason="no_symbols")
-        return
+        return True
 
     daily_source, source_name = _scan_daily_source(engine)
     bars5 = _chunked_daily(
@@ -346,14 +347,14 @@ def _run_legacy_scan(engine: Engine, now: datetime) -> None:
     liquid = liquidity_filter(bars5, top_k=TOP_LIQUID)
     if not liquid:
         log.info("market_scan.skip", reason="no_liquid_candidates")
-        return
+        return True
     bars = _chunked_daily(
         daily_source, liquid, (now - timedelta(days=210)).date(), now.date()
     )
     results = scan_scores(bars)
     if not results:
         log.info("market_scan.skip", reason="no_scores")
-        return
+        return True
 
     top = results[:5]
     first = top[0]
@@ -403,10 +404,10 @@ def _run_legacy_scan(engine: Engine, now: datetime) -> None:
         scored=len(results),
         top1=first.ticker,
     )
+    return delivered if _standalone_card_enabled(engine) else True
 
 
-def run(engine: Engine, now: datetime) -> None:
+def run(engine: Engine, now: datetime) -> bool:
     if engine.settings.index_universe.enabled:
-        _run_index_scan(engine, now)
-        return
-    _run_legacy_scan(engine, now)
+        return _run_index_scan(engine, now)
+    return _run_legacy_scan(engine, now)

@@ -10,11 +10,17 @@ import structlog
 # 只遮 token 部分, 保留 host 便于排障
 _WEBHOOK_RE = re.compile(r"(https://open\.feishu\.cn/open-apis/bot/v\d+/hook/)[\w-]+")
 _APCA_RE = re.compile(r"(APCA-API-(?:KEY-ID|SECRET-KEY)\s*[:=]\s*)\S+")
+_NAMED_SECRET_RE = re.compile(
+    r"((?:ALPACA_KEY|ALPACA_SECRET|FEISHU_APP_SECRET|FEISHU_WEBHOOK)"
+    r"\s*[:=]\s*)[^\s,;]+",
+    re.IGNORECASE,
+)
 
 
-def _redact_text(text: str) -> str:
+def redact_text(text: str) -> str:
     text = _WEBHOOK_RE.sub(r"\1***", text)
-    return _APCA_RE.sub(r"\1***", text)
+    text = _APCA_RE.sub(r"\1***", text)
+    return _NAMED_SECRET_RE.sub(r"\1***", text)
 
 
 def redact_secrets(
@@ -23,7 +29,7 @@ def redact_secrets(
     """structlog processor: 日志中的 webhook token 与 Alpaca 凭据一律脱敏。"""
     for key, value in event_dict.items():
         if isinstance(value, str):
-            event_dict[key] = _redact_text(value)
+            event_dict[key] = redact_text(value)
     return event_dict
 
 

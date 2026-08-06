@@ -7,12 +7,23 @@ from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 from quant_signal.notifier.base import Card, CardKind, CardSection
+from quant_signal.notifier.briefing_format import (
+    BLOCK_REASON_NAMES_ZH as _BLOCK_REASON_NAMES_ZH,
+    briefing_float as _briefing_float,
+    briefing_number as _briefing_number,
+    briefing_percent as _briefing_percent,
+    industry_name_zh as _industry_name_zh,
+    market_cap_zh as _market_cap_zh,
+    sector_name_zh as _sector_name_zh,
+    usd_yi as _usd_yi,
+)
 from quant_signal.strategies.base import Direction, Signal
 
 if TYPE_CHECKING:
     from quant_signal.account import AccountState
     from quant_signal.execution import ExecutionPlan
     from quant_signal.options_flow import (
+        HoldingOptionFlowSnapshot,
         OptionContractVolume,
         OptionFlowChange,
         OptionFlowSnapshot,
@@ -35,13 +46,20 @@ def option_flow_card(
     display_dedupe: bool = True,
     display_sort_by_expiry: bool = True,
     held_underlyings: frozenset[str] = frozenset(),
+    etf_underlyings: frozenset[str] = frozenset(),
+    holding_snapshot: "HoldingOptionFlowSnapshot | None" = None,
 ) -> Card:
-    """Compact research card for Cboe-visible Call/Put activity."""
-    from quant_signal.options_flow import display_top_by_side, top_by_side
+    """Compact underlying-level view of Cboe-visible Call/Put activity."""
+    from quant_signal.options_flow import aggregate_underlying_flows
+
+    # Retained for callers/config compatibility; the merged leaderboard no
+    # longer performs one-contract-per-side display selection.
+    del display_dedupe, display_sort_by_expiry
 
     phase_names = {
         "baseline": "首次榜",
         "change": "盘中异动",
+        "holding_change": "持仓异动",
         "close": "收盘榜",
         "query": "即时查询",
     }
@@ -94,7 +112,7 @@ def option_flow_card(
                 if premium is not None:
                     context.append(f"估算权利金 {money(premium)}")
             suffix = f"｜{'｜'.join(context)}" if context else ""
-            marker = "C" if item.side == "call" else "P"
+            side_label = "Call" if item.side == "call" else "Put"
             delta_label = (
                 f"+{change.volume_delta:,}/15m"
                 if change.volume_delta is not None
@@ -102,7 +120,8 @@ def option_flow_card(
             )
             held_mark = "📌 " if item.underlying in held_underlyings else ""
             focus_lines.append(
-                f"{held_mark}{item.underlying} {item.expiration:%m/%d} {strike_text(item.strike)}{marker}｜"
+                f"{held_mark}{item.underlying} {item.expiration:%m/%d} "
+                f"{strike_text(item.strike)} {side_label}｜"
                 f"{labels}｜{prior_rank}→#{item.rank}｜"
                 f"{delta_label}｜分数 {change.score}{suffix}"
             )
@@ -110,57 +129,109 @@ def option_flow_card(
         focus_lines.append("暂无可比较的实质变化；保留原始Top10作为市场温度。")
     focus = CardSection("\n".join(focus_lines))
 
-    prior_by_symbol = (
-        {item.contract_symbol: item for item in previous.rows}
-        if previous is not None
-        else {}
-    )
-
-    def rank_section(side: str) -> CardSection:
-        heading = "CALL Top10" if side == "call" else "PUT Top10"
-        marker = "C" if side == "call" else "P"
-        lines = [f"**{heading}**"]
-        raw_top10 = top_by_side(snapshot, side, 10)  # type: ignore[arg-type]
-        siblings = Counter(item.underlying for item in raw_top10)
-        shown = display_top_by_side(
-            snapshot,
-            side,  # type: ignore[arg-type]
-            10,
-            dedupe=display_dedupe,
-            sort_by_expiry=display_sort_by_expiry,
-        )
-        for item in shown:
-            old = prior_by_symbol.get(item.contract_symbol)
-            delta = max(item.volume - old.volume, 0) if old is not None else None
-            delta_text = f"+{delta:,}/15m" if delta is not None else "首次可见"
-            dte = (item.expiration - snapshot.session_date).days
-            dte_text = "0DTE" if dte == 0 else f"{dte}DTE"
-            folded = siblings.get(item.underlying, 0) - 1 if display_dedupe else 0
-            fold_text = f" (+{folded})" if folded > 0 else ""
-            held_mark = "📌 " if item.underlying in held_underlyings else ""
-            lines.append(
-                f"#{item.rank} {held_mark}{item.underlying} {item.expiration:%m/%d} "
-                f"{strike_text(item.strike)}{marker} · {item.volume:,}张 · "
-                f"{delta_text} · {dte_text}{fold_text}"
+    holding_section: CardSection | None = None
+    if holding_snapshot is not None:
+        holding_lines = ["**📌 我的持仓期权**"]
+        if not holding_snapshot.rows:
+            holding_lines.append("当前没有可监控的真实持仓。")
+        for holding_flow in holding_snapshot.rows:
+            if holding_flow.data_status in ("no_chain", "unavailable"):
+                holding_lines.append(
+                    f"{holding_flow.underlying} · {holding_flow.structure_label}"
+                )
+                continue
+            holding_lines.append(holding_flow.underlying)
+            holding_lines.append(
+                f"Call {holding_flow.call_volume:,} / Put {holding_flow.put_volume:,} "
+                f"· 总量 {holding_flow.total_volume:,}"
             )
-        return CardSection("\n".join(lines))
+            holding_ratio = holding_flow.call_put_ratio
+            ratio_text = "∞" if holding_ratio == float("inf") else (
+                f"{holding_ratio:.2f}" if holding_ratio is not None else "-"
+            )
+            dominance = (
+                f"{holding_flow.dominance:.0%}"
+                if holding_flow.dominance is not None
+                else "-"
+            )
+            direction = (
+                "Call占优" if holding_flow.call_volume > holding_flow.put_volume
+                else "Put占优" if holding_flow.put_volume > holding_flow.call_volume
+                else "Call/Put均衡"
+            )
+            holding_lines.append(
+                f"Call/Put {ratio_text} · {direction} {dominance}"
+            )
+            if holding_flow.data_status == "reset":
+                holding_lines.append("15分钟增量不可比 · 累计量已重置")
+            elif holding_flow.call_delta is None or holding_flow.put_delta is None:
+                holding_lines.append("首次可见，无15分钟可比增量")
+            else:
+                holding_lines.append(
+                    f"15分钟增量 Call +{holding_flow.call_delta:,} / "
+                    f"Put +{holding_flow.put_delta:,}"
+                )
+        holding_section = CardSection("\n".join(holding_lines))
+
+    def delta_text(value: int | None, partial: bool) -> str:
+        if value is None:
+            return "不可比"
+        suffix = "（部分可比）" if partial else ""
+        return f"+{value:,}{suffix}"
+
+    flows = aggregate_underlying_flows(snapshot, previous, top_n=10)
+    rank_lines = ["**标的热度 Top10**"]
+    for rank, flow in enumerate(flows, start=1):
+        held_mark = "📌 " if flow.underlying in held_underlyings else ""
+        asset_type = " · ETF" if flow.underlying in etf_underlyings else ""
+        rank_lines.append(f"#{rank} {held_mark}{flow.underlying}{asset_type}")
+        rank_lines.append(
+            f"Call {flow.call_volume:,} / Put {flow.put_volume:,} "
+            f"· 总量 {flow.total_volume:,}"
+        )
+        call_put_ratio = flow.call_put_ratio
+        ratio_text = (
+            f"{call_put_ratio:.2f}" if call_put_ratio is not None else "-"
+        )
+        dominance_text = (
+            f" {flow.dominance:.0%}" if flow.dominance is not None else ""
+        )
+        rank_lines.append(
+            f"可见量 Call/Put 比 {ratio_text} · "
+            f"{flow.structure_label}{dominance_text}"
+        )
+        if previous is None:
+            rank_lines.append("首次可见，无 15 分钟可比增量")
+        else:
+            partial = flow.call_delta_partial or flow.put_delta_partial
+            prefix = "15 分钟已知增量" if partial else "15 分钟增量"
+            rank_lines.append(
+                f"{prefix} Call "
+                f"{delta_text(flow.known_call_delta, flow.call_delta_partial)} / "
+                f"Put {delta_text(flow.known_put_delta, flow.put_delta_partial)}"
+            )
+    ranking = CardSection("\n".join(rank_lines))
 
     boundary = CardSection(
         "**解释边界**\n"
-        "Call成交不等于看涨，Put成交不等于看跌；可能是平仓、备兑、保护、价差或做市对冲。\n"
+        "可见量来自 Cboe 四市场榜单样本，不是全 OPRA 总量。\n"
+        "Call/Put 占优只表示成交量结构；Call成交不等于看涨，"
+        "Put成交不等于看跌，也不能证明新开仓或主动买卖。\n"
         "Volume/OI使用前一结算日OI，不能证明新开仓；Indicative报价不能用于判断主动买卖。\n"
         "> 期权成交热度研究提醒，不自动下单，仅供观察，不构成投资建议。"
     )
-    sections = (
-        identity,
-        focus,
-        rank_section("call"),
-        rank_section("put"),
-        boundary,
+    sections = tuple(
+        section
+        for section in (identity, focus, holding_section, ranking, boundary)
+        if section is not None
     )
     body = "\n\n".join(section.content_md for section in sections)
     return Card(
-        kind=CardKind.SIGNAL if phase == "change" else CardKind.REPORT,
+        kind=(
+            CardKind.SIGNAL
+            if phase in ("change", "holding_change")
+            else CardKind.REPORT
+        ),
         title="🔥 美股期权热度 · Cboe四市场",
         body_md=body,
         sections=sections,
@@ -181,6 +252,34 @@ def option_intel_card(
     def strike_text(value: Decimal) -> str:
         return format(value.normalize(), "f")
 
+    technical_labels = {
+        "OVERSOLD_AT_LOWER_BAND": "超卖并触及布林下轨",
+        "MEAN_REVERSION_WATCH": "均值回归观察",
+        "NEUTRAL": "中性",
+        "DOWNTREND_CONTINUATION_RISK": "下跌中继风险",
+        "DATA_INSUFFICIENT": "历史不足",
+    }
+    reliability_labels = {"HIGH": "高", "MEDIUM": "中", "LOW": "低"}
+    conclusion_labels = {
+        "TACTICAL_REBOUND": "战术反弹",
+        "WAIT_REVERSAL_CONFIRMATION": "等待止跌确认",
+        "PUT_WALL_BREAK_RISK": "Put墙破位风险",
+        "FALLING_KNIFE_RISK": "下跌中继，避免抄底",
+        "TECHNICAL_ONLY": "仅技术面观察",
+        "DATA_INSUFFICIENT": "数据不足",
+    }
+    opex_labels = {
+        "NORMAL": "常规",
+        "OPEX_WINDOW": "临近窗口",
+        "OPEX_DAY": "到期日",
+        "POST_OPEX_RESET": "到期后重构",
+    }
+
+    def price(value: object) -> str:
+        if not isinstance(value, (str, int, float, Decimal)):
+            return "-"
+        return f"{float(value):,.2f}"
+
     sections: list[CardSection] = []
     for intel in intels:
         header = f"**{intel.symbol}** ${float(intel.spot):,.2f}"
@@ -189,10 +288,8 @@ def option_intel_card(
             if days >= 0:
                 header += f" · 📅 {days}天后财报({intel.earnings_date:%m-%d})"
         if intel.data_note is not None:
-            sections.append(CardSection(f"{header} · {intel.data_note}"))
-            continue
-
-        if intel.expected_move_pct is not None and intel.expected_move_expiry is not None:
+            move = f"期权数据: {intel.data_note}"
+        elif intel.expected_move_pct is not None and intel.expected_move_expiry is not None:
             move = (
                 f"预期波动: ±{intel.expected_move_pct:.1%} "
                 f"到 {intel.expected_move_expiry:%m-%d}"
@@ -228,9 +325,56 @@ def option_intel_card(
         else:
             oi_line = "大OI: -"
 
-        sections.append(
-            CardSection("\n".join((header, move, iv_line, pc_line, oi_line)))
-        )
+        lines = [header, move]
+        if intel.data_note is None:
+            lines.extend((f"{iv_line}｜{pc_line}", oi_line))
+        tactical = intel.tactical
+        if tactical is not None:
+            technical = tactical.technical
+            options = tactical.options
+            partial = " · 本周进行中" if technical.latest_week_partial else ""
+            reversal = (
+                "已止跌确认"
+                if technical.reversal_confirmed
+                else "未止跌确认"
+                if technical.reversal_confirmed is not None
+                else "止跌确认不可用"
+            )
+            lines.append(
+                f"周线 RSI {price(technical.weekly_rsi)} · "
+                f"布林下轨 {price(technical.bollinger_lower)} / "
+                f"中轨 {price(technical.bollinger_mid)} · "
+                f"{technical_labels[technical.state]} · {reversal}{partial}"
+            )
+            lines.append(
+                f"Put墙 {price(options.put_wall)} / "
+                f"Call墙 {price(options.call_wall)} / "
+                f"Max Pain {price(options.max_pain)} · "
+                f"可信度{reliability_labels[options.reliability]}"
+            )
+            gamma = (
+                f"{options.gamma_pin_score:.0%}"
+                if options.gamma_pin_score is not None
+                else "-"
+            )
+            lines.append(
+                f"Gamma集中度 {gamma} · 做市商净Gamma方向不可由公开OI判定｜"
+                f"月度OPEX {opex_labels[tactical.opex.state]}"
+            )
+            targets = " / ".join(
+                value
+                for value in (
+                    price(tactical.target_1) if tactical.target_1 is not None else "",
+                    price(tactical.target_2) if tactical.target_2 is not None else "",
+                )
+                if value
+            ) or "-"
+            lines.append(
+                f"结论：{conclusion_labels[tactical.conclusion]}｜"
+                f"失效参考 {price(tactical.invalidation_price)}｜"
+                f"目标 {targets}｜{tactical.holding_note}"
+            )
+        sections.append(CardSection("\n".join(lines)))
 
     boundary = CardSection(
         "**解释边界**\n"
@@ -246,6 +390,125 @@ def option_intel_card(
         title=f"🧭 持仓期权情报 · {session:%Y-%m-%d}",
         body_md=body,
         sections=all_sections,
+    )
+
+
+def holding_price_alert_card(signal: Signal) -> Card:
+    """真实持仓异动卡：只呈现可核验的价格/成交量观测，不转译成交易指令。"""
+
+    extra = signal.extra or {}
+
+    def percent(value: object) -> str:
+        return f"{float(value):+.2%}" if isinstance(value, (int, float)) else "-"
+
+    def price(value: object) -> str:
+        return f"${float(value):,.2f}" if isinstance(value, (int, float)) else "-"
+
+    raw_severity = extra.get("severity", 1)
+    severity = int(raw_severity) if isinstance(raw_severity, (int, float)) else 1
+    direction = "上涨" if signal.direction == Direction.BUY else "下跌"
+    observed_raw = extra.get("observed_at")
+    try:
+        observed = datetime.fromisoformat(str(observed_raw)).astimezone(_ET).strftime(
+            "%m/%d %H:%M:%S ET"
+        )
+    except ValueError:
+        observed = str(observed_raw or "-")
+    volume_ratio = extra.get("volume_ratio")
+    volume_text = (
+        f"{float(volume_ratio):.1f}倍" if isinstance(volume_ratio, (int, float)) else "-"
+    )
+    quantity = extra.get("quantity")
+    quantity_text = f"{float(quantity):g}" if isinstance(quantity, (int, float)) else "-"
+
+    raw_move = extra.get("move_pct", 0.0)
+    move = float(raw_move) if isinstance(raw_move, (int, float)) else 0.0
+    identity = CardSection(
+        "**异动摘要**\n"
+        f"{signal.ticker} · {extra.get('asset_type', '个股')} · {extra.get('window', '-')}"
+        f"{direction} {abs(move):.2%}\n"
+        f"现价 {price(signal.price)} · 强度 {severity}/3 · "
+        f"自适应门槛 {percent(extra.get('threshold_pct'))}"
+    )
+    context = CardSection(
+        "**实时窗口**\n"
+        f"1分钟 {percent(extra.get('one_minute_pct'))} · "
+        f"5分钟 {percent(extra.get('five_minute_pct'))} · "
+        f"15分钟 {percent(extra.get('fifteen_minute_pct'))}\n"
+        f"当日 {percent(extra.get('session_pct'))} · 末根分钟成交量/近20根中位数 {volume_text}"
+    )
+    cause_section: CardSection | None = None
+    raw_cause = extra.get("price_move_cause")
+    if isinstance(raw_cause, Mapping):
+        category_labels = {
+            "company_news": "公司消息",
+            "sector": "行业联动",
+            "macro": "宏观/市场",
+            "technical": "技术/订单流",
+            "unconfirmed": "原因未确认",
+        }
+        confidence_labels = {"high": "高", "medium": "中", "low": "低"}
+        status_labels = {
+            "ok": "搜索完成",
+            "no_evidence": "未找到可核验证据",
+            "disabled": "功能未启用",
+            "timeout": "搜索超时",
+            "failed": "搜索失败",
+            "invalid_output": "返回结果未通过校验",
+        }
+        category = category_labels.get(
+            str(raw_cause.get("category", "unconfirmed")), "原因未确认"
+        )
+        confidence = confidence_labels.get(
+            str(raw_cause.get("confidence", "low")), "低"
+        )
+        status = status_labels.get(
+            str(raw_cause.get("search_status", "invalid_output")), "查因异常"
+        )
+        cause_lines = [
+            "**Codex实时查因**",
+            f"{category} · 置信度{confidence} · {status}",
+            str(raw_cause.get("summary") or "暂无可核验原因。"),
+        ]
+        raw_evidence = raw_cause.get("evidence")
+        if isinstance(raw_evidence, list):
+            for index, item in enumerate(raw_evidence[:3], start=1):
+                if not isinstance(item, Mapping):
+                    continue
+                source = str(item.get("source") or "来源")
+                title = str(item.get("title") or "查看原文")
+                url = str(item.get("url") or "")
+                published = str(item.get("published_at") or "时间未标注")
+                if url.startswith(("https://", "http://")):
+                    cause_lines.append(
+                        f"• [来源{index}]({url}) · {source} · {title} · {published}"
+                    )
+        elapsed = raw_cause.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)):
+            cause_lines.append(f"搜索耗时 {float(elapsed):.1f}秒")
+        cause_lines.append("相关性不等于因果；结论会随新消息更新。")
+        cause_section = CardSection("\n".join(cause_lines))
+    holding = CardSection(
+        "**持仓语境**\n"
+        f"数量 {quantity_text} · 成本 {price(extra.get('avg_entry_price'))} · "
+        f"相对成本 {percent(extra.get('pnl_from_cost_pct'))}\n"
+        "本提醒用于实时观察，不代表自动买入、卖出或调仓。"
+    )
+    data = CardSection(
+        "**数据身份**\n"
+        f"{extra.get('data_feed', 'unknown')} · {observed}\n"
+        "分钟线可能因行情源权限、延迟或修正而变化。"
+    )
+    sections = tuple(
+        section
+        for section in (identity, context, cause_section, holding, data)
+        if section is not None
+    )
+    return Card(
+        kind=CardKind.ALERT,
+        title=f"⚡ 持仓股价异动 · {signal.ticker} · {severity}级",
+        body_md="\n\n".join(section.content_md for section in sections),
+        sections=sections,
     )
 
 
@@ -283,29 +546,6 @@ _PAPER_FOOTER = "> PAPER 模拟账户建议，仅供观察，不构成投资建�
 _ADVISORY_FOOTER = "> 观察模式，不自动下单。仅供观察，不构成投资建议。"
 
 
-def _briefing_float(value: object) -> float | None:
-    if not isinstance(value, (str, int, float, Decimal)):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _briefing_number(value: object, digits: int = 2) -> str:
-    number = _briefing_float(value)
-    if number is None:
-        return "-"
-    return f"{number:.{digits}f}"
-
-
-def _briefing_percent(value: object) -> str:
-    number = _briefing_float(value)
-    if number is None:
-        return "-"
-    return f"{number * 100:.0f}%"
-
-
 def us_briefing_card(
     *,
     report_kind: str,
@@ -317,6 +557,8 @@ def us_briefing_card(
     observations: Sequence[Mapping[str, object]],
     data_quality: Sequence[str],
     ai_summary: str | None = None,
+    company_rationales: Mapping[str, str] | None = None,
+    news_lookback_days: int = 7,
 ) -> Card:
     """Render a mobile-first US briefing without wide Markdown tables."""
     regime_code = str(regime.get("regime", "UNKNOWN"))
@@ -327,7 +569,11 @@ def us_briefing_card(
         "RISK_OFF": "风险关闭",
         "UNKNOWN": "数据不足",
     }
-    kind_names = {"US_CLOSE": "美股收盘简报", "ASIA_CONFIRM": "亚洲确认与美股计划"}
+    kind_names = {
+        "US_CLOSE": "美股收盘简报",
+        "ASIA_CONFIRM": "亚洲确认与美股计划",
+        "DAILY_ACTION": "今日美股行动简报",
+    }
     reasons = regime.get("reasons")
     reason_text = "、".join(str(item) for item in reasons) if isinstance(reasons, list) else "-"
     sections: list[CardSection] = [
@@ -344,28 +590,84 @@ def us_briefing_card(
         "TREND_PULLBACK": "强势回调",
         "RANGE_REVERSION": "震荡修复",
     }
-    lane_lines = ["**纳指100候选**"]
+    sector_grouped = any(
+        candidate.get("candidate_group") or candidate.get("gics_sector")
+        for candidate in candidates
+    )
+    lane_lines = [
+        "**行业分组候选 · 市值门槛 ≥ 1000亿美元**"
+        if sector_grouped
+        else "**纳指100候选**"
+    ]
     if not candidates:
         lane_lines.append("当前状态没有满足条件的新多仓；不为凑榜而交易。")
+    current_sector: str | None = None
     for candidate in candidates:
         ticker = str(candidate.get("ticker", "-"))
+        sector = str(
+            candidate.get("candidate_group") or candidate.get("gics_sector", "")
+        )
+        if sector_grouped and sector != current_sector:
+            current_sector = sector
+            lane_lines.append(f"\n**{_sector_name_zh(sector)}**")
         lane = lane_names.get(
             str(candidate.get("lane", "")), str(candidate.get("lane", "-"))
         )
         quantity = candidate.get("suggested_qty")
         block_reason = candidate.get("block_reason")
-        sizing = (
-            f"｜建议 {_briefing_number(quantity, 0)} 股 / "
-            f"${_briefing_number(candidate.get('suggested_notional'))}"
-            if quantity is not None
-            else f"｜股数不可用（{block_reason or '账户数据不足'}）"
-        )
-        lane_lines.append(
-            f"• {ticker}｜{lane}｜买入 {_briefing_number(candidate.get('entry_low'))}"
-            f"–{_briefing_number(candidate.get('entry_high'))}｜失效 "
-            f"{_briefing_number(candidate.get('invalidation_price'))}｜目标 "
-            f"{_briefing_number(candidate.get('target_price'))}{sizing}"
-        )
+        company = str(candidate.get("company_name") or "")
+        label = f"{ticker} · {company}" if company else ticker
+        if block_reason:
+            reason_zh = _BLOCK_REASON_NAMES_ZH.get(str(block_reason), str(block_reason))
+            lane_lines.append(f"• {label}｜{lane}｜仅观察：{reason_zh}")
+        else:
+            sizing = (
+                f"｜建议 {_briefing_number(quantity, 0)} 股 / "
+                f"${_briefing_number(candidate.get('suggested_notional'))}"
+                if quantity is not None
+                else "｜股数不可用（账户数据不足）"
+            )
+            lane_lines.append(
+                f"• {label}｜{lane}｜买入 {_briefing_number(candidate.get('entry_low'))}"
+                f"–{_briefing_number(candidate.get('entry_high'))}｜失效 "
+                f"{_briefing_number(candidate.get('invalidation_price'))}{sizing}"
+            )
+            raw_targets = candidate.get("profit_targets")
+            if isinstance(raw_targets, (list, tuple)) and len(raw_targets) == 3:
+                lane_lines.append(
+                    f"  止盈1 {_briefing_number(raw_targets[0])} · "
+                    f"止盈2 {_briefing_number(raw_targets[1])} · "
+                    f"止盈3 {_briefing_number(raw_targets[2])} · "
+                    f"建议第{candidate.get('recommended_target_stage', 1)}档"
+                )
+                lane_lines.append(
+                    "  近5日买盘资金估算 "
+                    f"{_usd_yi(candidate.get('recent_buying_notional'))} · "
+                    f"强度{candidate.get('buying_pressure_label') or '-'} "
+                    f"{_briefing_percent(candidate.get('buying_pressure_score'))}"
+                )
+                if candidate.get("nearby_resistance") is not None:
+                    lane_lines.append(
+                        f"  近期阻力 {_briefing_number(candidate.get('nearby_resistance'))}"
+                    )
+            else:
+                lane_lines.append(
+                    f"  单一止盈参考 {_briefing_number(candidate.get('target_price'))}"
+                )
+        if sector_grouped:
+            lane_lines.append(
+                f"  策略 #{candidate.get('sector_strategy_rank', '-')} · "
+                f"合格同行市值 #{candidate.get('sector_market_cap_rank', '-')} · "
+                f"市值 {_market_cap_zh(candidate.get('market_cap_usd'))}"
+            )
+            lane_lines.append(
+                f"  {_industry_name_zh(candidate.get('industry'))} · "
+                f"画像 {candidate.get('profile_as_of') or '-'} · "
+                f"新闻窗口近{news_lookback_days}日"
+            )
+            rationale = (company_rationales or {}).get(ticker)
+            if rationale:
+                lane_lines.extend(f"  {line}" for line in rationale.splitlines())
     sections.append(CardSection("\n".join(lane_lines)))
     discipline_lines = ["**持仓纪律**"]
     if not discipline:
@@ -416,6 +718,11 @@ def us_briefing_card(
         "EARNINGS_WINDOW": "财报窗口",
         "CLUSTER_CAP": "主题集中限制",
         "INVALID_VOLATILITY": "波动数据异常",
+        "PROFILE_UNAVAILABLE": "公司画像不可用",
+        "NON_EQUITY": "非公司股票",
+        "MARKET_CAP_FILTER": "市值低于1000亿美元",
+        "SECTOR_CAP": "行业Top3限制",
+        "SECTOR_NOT_SELECTED": "行业数量限制",
     }
     observation_counts = Counter(
         str(item.get("reason", "仅观察")) for item in observations
@@ -458,6 +765,95 @@ def us_briefing_card(
         body_md=body,
         sections=tuple(sections),
     )
+
+
+def us_briefing_cards(
+    *,
+    report_kind: str,
+    as_of: str,
+    regime: Mapping[str, object],
+    candidates: Sequence[Mapping[str, object]],
+    discipline: Sequence[Mapping[str, object]],
+    portfolio_risk: Mapping[str, object],
+    observations: Sequence[Mapping[str, object]],
+    data_quality: Sequence[str],
+    ai_summary: str | None = None,
+    company_rationales: Mapping[str, str] | None = None,
+    news_lookback_days: int = 7,
+) -> tuple[Card, ...]:
+    """Split the daily action summary from verbose per-sector candidates."""
+    summary = us_briefing_card(
+        report_kind=report_kind,
+        as_of=as_of,
+        regime=regime,
+        candidates=(),
+        discipline=discipline,
+        portfolio_risk=portfolio_risk,
+        observations=observations,
+        data_quality=data_quality,
+        ai_summary=ai_summary,
+        company_rationales=None,
+        news_lookback_days=news_lookback_days,
+    )
+    summary_sections = tuple(
+        section
+        for section in summary.sections
+        if not section.content_md.startswith(("**行业分组候选", "**纳指100候选"))
+    )
+    summary = Card(
+        kind=summary.kind,
+        title=summary.title,
+        body_md="\n\n".join(section.content_md for section in summary_sections),
+        url=summary.url,
+        sections=summary_sections,
+    )
+
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    for candidate in candidates:
+        group = str(
+            candidate.get("candidate_group")
+            or candidate.get("gics_sector")
+            or "纳指100"
+        )
+        grouped.setdefault(group, []).append(candidate)
+
+    output: list[Card] = [summary]
+    for group, rows in grouped.items():
+        rationales = {
+            str(row.get("ticker")): (company_rationales or {})[str(row.get("ticker"))]
+            for row in rows
+            if str(row.get("ticker")) in (company_rationales or {})
+        }
+        rendered = us_briefing_card(
+            report_kind=report_kind,
+            as_of=as_of,
+            regime=regime,
+            candidates=rows,
+            discipline=(),
+            portfolio_risk={},
+            observations=(),
+            data_quality=(),
+            company_rationales=rationales,
+            news_lookback_days=news_lookback_days,
+        )
+        candidate_section = next(
+            section
+            for section in rendered.sections
+            if section.content_md.startswith(("**行业分组候选", "**纳指100候选"))
+        )
+        boundary = CardSection(
+            "> 买盘资金为日线 OHLCV 估算，不是逐笔净流入；系统不自动下单。"
+        )
+        sections = (candidate_section, boundary)
+        output.append(
+            Card(
+                kind=CardKind.REPORT,
+                title=f"📈 {_sector_name_zh(group)}候选 · {as_of}",
+                body_md="\n\n".join(section.content_md for section in sections),
+                sections=sections,
+            )
+        )
+    return tuple(output)
 
 
 def _fmt_qty(value: object) -> str:

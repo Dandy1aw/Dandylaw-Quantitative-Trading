@@ -318,7 +318,7 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     )
     seed_candidates(ledger, scan_extra())
 
-    engine.run_execution_brief(BRIEF_NOW)
+    assert engine.run_execution_brief(BRIEF_NOW) is True
 
     assert len(notifier.cards) == 1
     card = notifier.cards[0]
@@ -345,6 +345,35 @@ def test_daily_brief_sends_paper_card_and_persists_plans(tmp_path: Path) -> None
     assert active[0].suggested_qty == 71
     # 账户状态已落库
     assert ledger.latest_account_snapshot() is not None
+
+
+def test_execution_brief_coalesces_recent_scheduled_run(tmp_path: Path) -> None:
+    engine, notifier, ledger = make_engine(
+        tmp_path, FakeAccountProvider(paper_account())
+    )
+    seed_candidates(ledger, scan_extra())
+
+    assert engine.run_execution_brief(BRIEF_NOW) is True
+    assert (
+        engine.run_execution_brief(
+            BRIEF_NOW + timedelta(minutes=5),
+            skip_if_run_within=timedelta(minutes=5),
+        )
+        is True
+    )
+
+    assert len(notifier.cards) == 1
+
+
+def test_execution_brief_reports_delivery_failure(tmp_path: Path) -> None:
+    engine, notifier, ledger = make_engine(
+        tmp_path, FakeAccountProvider(paper_account())
+    )
+    seed_candidates(ledger, scan_extra())
+    notifier.success = False
+
+    assert engine.run_execution_brief(BRIEF_NOW) is False
+    assert len(notifier.cards) == 1
 
 
 def test_daily_brief_does_not_warn_when_screenshot_account_is_fresh(

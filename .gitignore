@@ -1,7 +1,16 @@
 .env
+api.txt
 *.db
 *.duckdb
 logs/
 data/
 __pycache__/
 .venv/
+.coverage
+htmlcov/
+research/e2e/**/*.log
+research/e2e/**/*.pid
+research/e2e/**/*pid*.txt
+research/e2e/latest-*.txt
+research/reports/**/bars_*.csv
+research/reports/**/current_profiles.json

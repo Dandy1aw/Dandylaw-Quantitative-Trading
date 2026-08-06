@@ -29,6 +29,10 @@ from quant_signal.notifier.base import Card, CardKind
 NOW = datetime(2026, 7, 11, 1, 55, tzinfo=timezone(timedelta(hours=8)))
 
 
+def test_akhy_ocr_alias_normalizes_to_skhynix_ads() -> None:
+    assert ExtractedPosition(symbol="AKHY").symbol == "SKHY"
+
+
 def screenshot_extraction(
     *,
     reported_count: int = 6,
@@ -211,6 +215,69 @@ def test_codex_extractor_uses_image_schema_ephemeral_and_output_file(tmp_path: P
     assert extraction.account.equity == Decimal("5995.52")
 
 
+def test_codex_extractor_normalizes_null_literals_for_missing_account_values(
+    tmp_path: Path,
+) -> None:
+    image = tmp_path / "holding.jpg"
+    image.write_bytes(b"image")
+
+    def fake_run(
+        args: list[str], *, input: str, cwd: Path, timeout: float
+    ) -> subprocess.CompletedProcess[str]:
+        payload = screenshot_extraction().model_dump(mode="json")
+        for field in (
+            "equity",
+            "market_value",
+            "cash",
+            "buying_power",
+            "frozen_cash",
+            "processing_cash",
+        ):
+            payload["account"][field] = "null"
+        payload["account"]["currency"] = ""
+        output_path = Path(args[args.index("--output-last-message") + 1])
+        output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    extraction = CodexPortfolioExtractor(run=fake_run).extract([image])
+
+    assert extraction.account.equity is None
+    assert extraction.account.market_value is None
+    assert extraction.account.cash is None
+    assert extraction.account.buying_power is None
+    assert extraction.account.frozen_cash is None
+    assert extraction.account.processing_cash is None
+    assert extraction.account.currency is None
+
+
+def test_missing_account_summary_is_rejected_without_parser_exception() -> None:
+    extraction = screenshot_extraction()
+    missing = extraction.model_copy(
+        update={
+            "account": extraction.account.model_copy(
+                update={
+                    "equity": None,
+                    "market_value": None,
+                    "cash": None,
+                    "buying_power": None,
+                }
+            )
+        }
+    )
+
+    result = validate_extraction(
+        missing,
+        image_sha256="0" * 64,
+        uploaded_at=NOW,
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+
+    assert result.status is ImportStatus.REJECTED
+    assert result.account_valid is False
+    assert "MISSING_ACCOUNT_SUMMARY" in result.validation_errors
+
+
 def test_codex_output_schema_requires_every_object_property(tmp_path: Path) -> None:
     image = tmp_path / "holding.jpg"
     image.write_bytes(b"image")
@@ -233,6 +300,43 @@ def test_codex_output_schema_requires_every_object_property(tmp_path: Path) -> N
     object_schemas = [captured_schema, *captured_schema["$defs"].values()]
     for schema in object_schemas:
         assert set(schema["required"]) == set(schema["properties"])
+
+
+def test_codex_output_schema_allows_null_for_account_values() -> None:
+    schema = _strict_output_schema()
+    account = schema["$defs"]["ExtractedAccount"]
+
+    for field in (
+        "equity",
+        "market_value",
+        "cash",
+        "buying_power",
+        "frozen_cash",
+        "processing_cash",
+        "currency",
+    ):
+        encoded = json.dumps(account["properties"][field])
+        assert '"null"' in encoded
+
+
+def test_missing_account_currency_is_rejected_without_parser_exception() -> None:
+    extraction = screenshot_extraction()
+    missing = extraction.model_copy(
+        update={
+            "account": extraction.account.model_copy(update={"currency": None})
+        }
+    )
+
+    result = validate_extraction(
+        missing,
+        image_sha256="8" * 64,
+        uploaded_at=NOW,
+        capital_limit=Decimal("6000"),
+        max_financing_ratio=Decimal("0.20"),
+    )
+
+    assert result.status is ImportStatus.REJECTED
+    assert "MISSING_ACCOUNT_CURRENCY" in result.validation_errors
 
 
 def test_codex_output_schema_omits_pydantic_decimal_patterns() -> None:

@@ -44,9 +44,7 @@ def ingest_daily_split(
 def find_missing_sessions(
     store: BarStore, ticker: str, sessions: list[date]
 ) -> list[date]:
-    bars = store.read_daily_bars([ticker])
-    have = {ts.date() for ts in bars.index.get_level_values("ts")}
-    return [s for s in sessions if s not in have]
+    return store.missing_daily_sessions([ticker], sessions)[ticker]
 
 
 def main() -> None:

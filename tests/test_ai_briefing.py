@@ -8,10 +8,12 @@ from typing import Any
 
 from quant_signal.ai_briefing import (
     AIBriefingContext,
+    CompanyRationaleAIContext,
     USBriefingAIContext,
     build_ai_briefing_prompt,
     _resolve_windows_script_command,
     run_ai_briefing,
+    parse_company_rationales,
     validate_us_briefing_output,
 )
 from quant_signal.config import AIBriefingSettings
@@ -400,6 +402,120 @@ def test_us_ai_output_accepts_uppercase_terms_present_in_payload() -> None:
     assert validate_us_briefing_output(output, context) == output
 
 
+def _company_context() -> CompanyRationaleAIContext:
+    return CompanyRationaleAIContext(
+        as_of="2026-07-14",
+        max_chars_per_company=220,
+        candidates=[
+            {
+                "ticker": "MSFT",
+                "company_name": "Microsoft",
+                "gics_sector": "Information Technology",
+                "candidate_group": "Technology",
+                "industry": "Software - Infrastructure",
+                "market_cap_usd": 3_500_000_000_000,
+                "sector_strategy_rank": 1,
+                "sector_market_cap_rank": 1,
+                "revenue_growth": 0.15,
+                "earnings_growth": 0.18,
+                "profit_margin": 0.36,
+                "free_cash_flow": 74_000_000_000,
+                "reasons": ["趋势延续"],
+            }
+        ],
+        news={
+            "MSFT": [
+                {
+                    "headline": "Cloud demand remains strong",
+                    "created_at": "2026-07-13T12:00:00+00:00",
+                    "source": "test",
+                }
+            ]
+        },
+    )
+
+
+def test_company_prompt_requires_evidence_rank_moat_and_counter_thesis() -> None:
+    prompt = build_ai_briefing_prompt(_company_context(), max_chars=5000)
+
+    assert "上涨逻辑：" in prompt
+    assert "行业地位：" in prompt
+    assert "壁垒：" in prompt
+    assert "反证：" in prompt
+    assert "sector_strategy_rank" in prompt
+    assert '"candidate_group": "Technology"' in prompt
+    assert "Cloud demand remains strong" in prompt
+    assert "不得新增标的、排名或数字" in prompt
+
+
+def test_company_prompt_requires_chinese_and_human_readable_financial_units() -> None:
+    prompt = build_ai_briefing_prompt(_company_context(), max_chars=5000)
+
+    assert "除股票代码、公司名称和行业专用名词外，全部使用中文" in prompt
+    assert "百分比" in prompt
+    assert "亿美元或万亿美元" in prompt
+    assert "不得输出未经格式化的长整数" in prompt
+    assert "三级止盈和买盘资金强度只能解释" in prompt
+
+
+def test_company_rationale_parser_accepts_schema_and_rejects_unknown_or_absolute() -> None:
+    valid = (
+        "[MSFT]\n"
+        "上涨逻辑：云业务需求与盈利增长支持趋势延续。\n"
+        "行业地位：行业策略第1，合格同行市值第1。\n"
+        "壁垒：企业客户迁移成本、云与办公软件协同形成难复制能力。\n"
+        "反证：云增速或利润率显著低于当前输入时，逻辑失效。"
+    )
+    parsed = parse_company_rationales(valid, _company_context())
+    assert parsed == {"MSFT": "\n".join(valid.splitlines()[1:])}
+
+    assert parse_company_rationales(valid.replace("[MSFT]", "[NVDA]"), _company_context()) == {}
+    assert parse_company_rationales(valid.replace("难复制", "不可替代"), _company_context()) == {}
+    acronym_output = valid.replace(
+        "行业策略第1，合格同行市值第1",
+        "行业内策略排名1；合格同行市值排名1",
+    ).replace("企业客户迁移成本", "AI与CXL企业客户迁移成本")
+    assert set(parse_company_rationales(acronym_output, _company_context())) == {"MSFT"}
+
+
+def test_company_rationale_parser_accepts_human_readable_financial_units() -> None:
+    output = (
+        "[MSFT]\n"
+        "上涨逻辑：营收增长15%，自由现金流740.00亿美元支持趋势。\n"
+        "行业地位：行业策略第1，合格同行市值第1。\n"
+        "壁垒：企业客户迁移成本与产品协同难复制。\n"
+        "反证：营收增长转弱时逻辑失效。"
+    )
+
+    assert set(parse_company_rationales(output, _company_context())) == {"MSFT"}
+
+
+def test_company_rationale_parser_rejects_unformatted_long_financial_integer() -> None:
+    output = (
+        "[MSFT]\n"
+        "上涨逻辑：自由现金流74000000000美元支持趋势。\n"
+        "行业地位：行业策略第1，合格同行市值第1。\n"
+        "壁垒：企业客户迁移成本与产品协同难复制。\n"
+        "反证：现金流转弱时逻辑失效。"
+    )
+
+    assert parse_company_rationales(output, _company_context()) == {}
+
+
+def test_company_rationale_parser_rejects_changed_rank_and_length() -> None:
+    valid = (
+        "[MSFT]\n"
+        "上涨逻辑：云业务需求支持趋势。\n"
+        "行业地位：行业策略第1，合格同行市值第1。\n"
+        "壁垒：企业客户迁移成本较高。\n"
+        "反证：云增速下降会令逻辑失效。"
+    )
+    assert parse_company_rationales(valid.replace("策略第1", "策略第2"), _company_context()) == {}
+    short_limit = _company_context().model_copy(update={"max_chars_per_company": 80})
+    too_long = valid.replace("企业客户迁移成本较高", "企业客户迁移成本较高" * 20)
+    assert parse_company_rationales(too_long, short_limit) == {}
+
+
 def test_windows_codex_wrapper_resolves_to_packaged_native_binary(
     tmp_path: Path, monkeypatch: object
 ) -> None:
@@ -444,5 +560,59 @@ def test_action_card_ai_prompt_requires_three_short_points() -> None:
         execution_plans=[{"ticker": "AAPL", "suggested_qty": 1}],
     )
     prompt = build_ai_briefing_prompt(context)
-    assert "最多300个中文字符" in prompt
-    assert "主线、最大风险、今日倾向" in prompt
+    assert "最多180个字符" in prompt
+    assert "主线：" in prompt and "持仓：" in prompt and "动作：" in prompt
+
+
+def test_action_card_output_requires_exact_three_lines_and_hard_cap() -> None:
+    context = AIBriefingContext(
+        as_of="2026-07-10T12:15:00+00:00",
+        output_mode="action_card",
+        holdings=["NVDA"],
+    )
+
+    def valid_runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="主线：风险偏好稳定\n持仓：NVDA继续观察\n动作：不追价",
+            stderr="",
+        )
+
+    settings = AIBriefingSettings(
+        enabled=True,
+        provider="claude_code_cli",
+        output_max_chars=180,
+    )
+    output = run_ai_briefing(settings, context, runner=valid_runner)
+    assert output == "主线：风险偏好稳定\n持仓：NVDA继续观察\n动作：不追价"
+    assert len(output) <= 180
+
+    def invalid_runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0], returncode=0, stdout="一段没有固定结构的长观点", stderr=""
+        )
+
+    assert run_ai_briefing(settings, context, runner=invalid_runner) is None
+
+
+def test_action_card_output_rejects_over_limit() -> None:
+    context = AIBriefingContext(
+        as_of="2026-07-10T12:15:00+00:00", output_mode="action_card"
+    )
+
+    def runner(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout="主线：" + "长" * 100 + "\n持仓：" + "长" * 100 + "\n动作：不追价",
+            stderr="",
+        )
+
+    assert run_ai_briefing(
+        AIBriefingSettings(
+            enabled=True, provider="claude_code_cli", output_max_chars=180
+        ),
+        context,
+        runner=runner,
+    ) is None

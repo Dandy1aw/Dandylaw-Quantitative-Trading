@@ -72,6 +72,24 @@ class YFinanceSource:
         )
         return _normalize(raw, tickers)
 
+    def fetch_minute_bars(
+        self, tickers: list[str], lookback_minutes: int = 45
+    ) -> pd.DataFrame:
+        del lookback_minutes  # yfinance 仅提供 period 粒度，取 1d 后由检测器切片。
+        raw = yf.download(
+            tickers,
+            period="1d",
+            interval="1m",
+            prepost=False,
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=False,
+        )
+        frame = _normalize(raw, tickers)
+        frame.attrs["feed"] = "yfinance_1m_delayed"
+        return frame
+
     def fetch_live_prices(self, tickers: list[str]) -> dict[str, float]:
         """One batched request for the latest pre/post-market prices."""
         if not tickers:

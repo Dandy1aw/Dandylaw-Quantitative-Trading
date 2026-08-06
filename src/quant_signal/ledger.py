@@ -8,7 +8,7 @@ import json
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,11 +25,12 @@ from quant_signal.position_discipline import DisciplineState
 from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
-    from quant_signal.options_flow import OptionFlowSnapshot
+    from quant_signal.company_profiles import CompanyProfile
+    from quant_signal.options_flow import HoldingOptionFlowSnapshot, OptionFlowSnapshot
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 15
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -113,6 +114,20 @@ CREATE TABLE IF NOT EXISTS broker_orders (
     bucket TEXT NOT NULL,          -- open / recent
     retrieved_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS broker_fills (
+    source TEXT NOT NULL,
+    order_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    filled_qty TEXT NOT NULL,
+    filled_avg_price TEXT NOT NULL,
+    filled_at TEXT,
+    retrieved_at TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    PRIMARY KEY (source, order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_broker_fills_time
+    ON broker_fills(source, filled_at, retrieved_at);
 CREATE TABLE IF NOT EXISTS execution_plans (
     plan_id TEXT NOT NULL,
     plan_version INTEGER NOT NULL,
@@ -204,6 +219,16 @@ CREATE TABLE IF NOT EXISTS feishu_pending_imports (
     payload_json TEXT NOT NULL,
     stored_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS job_runtime (
+    job_id TEXT PRIMARY KEY,
+    running_since TEXT,
+    last_success TEXT,
+    last_failure TEXT,
+    last_duration REAL,
+    last_error TEXT,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS option_flow_scans (
     slot TEXT PRIMARY KEY,
     session_date TEXT NOT NULL,
@@ -246,6 +271,34 @@ CREATE TABLE IF NOT EXISTS option_flow_outbox (
 );
 CREATE INDEX IF NOT EXISTS idx_option_flow_outbox_due
     ON option_flow_outbox(status, next_retry_at, expires_at);
+CREATE TABLE IF NOT EXISTS holding_option_flow_scans (
+    slot TEXT PRIMARY KEY,
+    session_date TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_holding_option_flow_scans_session
+    ON holding_option_flow_scans(session_date, captured_at DESC);
+CREATE TABLE IF NOT EXISTS holding_option_flow_rows (
+    slot TEXT NOT NULL,
+    underlying TEXT NOT NULL,
+    call_volume INTEGER NOT NULL,
+    put_volume INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY(slot, underlying),
+    FOREIGN KEY(slot) REFERENCES holding_option_flow_scans(slot)
+);
+CREATE TABLE IF NOT EXISTS company_profiles (
+    ticker TEXT PRIMARY KEY,
+    as_of TEXT NOT NULL,
+    status TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_company_profiles_fetched
+    ON company_profiles(fetched_at DESC);
 CREATE TABLE IF NOT EXISTS option_intel_daily (
     session_date TEXT NOT NULL,
     symbol TEXT NOT NULL,
@@ -277,6 +330,35 @@ CREATE TABLE IF NOT EXISTS candidate_lane_snapshots (
     payload_json TEXT NOT NULL,
     captured_at TEXT NOT NULL,
     PRIMARY KEY(report_kind, as_of, rank)
+);
+CREATE TABLE IF NOT EXISTS candidate_forward_evaluations (
+    report_kind TEXT NOT NULL,
+    as_of TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    ticker TEXT NOT NULL,
+    horizon_sessions INTEGER NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    return_pct REAL NOT NULL,
+    benchmark_ticker TEXT NOT NULL DEFAULT 'QQQ',
+    benchmark_entry_price REAL,
+    benchmark_exit_price REAL,
+    benchmark_return_pct REAL,
+    excess_return_pct REAL,
+    max_favorable_excursion_pct REAL,
+    max_adverse_excursion_pct REAL,
+    net_return_pct REAL,
+    transaction_cost_bps REAL NOT NULL DEFAULT 0,
+    rule_version TEXT,
+    model_version TEXT,
+    data_version TEXT,
+    input_semantic_hash TEXT,
+    config_hash TEXT,
+    universe_hash TEXT,
+    point_in_time_status TEXT,
+    cost_model_json TEXT,
+    evaluated_at TEXT NOT NULL,
+    PRIMARY KEY(report_kind, as_of, rank, horizon_sessions)
 );
 CREATE TABLE IF NOT EXISTS position_discipline_states (
     ticker TEXT PRIMARY KEY,
@@ -336,7 +418,11 @@ class SignalLedger:
         self._con.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
+            self._con.execute("PRAGMA foreign_keys = ON")
+            self._con.execute("PRAGMA busy_timeout = 5000")
+            self._con.execute("PRAGMA journal_mode = WAL")
             self._con.executescript(_SCHEMA)
+            self._migrate_schema()
             self._con.execute(
                 "DELETE FROM us_briefing_runs WHERE rowid NOT IN ("
                 " SELECT rowid FROM ("
@@ -366,6 +452,127 @@ class SignalLedger:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
         return int(row["value"]) if row else 0
+
+    def save_company_profiles(
+        self,
+        profiles: Sequence[object],
+        *,
+        fetched_at: datetime,
+    ) -> None:
+        from quant_signal.company_profiles import CompanyProfile
+
+        timestamp = fetched_at.astimezone(timezone.utc).isoformat()
+        rows: list[tuple[str, str, str, str, str]] = []
+        for value in profiles:
+            if not isinstance(value, CompanyProfile):
+                raise TypeError("profiles must contain CompanyProfile values")
+            rows.append(
+                (
+                    value.ticker,
+                    value.as_of.isoformat(),
+                    value.data_status,
+                    timestamp,
+                    _payload_json(value),
+                )
+            )
+        with self._lock:
+            self._con.executemany(
+                "INSERT INTO company_profiles"
+                " (ticker, as_of, status, fetched_at, payload_json)"
+                " VALUES (?, ?, ?, ?, ?)"
+                " ON CONFLICT(ticker) DO UPDATE SET"
+                " as_of=excluded.as_of, status=excluded.status,"
+                " fetched_at=excluded.fetched_at, payload_json=excluded.payload_json",
+                rows,
+            )
+            self._con.commit()
+
+    def _migrate_schema(self) -> None:
+        """Apply additive migrations before publishing the new schema version."""
+
+        columns = {
+            str(row[1])
+            for row in self._con.execute(
+                "PRAGMA table_info(candidate_forward_evaluations)"
+            ).fetchall()
+        }
+        additions = {
+            "benchmark_ticker": "TEXT NOT NULL DEFAULT 'QQQ'",
+            "benchmark_entry_price": "REAL",
+            "benchmark_exit_price": "REAL",
+            "benchmark_return_pct": "REAL",
+            "excess_return_pct": "REAL",
+            "max_favorable_excursion_pct": "REAL",
+            "max_adverse_excursion_pct": "REAL",
+            "net_return_pct": "REAL",
+            "transaction_cost_bps": "REAL NOT NULL DEFAULT 0",
+            "rule_version": "TEXT",
+            "model_version": "TEXT",
+            "data_version": "TEXT",
+            "input_semantic_hash": "TEXT",
+            "config_hash": "TEXT",
+            "universe_hash": "TEXT",
+            "point_in_time_status": "TEXT",
+            "cost_model_json": "TEXT",
+        }
+        for column, declaration in additions.items():
+            if column not in columns:
+                self._con.execute(
+                    f"ALTER TABLE candidate_forward_evaluations "
+                    f"ADD COLUMN {column} {declaration}"
+                )
+
+    def cached_company_profiles(
+        self,
+        tickers: Sequence[str],
+        *,
+        now: datetime,
+        success_max_age: timedelta,
+        failure_max_age: timedelta,
+    ) -> dict[str, "CompanyProfile"]:
+        from quant_signal.company_profiles import CompanyProfile
+
+        wanted = tuple(sorted({ticker.strip().upper() for ticker in tickers if ticker.strip()}))
+        if not wanted:
+            return {}
+        placeholders = ",".join("?" for _ in wanted)
+        with self._lock:
+            rows = self._con.execute(
+                f"SELECT * FROM company_profiles WHERE ticker IN ({placeholders})",
+                wanted,
+            ).fetchall()
+        output: dict[str, CompanyProfile] = {}
+        now_utc = now.astimezone(timezone.utc)
+        for row in rows:
+            fetched = datetime.fromisoformat(str(row["fetched_at"]))
+            max_age = (
+                success_max_age if str(row["status"]) == "ok" else failure_max_age
+            )
+            if now_utc - fetched.astimezone(timezone.utc) > max_age:
+                continue
+            payload = json.loads(str(row["payload_json"]))
+            output[str(row["ticker"])] = CompanyProfile(
+                ticker=str(payload["ticker"]),
+                as_of=date.fromisoformat(str(payload["as_of"])),
+                market_cap_usd=(
+                    int(payload["market_cap_usd"])
+                    if payload.get("market_cap_usd") is not None else None
+                ),
+                gics_sector=(str(payload["gics_sector"]) if payload.get("gics_sector") else None),
+                industry=str(payload["industry"]) if payload.get("industry") else None,
+                company_name=(str(payload["company_name"]) if payload.get("company_name") else None),
+                business_summary=(str(payload["business_summary"]) if payload.get("business_summary") else None),
+                total_revenue=(int(payload["total_revenue"]) if payload.get("total_revenue") is not None else None),
+                revenue_growth=(float(payload["revenue_growth"]) if payload.get("revenue_growth") is not None else None),
+                earnings_growth=(float(payload["earnings_growth"]) if payload.get("earnings_growth") is not None else None),
+                profit_margin=(float(payload["profit_margin"]) if payload.get("profit_margin") is not None else None),
+                return_on_equity=(float(payload["return_on_equity"]) if payload.get("return_on_equity") is not None else None),
+                free_cash_flow=(int(payload["free_cash_flow"]) if payload.get("free_cash_flow") is not None else None),
+                quote_type=str(payload["quote_type"]) if payload.get("quote_type") else None,
+                source=str(payload["source"]),
+                data_status=str(payload["data_status"]),  # type: ignore[arg-type]
+            )
+        return output
 
     def insert(self, s: Signal, pushed: bool, now: datetime | None = None) -> int:
         pushed_at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -467,6 +674,69 @@ class SignalLedger:
                 self._con.backup(target)
             finally:
                 target.close()
+
+    def record_job_start(self, job_id: str, *, now: datetime) -> None:
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO job_runtime (job_id, running_since, updated_at)"
+                " VALUES (?, ?, ?)"
+                " ON CONFLICT(job_id) DO UPDATE SET"
+                " running_since = excluded.running_since,"
+                " updated_at = excluded.updated_at",
+                (job_id, timestamp, timestamp),
+            )
+            self._con.commit()
+
+    def record_job_success(
+        self, job_id: str, *, now: datetime, duration: float
+    ) -> None:
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO job_runtime"
+                " (job_id, running_since, last_success, last_duration,"
+                "  last_error, consecutive_failures, updated_at)"
+                " VALUES (?, NULL, ?, ?, NULL, 0, ?)"
+                " ON CONFLICT(job_id) DO UPDATE SET"
+                " running_since = NULL, last_success = excluded.last_success,"
+                " last_duration = excluded.last_duration, last_error = NULL,"
+                " consecutive_failures = 0, updated_at = excluded.updated_at",
+                (job_id, timestamp, duration, timestamp),
+            )
+            self._con.commit()
+
+    def record_job_failure(
+        self,
+        job_id: str,
+        *,
+        now: datetime,
+        duration: float,
+        error: str,
+    ) -> None:
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO job_runtime"
+                " (job_id, running_since, last_failure, last_duration,"
+                "  last_error, consecutive_failures, updated_at)"
+                " VALUES (?, NULL, ?, ?, ?, 1, ?)"
+                " ON CONFLICT(job_id) DO UPDATE SET"
+                " running_since = NULL, last_failure = excluded.last_failure,"
+                " last_duration = excluded.last_duration,"
+                " last_error = excluded.last_error,"
+                " consecutive_failures = job_runtime.consecutive_failures + 1,"
+                " updated_at = excluded.updated_at",
+                (job_id, timestamp, duration, error, timestamp),
+            )
+            self._con.commit()
+
+    def job_runtime_snapshot(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM job_runtime ORDER BY job_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_holdings(self, strategy_id: str) -> list[str]:
         with self._lock:
@@ -713,6 +983,40 @@ class SignalLedger:
                         for order, bucket in order_rows
                     ],
                 )
+                fill_rows = [
+                    order
+                    for order in state.recent_orders
+                    if order.filled_qty > 0 and order.filled_avg_price is not None
+                ]
+                self._con.executemany(
+                    "INSERT INTO broker_fills"
+                    " (source, order_id, symbol, side, filled_qty, filled_avg_price,"
+                    "  filled_at, retrieved_at, currency)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    " ON CONFLICT(source, order_id) DO UPDATE SET"
+                    " symbol = excluded.symbol, side = excluded.side,"
+                    " filled_qty = excluded.filled_qty,"
+                    " filled_avg_price = excluded.filled_avg_price,"
+                    " filled_at = COALESCE(excluded.filled_at, broker_fills.filled_at),"
+                    " retrieved_at = excluded.retrieved_at,"
+                    " currency = excluded.currency",
+                    [
+                        (
+                            state.snapshot.source,
+                            order.order_id,
+                            order.symbol,
+                            order.side,
+                            str(order.filled_qty),
+                            str(order.filled_avg_price),
+                            order.filled_at.isoformat()
+                            if order.filled_at is not None
+                            else None,
+                            retrieved_at,
+                            state.snapshot.currency,
+                        )
+                        for order in fill_rows
+                    ],
+                )
                 self._con.commit()
             except Exception:
                 self._con.rollback()
@@ -742,6 +1046,21 @@ class SignalLedger:
         with self._lock:
             rows = self._con.execute(query + " ORDER BY order_id", params).fetchall()
         return [dict(r) for r in rows]
+
+    def broker_fills(self, source: str | None = None) -> list[dict[str, object]]:
+        """Immutable broker-reported aggregate fills retained across snapshots."""
+        query = "SELECT * FROM broker_fills"
+        params: tuple[object, ...] = ()
+        if source is not None:
+            query += " WHERE source = ?"
+            params = (source,)
+        with self._lock:
+            rows = self._con.execute(
+                query
+                + " ORDER BY COALESCE(filled_at, retrieved_at), source, order_id",
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def save_pending_import(
         self, record: "ValidatedPortfolioImport", now: datetime
@@ -823,6 +1142,11 @@ class SignalLedger:
                     ),
                 )
                 if record.account_valid:
+                    assert account.equity is not None
+                    assert account.market_value is not None
+                    assert account.cash is not None
+                    assert account.buying_power is not None
+                    assert account.currency is not None
                     self._con.execute(
                         "INSERT INTO observed_account_snapshots"
                         " (import_id, equity, market_value, cash, buying_power, frozen_cash,"
@@ -834,8 +1158,8 @@ class SignalLedger:
                             str(account.market_value),
                             str(account.cash),
                             str(account.buying_power),
-                            str(account.frozen_cash),
-                            str(account.processing_cash),
+                            str(account.frozen_cash or Decimal("0")),
+                            str(account.processing_cash or Decimal("0")),
                             account.currency,
                             str(record.capital_limit),
                             str(record.max_financing_ratio),
@@ -913,7 +1237,16 @@ class SignalLedger:
                 " JOIN portfolio_imports AS i ON i.import_id = p.import_id"
                 f" WHERE i.{flag} = 1 ORDER BY p.symbol"
             ).fetchall()
-        return [dict(row) for row in rows]
+        positions = [dict(row) for row in rows]
+        # Brokerage screenshots can keep closed symbols in the holdings table with
+        # quantity 0.  Retain those rows in the import audit trail, but do not expose
+        # them as active holdings to sizing, risk checks, or bot replies.
+        return [
+            position
+            for position in positions
+            if position["qty"] is None
+            or Decimal(str(position["qty"])) != Decimal("0")
+        ]
 
     def upsert_execution_plan(self, plan: ExecutionPlan) -> None:
         payload = json.dumps(plan_to_dict(plan), ensure_ascii=False, sort_keys=True)
@@ -1207,6 +1540,132 @@ class SignalLedger:
         }
         return snapshot_from_dict(payload)
 
+    def save_holding_option_flow_snapshot(
+        self,
+        snapshot: "HoldingOptionFlowSnapshot",
+        *,
+        now: datetime,
+    ) -> bool:
+        """Persist one idempotent observed-holdings option-volume snapshot."""
+        created = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute(
+                    "INSERT INTO holding_option_flow_scans"
+                    " (slot, session_date, captured_at, provider, row_count, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        snapshot.slot,
+                        snapshot.session_date.isoformat(),
+                        snapshot.captured_at.astimezone(timezone.utc).isoformat(),
+                        snapshot.provider,
+                        len(snapshot.rows),
+                        created,
+                    ),
+                )
+                self._con.executemany(
+                    "INSERT INTO holding_option_flow_rows"
+                    " (slot, underlying, call_volume, put_volume, payload_json)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    [
+                        (
+                            snapshot.slot,
+                            row.underlying,
+                            row.call_volume,
+                            row.put_volume,
+                            json.dumps(
+                                {
+                                    "underlying": row.underlying,
+                                    "call_volume": row.call_volume,
+                                    "put_volume": row.put_volume,
+                                    "call_delta": row.call_delta,
+                                    "put_delta": row.put_delta,
+                                    "data_status": row.data_status,
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                        )
+                        for row in snapshot.rows
+                    ],
+                )
+                self._con.commit()
+                return True
+            except sqlite3.IntegrityError:
+                self._con.rollback()
+                return False
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def latest_holding_option_flow_snapshot(
+        self, session: date | None = None
+    ) -> "HoldingOptionFlowSnapshot | None":
+        from quant_signal.options_flow import HoldingOptionFlow, HoldingOptionFlowSnapshot
+
+        query = "SELECT * FROM holding_option_flow_scans"
+        params: tuple[object, ...] = ()
+        if session is not None:
+            query += " WHERE session_date = ?"
+            params = (session.isoformat(),)
+        query += " ORDER BY captured_at DESC, slot DESC LIMIT 1"
+        with self._lock:
+            header = self._con.execute(query, params).fetchone()
+            if header is None:
+                return None
+            raw_rows = self._con.execute(
+                "SELECT payload_json FROM holding_option_flow_rows"
+                " WHERE slot = ? ORDER BY underlying",
+                (header["slot"],),
+            ).fetchall()
+        rows = []
+        for record in raw_rows:
+            payload = json.loads(str(record["payload_json"]))
+            rows.append(
+                HoldingOptionFlow(
+                    underlying=str(payload["underlying"]),
+                    call_volume=int(payload["call_volume"]),
+                    put_volume=int(payload["put_volume"]),
+                    call_delta=(
+                        int(payload["call_delta"])
+                        if payload.get("call_delta") is not None
+                        else None
+                    ),
+                    put_delta=(
+                        int(payload["put_delta"])
+                        if payload.get("put_delta") is not None
+                        else None
+                    ),
+                    data_status=str(payload["data_status"]),  # type: ignore[arg-type]
+                )
+            )
+        return HoldingOptionFlowSnapshot(
+            slot=str(header["slot"]),
+            captured_at=datetime.fromisoformat(str(header["captured_at"])),
+            provider=str(header["provider"]),
+            rows=tuple(rows),
+        )
+
+    def prune_holding_option_flow(self, before: datetime) -> int:
+        cutoff = before.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                self._con.execute("BEGIN IMMEDIATE")
+                self._con.execute(
+                    "DELETE FROM holding_option_flow_rows WHERE slot IN ("
+                    " SELECT slot FROM holding_option_flow_scans WHERE captured_at < ?)",
+                    (cutoff,),
+                )
+                cursor = self._con.execute(
+                    "DELETE FROM holding_option_flow_scans WHERE captured_at < ?",
+                    (cutoff,),
+                )
+                self._con.commit()
+                return cursor.rowcount
+            except Exception:
+                self._con.rollback()
+                raise
+
     def prune_option_flow(self, before: datetime) -> int:
         cutoff = before.astimezone(timezone.utc).isoformat()
         with self._lock:
@@ -1248,12 +1707,24 @@ class SignalLedger:
                 self._con.rollback()
                 raise
 
-    def option_flow_alert_count(self, session: date) -> int:
+    def option_flow_alert_count(
+        self,
+        session: date,
+        *,
+        alert_types: Sequence[str] | None = None,
+    ) -> int:
+        type_clause = ""
+        params: list[object] = [session.isoformat()]
+        if alert_types:
+            placeholders = ",".join("?" for _ in alert_types)
+            type_clause = f" AND alert_type IN ({placeholders})"
+            params.extend(alert_types)
         with self._lock:
             row = self._con.execute(
                 "SELECT count(*) AS n FROM option_flow_outbox"
-                " WHERE session_date = ? AND status IN ('PENDING', 'SENT')",
-                (session.isoformat(),),
+                " WHERE session_date = ? AND status IN ('PENDING', 'SENT')"
+                + type_clause,
+                params,
             ).fetchone()
         return int(row["n"]) if row is not None else 0
 
@@ -1268,14 +1739,22 @@ class SignalLedger:
             self._con.commit()
         return cursor.rowcount > 0
 
-    def last_option_flow_alert_at(self, session: date) -> datetime | None:
+    def last_option_flow_alert_at(
+        self,
+        session: date,
+        *,
+        alert_types: Sequence[str] = ("change",),
+    ) -> datetime | None:
         # 冷却只约束变化卡之间的间隔；基线/收盘卡不占用冷却窗口
+        if not alert_types:
+            return None
+        placeholders = ",".join("?" for _ in alert_types)
         with self._lock:
             row = self._con.execute(
                 "SELECT max(created_at) AS created_at FROM option_flow_outbox"
-                " WHERE session_date = ? AND alert_type = 'change'"
+                f" WHERE session_date = ? AND alert_type IN ({placeholders})"
                 " AND status IN ('PENDING', 'SENT')",
-                (session.isoformat(),),
+                (session.isoformat(), *alert_types),
             ).fetchone()
         value = row["created_at"] if row is not None else None
         return datetime.fromisoformat(str(value)) if value is not None else None
@@ -1435,6 +1914,159 @@ class SignalLedger:
             if isinstance(payload, dict):
                 output.append(dict(payload))
         return output
+
+    def pending_candidate_forward_evaluations(
+        self, horizons: Sequence[int] = (5, 10, 20, 21, 63)
+    ) -> list[dict[str, object]]:
+        wanted = tuple(sorted({int(value) for value in horizons if int(value) > 0}))
+        if not wanted:
+            return []
+        with self._lock:
+            snapshots = self._con.execute(
+                "SELECT c.report_kind, c.as_of, c.rank, c.ticker,"
+                " c.payload_json, u.payload_json AS run_payload_json"
+                " FROM candidate_lane_snapshots AS c"
+                " LEFT JOIN us_briefing_runs AS u"
+                " ON u.report_kind = c.report_kind AND u.as_of = c.as_of"
+                " ORDER BY c.as_of, c.report_kind, c.rank"
+            ).fetchall()
+            completed = {
+                (
+                    str(row["report_kind"]),
+                    str(row["as_of"]),
+                    int(row["rank"]),
+                    int(row["horizon_sessions"]),
+                )
+                for row in self._con.execute(
+                    "SELECT report_kind, as_of, rank, horizon_sessions"
+                    " FROM candidate_forward_evaluations"
+                ).fetchall()
+            }
+        output: list[dict[str, object]] = []
+        for row in snapshots:
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                continue
+            run_payload: dict[str, object] = {}
+            if row["run_payload_json"] is not None:
+                decoded = json.loads(str(row["run_payload_json"]))
+                if isinstance(decoded, dict):
+                    run_payload = dict(decoded)
+            for horizon in wanted:
+                key = (
+                    str(row["report_kind"]),
+                    str(row["as_of"]),
+                    int(row["rank"]),
+                    horizon,
+                )
+                if key in completed:
+                    continue
+                output.append(
+                    {
+                        "report_kind": key[0],
+                        "as_of": date.fromisoformat(key[1]),
+                        "rank": key[2],
+                        "ticker": str(row["ticker"]),
+                        "horizon_sessions": horizon,
+                        "payload": dict(payload),
+                        "evidence": {
+                            key: run_payload.get(key)
+                            for key in (
+                                "rule_version",
+                                "model_version",
+                                "data_version",
+                                "input_semantic_hash",
+                                "config_hash",
+                                "universe_hash",
+                                "point_in_time",
+                                "cost_model",
+                            )
+                        },
+                    }
+                )
+        return output
+
+    def save_candidate_forward_evaluation(
+        self,
+        *,
+        report_kind: str,
+        as_of: date,
+        rank: int,
+        ticker: str,
+        horizon_sessions: int,
+        entry_price: float,
+        exit_price: float,
+        return_pct: float,
+        benchmark_ticker: str = "QQQ",
+        benchmark_entry_price: float | None = None,
+        benchmark_exit_price: float | None = None,
+        benchmark_return_pct: float | None = None,
+        excess_return_pct: float | None = None,
+        max_favorable_excursion_pct: float | None = None,
+        max_adverse_excursion_pct: float | None = None,
+        net_return_pct: float | None = None,
+        transaction_cost_bps: float = 0.0,
+        rule_version: str | None = None,
+        model_version: str | None = None,
+        data_version: str | None = None,
+        input_semantic_hash: str | None = None,
+        config_hash: str | None = None,
+        universe_hash: str | None = None,
+        point_in_time_status: str | None = None,
+        cost_model: Mapping[str, object] | None = None,
+        now: datetime,
+    ) -> bool:
+        with self._lock:
+            cursor = self._con.execute(
+                "INSERT OR IGNORE INTO candidate_forward_evaluations"
+                " (report_kind, as_of, rank, ticker, horizon_sessions,"
+                " entry_price, exit_price, return_pct, benchmark_ticker,"
+                " benchmark_entry_price, benchmark_exit_price, benchmark_return_pct,"
+                " excess_return_pct, max_favorable_excursion_pct,"
+                " max_adverse_excursion_pct, net_return_pct, transaction_cost_bps,"
+                " rule_version, model_version, data_version, input_semantic_hash,"
+                " config_hash, universe_hash, point_in_time_status, cost_model_json,"
+                " evaluated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    report_kind,
+                    as_of.isoformat(),
+                    rank,
+                    ticker,
+                    horizon_sessions,
+                    entry_price,
+                    exit_price,
+                    return_pct,
+                    benchmark_ticker,
+                    benchmark_entry_price,
+                    benchmark_exit_price,
+                    benchmark_return_pct,
+                    excess_return_pct,
+                    max_favorable_excursion_pct,
+                    max_adverse_excursion_pct,
+                    net_return_pct,
+                    transaction_cost_bps,
+                    rule_version,
+                    model_version,
+                    data_version,
+                    input_semantic_hash,
+                    config_hash,
+                    universe_hash,
+                    point_in_time_status,
+                    _payload_json(cost_model) if cost_model is not None else None,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    def candidate_forward_evaluations(self) -> list[dict[str, object]]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM candidate_forward_evaluations"
+                " ORDER BY as_of, report_kind, rank, horizon_sessions"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def save_position_discipline_state(
         self, state: DisciplineState, *, now: datetime

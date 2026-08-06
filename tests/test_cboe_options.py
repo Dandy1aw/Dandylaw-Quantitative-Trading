@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -154,8 +154,73 @@ def test_missing_venue_fails_closed() -> None:
         CboeOptionFlowSource(client=client, sleep=lambda _: None).fetch(NOW)
 
 
+def test_one_failed_venue_degrades_when_coverage_threshold_allows_it() -> None:
+    client = full_client()
+    client.outcomes["ctwo"] = [httpx.ReadTimeout("timeout")] * 3
+
+    result = CboeOptionFlowSource(
+        client=client,
+        sleep=lambda _: None,
+        min_venue_coverage=0.75,
+    ).fetch(NOW)
+
+    assert result.venue_coverage == 0.75
+    assert len(top_by_side(result, "call", 10)) == 10
+    assert len(top_by_side(result, "put", 10)) == 10
+    assert all("ctwo" not in row.venues for row in result.rows)
+
+
+def test_two_failed_venues_still_fail_below_coverage_threshold() -> None:
+    client = full_client()
+    client.outcomes["ctwo"] = [httpx.ReadTimeout("timeout")] * 3
+    client.outcomes["opt"] = [httpx.ReadTimeout("timeout")] * 3
+
+    with pytest.raises(OptionFlowFetchError, match="coverage"):
+        CboeOptionFlowSource(
+            client=client,
+            sleep=lambda _: None,
+            min_venue_coverage=0.75,
+        ).fetch(NOW)
+
+
 def test_malformed_or_short_response_fails_closed() -> None:
     client = full_client()
     client.outcomes["opt"] = [{"categories": [{"category": "all", "calls": [], "puts": []}]}]
     with pytest.raises(OptionFlowFetchError, match="opt"):
         CboeOptionFlowSource(client=client, sleep=lambda _: None).fetch(NOW)
+
+
+def test_venue_circuit_breaker_skips_repeated_failures_and_recovers() -> None:
+    good = {
+        "cone": payload("equity"),
+        "ctwo": payload("all"),
+        "opt": payload("all"),
+        "exo": payload("all"),
+    }
+    client = FakeClient(
+        {
+            "cone": [good["cone"]] * 4,
+            "ctwo": [httpx.ReadTimeout("timeout")] * 6 + [good["ctwo"]],
+            "opt": [good["opt"]] * 4,
+            "exo": [good["exo"]] * 4,
+        }
+    )
+    source = CboeOptionFlowSource(
+        client=client,
+        sleep=lambda _: None,
+        min_venue_coverage=0.75,
+        circuit_breaker_failures=2,
+        circuit_breaker_cooldown_minutes=10,
+    )
+
+    assert source.fetch(NOW).venue_coverage == 0.75
+    assert source.fetch(NOW + timedelta(minutes=1)).venue_coverage == 0.75
+    calls_before_open_scan = len(
+        [call for call in client.calls if call["params"]["mkt"] == "ctwo"]  # type: ignore[index]
+    )
+    assert source.fetch(NOW + timedelta(minutes=5)).venue_coverage == 0.75
+    assert len(
+        [call for call in client.calls if call["params"]["mkt"] == "ctwo"]  # type: ignore[index]
+    ) == calls_before_open_scan
+
+    assert source.fetch(NOW + timedelta(minutes=12)).venue_coverage == 1.0

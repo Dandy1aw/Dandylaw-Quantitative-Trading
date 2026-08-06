@@ -1,0 +1,110 @@
+{
+  "captured_at": "2026-07-29T14:35:07.351573+00:00",
+  "report_date": "2026-07-28",
+  "delivered_to_recording_notifier": true,
+  "card_count": 3,
+  "card_titles": [
+    "📌 今日美股行动简报 · 2026-07-28",
+    "📈 医疗保健候选 · 2026-07-28",
+    "📈 通信服务候选 · 2026-07-28"
+  ],
+  "card_bodies": [
+    "**今日结论**\n市场状态：震荡\n50日线上宽度 50% · 实现波动 21%\n依据：NO_DIRECTIONAL_EDGE\n\n**持仓纪律**\n没有可用持仓，或账户数据不足。\n\n**杠杆与组合风险**\n总有效仓位 - · 杠杆有效仓位 -\n当前没有新增杠杆风险升级。\n\n**观察与数据边界**\n筛除汇总：财报窗口 1 · 历史不足 3 · 市值低于1000亿美元 3 · 过热不追 8\n• FTNT：EARNINGS_WINDOW\n• SKHY：历史仅 12 个交易日，暂不排名。\n• 纳指100覆盖率 98.1%\n• 行业分散：5 个候选 / 3 个分组；市值资料可用 103/103，合格 45\n• 财报窗口过滤 1 个候选\n• 账户数据不可用；不输出精确卖出股数\n• 亚洲非交易上下文：韩国综合指数 -6.0%、韩国科创指数 -6.1%、纳指期货 -1.4%、标普期货 -0.9%、VIX +6.8%\n\n**AI解释（不改写数值）**\n主线：区间震荡，无方向优势；基准低于20/50日均线、高于200日均线，亚洲风险偏弱。\n持仓：账户数据不可用，无法评估持仓或给出精确卖出股数。\n动作：ISRG、VRTX、GOOGL、GOOG均仅观察，因无账户而阻断。仅供观察，不构成投资建议。\n\n> 价格触发不保证成交，隔夜跳空可能穿价；系统不自动下单。仅供观察，不构成投资建议。",
+    "**行业分组候选 · 市值门槛 ≥ 1000亿美元**\n\n**医疗保健**\n• ISRG · Intuitive Surgical, Inc.｜震荡修复｜仅观察：账户数据不足\n  策略 #1 · 合格同行市值 #3 · 市值 1223亿美元\n  Medical Instruments & Supplies · 画像 2026-07-22 · 新闻窗口近7日\n  上涨逻辑：ATR偏离后反转确认，营收增长18.5%、盈利增长26.5%提供验证；买盘偏弱表示反弹确认仍有限。\n  行业地位：行业策略第1；合格同行市值第3\n  壁垒：医疗器械研发、制造与商业化一体化能力形成较高复制门槛。\n  反证：若跌破321.56，或增长明显放缓，区间反转逻辑失效。\n• VRTX · Vertex Pharmaceuticals Incorpor｜震荡修复｜仅观察：账户数据不足\n  策略 #2 · 合格同行市值 #4 · 市值 1206亿美元\n  Biotechnology · 画像 2026-07-22 · 新闻窗口近7日\n  上涨逻辑：反转已确认且偏离波动区间，盈利增长61.4%；与AbCellera合作开发自身免疫疾病多特异性T细胞衔接器，形成可验证的管线催化。\n  行业地位：行业策略第2；合格同行市值第4\n  壁垒：囊性纤维化成熟药物组合、专科商业化网络及复杂疗法研发能力难以快速复制。\n  反证：买盘资金强度偏弱，若合作管线失败、核心产品增长放缓或股价跌破450.2043，上涨逻辑可能失效。\n\n> 买盘资金为日线 OHLCV 估算，不是逐笔净流入；系统不自动下单。",
+    "**行业分组候选 · 市值门槛 ≥ 1000亿美元**\n\n**通信服务**\n• GOOGL · Alphabet Inc.｜震荡修复｜仅观察：账户数据不足\n  策略 #1 · 合格同行市值 #1 · 市值 4.24万亿美元\n  Internet Content & Information · 画像 2026-07-22 · 新闻窗口近7日\n  上涨逻辑：ATR偏离后反转确认，营收增长21.8%、盈利增长82.0%及37.9%利润率构成验证。\n  行业地位：行业策略第1；合格同行市值第1\n  壁垒：产品与平台组合、279.22亿美元自由现金流支撑持续投入，复制成本较高。\n  反证：若跌破309.9，或增长与利润率显著转弱，反转逻辑失效。\n• GOOG · Alphabet Inc.｜震荡修复｜仅观察：账户数据不足\n  策略 #2 · 合格同行市值 #2 · 市值 4.23万亿美元\n  Internet Content & Information · 画像 2026-07-22 · 新闻窗口近7日\n  上涨逻辑：ATR偏离后反转确认，营收增长21.8%、盈利增长82.0%；中等买盘表示资金确认尚非强势。\n  行业地位：行业策略第2；合格同行市值第2\n  壁垒：产品与平台组合、279.22亿美元自由现金流支持长期投入，追赶门槛较高。\n  反证：若跌破309.1549，或盈利增长与现金流明显恶化，逻辑失效。\n\n> 买盘资金为日线 OHLCV 估算，不是逐笔净流入；系统不自动下单。"
+  ],
+  "company_rationale_count": 4,
+  "all_live_labels_translated": true,
+  "candidate_count": 4,
+  "target_checks": [
+    {
+      "ticker": "ISRG",
+      "entry_high": 361.2387,
+      "targets": [
+        379.3006,
+        397.3626,
+        415.4245
+      ],
+      "expected": [
+        379.3006,
+        397.3626,
+        415.4245
+      ],
+      "stage": 1,
+      "target_price": 379.3006,
+      "buying_pressure_label": "偏弱",
+      "buying_pressure_score": 0.3769,
+      "recent_buying_notional": 2794375119.31,
+      "nearby_resistance": 402.33
+    },
+    {
+      "ticker": "VRTX",
+      "entry_high": 482.5995,
+      "targets": [
+        506.7295,
+        530.8595,
+        554.9894
+      ],
+      "expected": [
+        506.7295,
+        530.8595,
+        554.9894
+      ],
+      "stage": 1,
+      "target_price": 506.7295,
+      "buying_pressure_label": "偏弱",
+      "buying_pressure_score": 0.3044,
+      "recent_buying_notional": 1436841280.52,
+      "nearby_resistance": 496.83
+    },
+    {
+      "ticker": "GOOGL",
+      "entry_high": 336.6862,
+      "targets": [
+        353.5205,
+        370.3548,
+        387.1891
+      ],
+      "expected": [
+        353.5205,
+        370.3548,
+        387.1891
+      ],
+      "stage": 1,
+      "target_price": 353.5205,
+      "buying_pressure_label": "中等",
+      "buying_pressure_score": 0.4693,
+      "recent_buying_notional": 23802126687.22,
+      "nearby_resistance": 350.1309
+    },
+    {
+      "ticker": "GOOG",
+      "entry_high": 335.5306,
+      "targets": [
+        352.3071,
+        369.0837,
+        385.8602
+      ],
+      "expected": [
+        352.3071,
+        369.0837,
+        385.8602
+      ],
+      "stage": 1,
+      "target_price": 352.3071,
+      "buying_pressure_label": "中等",
+      "buying_pressure_score": 0.4915,
+      "recent_buying_notional": 16638128885.58,
+      "nearby_resistance": 344.4499
+    }
+  ],
+  "all_three_stage_targets_exact": true,
+  "nvda_live_option_chain": {
+    "session": "2026-07-29",
+    "contract_count": 940,
+    "call_volume": 452976,
+    "put_volume": 369018,
+    "call_put_ratio": 1.2275173568769002,
+    "truncated": false
+  }
+}

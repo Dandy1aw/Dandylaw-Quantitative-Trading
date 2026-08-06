@@ -125,7 +125,7 @@ def test_partial_snapshot_keeps_last_exact_position_quantities(tmp_path: Path) -
             cash="5004.46",
             buying_power="5004.46",
             currency="USD",
-            reported_position_count=1,
+            reported_position_count=2,
             observed_at=NOW - timedelta(hours=1),
         ),
         positions=(
@@ -138,6 +138,13 @@ def test_partial_snapshot_keeps_last_exact_position_quantities(tmp_path: Path) -
                 weight_pct="16.53",
                 pnl="166.82",
                 pnl_pct="20.23",
+            ),
+            ExtractedPosition(
+                symbol="MUU",
+                qty="0",
+                avg_entry_price="0",
+                current_price="29.848",
+                market_value="0",
             ),
         ),
     )

@@ -10,6 +10,7 @@ from typing import Any, Literal, Mapping, Protocol, Sequence
 from zoneinfo import ZoneInfo
 
 OptionSide = Literal["call", "put"]
+HoldingFlowStatus = Literal["ok", "no_chain", "unavailable", "reset"]
 _ET = ZoneInfo("America/New_York")
 _STANDARD_ROOT = re.compile(r"^[A-Z]{1,6}$")
 
@@ -98,6 +99,65 @@ class OptionFlowSnapshot:
 
 
 @dataclass(frozen=True)
+class HoldingOptionFlow:
+    """Call/Put day-volume summary for one observed brokerage holding."""
+
+    underlying: str
+    call_volume: int
+    put_volume: int
+    call_delta: int | None
+    put_delta: int | None
+    data_status: HoldingFlowStatus
+
+    @property
+    def total_volume(self) -> int:
+        return self.call_volume + self.put_volume
+
+    @property
+    def call_put_ratio(self) -> float | None:
+        if self.put_volume == 0:
+            return float("inf") if self.call_volume > 0 else None
+        return self.call_volume / self.put_volume
+
+    @property
+    def dominance(self) -> float | None:
+        if self.total_volume == 0:
+            return None
+        return abs(self.call_volume - self.put_volume) / self.total_volume
+
+    @property
+    def structure_label(self) -> str:
+        if self.data_status == "no_chain":
+            return "无可用期权链"
+        if self.data_status == "unavailable":
+            return "期权数据暂不可用"
+        if self.call_volume > self.put_volume:
+            return "Call 占优"
+        if self.put_volume > self.call_volume:
+            return "Put 占优"
+        return "Call/Put 均衡"
+
+
+@dataclass(frozen=True)
+class HoldingOptionFlowSnapshot:
+    slot: str
+    captured_at: datetime
+    provider: str
+    rows: tuple[HoldingOptionFlow, ...]
+
+    @property
+    def session_date(self) -> date:
+        return self.captured_at.astimezone(_ET).date()
+
+
+@dataclass(frozen=True)
+class HoldingOptionFlowChange:
+    flow: HoldingOptionFlow
+    previous_direction: Literal["call", "put", "balanced"] | None
+    flags: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class OptionFlowPolicy:
     top_n: int = 10
     rank_jump: int = 3
@@ -119,10 +179,247 @@ class OptionFlowChange:
     score: int
 
 
+@dataclass(frozen=True)
+class UnderlyingOptionFlow:
+    """Display-only aggregation of the currently visible contract leaderboard."""
+
+    underlying: str
+    call_volume: int
+    put_volume: int
+    call_contract_count: int
+    put_contract_count: int
+    known_call_delta: int | None
+    known_put_delta: int | None
+    call_delta_partial: bool
+    put_delta_partial: bool
+
+    @property
+    def total_volume(self) -> int:
+        return self.call_volume + self.put_volume
+
+    @property
+    def call_put_ratio(self) -> float | None:
+        if self.call_volume <= 0 or self.put_volume <= 0:
+            return None
+        return self.call_volume / self.put_volume
+
+    @property
+    def dominance(self) -> float | None:
+        if self.call_volume <= 0 or self.put_volume <= 0:
+            return None
+        return abs(self.call_volume - self.put_volume) / self.total_volume
+
+    @property
+    def structure_label(self) -> str:
+        ratio = self.call_put_ratio
+        if ratio is None:
+            if self.call_volume > 0:
+                return "仅 Call 可见"
+            if self.put_volume > 0:
+                return "仅 Put 可见"
+            return "无可见量"
+        if ratio >= 3.0:
+            return "Call 显著占优"
+        if ratio >= 1.5:
+            return "Call 占优"
+        if ratio > 0.67:
+            return "Call/Put 相对均衡"
+        if ratio > 0.33:
+            return "Put 占优"
+        return "Put 显著占优"
+
+
 class OptionFlowSource(Protocol):
     """Provider boundary for one trustworthy option-volume snapshot."""
 
     def fetch(self, now: datetime) -> OptionFlowSnapshot: ...
+
+
+def _known_delta(
+    current: Sequence[OptionContractVolume],
+    previous_by_symbol: Mapping[str, OptionContractVolume] | None,
+) -> tuple[int | None, bool]:
+    if previous_by_symbol is None or not current:
+        return None, False
+    known = 0
+    comparable = 0
+    partial = False
+    for item in current:
+        previous = previous_by_symbol.get(item.contract_symbol)
+        if previous is None:
+            partial = True
+            continue
+        comparable += 1
+        known += max(item.volume - previous.volume, 0)
+    return (known if comparable else None), partial
+
+
+def aggregate_underlying_flows(
+    current: OptionFlowSnapshot,
+    previous: OptionFlowSnapshot | None = None,
+    *,
+    top_n: int = 10,
+) -> tuple[UnderlyingOptionFlow, ...]:
+    """Aggregate visible contracts by root without changing alert semantics."""
+    if top_n < 1:
+        raise ValueError("top_n must be positive")
+    grouped: dict[str, dict[OptionSide, list[OptionContractVolume]]] = {}
+    for item in current.rows:
+        sides = grouped.setdefault(item.underlying, {"call": [], "put": []})
+        sides[item.side].append(item)
+    previous_by_symbol = (
+        {item.contract_symbol: item for item in previous.rows}
+        if previous is not None
+        else None
+    )
+    output: list[UnderlyingOptionFlow] = []
+    for underlying, sides in grouped.items():
+        calls = sides["call"]
+        puts = sides["put"]
+        call_delta, call_partial = _known_delta(calls, previous_by_symbol)
+        put_delta, put_partial = _known_delta(puts, previous_by_symbol)
+        output.append(
+            UnderlyingOptionFlow(
+                underlying=underlying,
+                call_volume=sum(item.volume for item in calls),
+                put_volume=sum(item.volume for item in puts),
+                call_contract_count=len(calls),
+                put_contract_count=len(puts),
+                known_call_delta=call_delta,
+                known_put_delta=put_delta,
+                call_delta_partial=call_partial,
+                put_delta_partial=put_partial,
+            )
+        )
+    output.sort(key=lambda item: (-item.total_volume, item.underlying))
+    return tuple(output[:top_n])
+
+
+def build_holding_option_flow_snapshot(
+    contracts_by_underlying: Mapping[
+        str, Sequence[OptionContractVolume] | None
+    ],
+    *,
+    at: datetime,
+    previous: HoldingOptionFlowSnapshot | None = None,
+    provider: str = "alpaca-option-snapshots",
+) -> HoldingOptionFlowSnapshot:
+    """Aggregate holding chains and compare cumulative volume within one session."""
+    if at.tzinfo is None:
+        raise ValueError("capture time must be timezone-aware")
+    prior_rows = (
+        {row.underlying: row for row in previous.rows}
+        if previous is not None
+        and previous.session_date == at.astimezone(_ET).date()
+        and previous.provider == provider
+        else {}
+    )
+    output: list[HoldingOptionFlow] = []
+    for raw_underlying, contracts in contracts_by_underlying.items():
+        underlying = raw_underlying.strip().upper()
+        if contracts is None:
+            output.append(HoldingOptionFlow(underlying, 0, 0, None, None, "unavailable"))
+            continue
+        if not contracts:
+            output.append(HoldingOptionFlow(underlying, 0, 0, None, None, "no_chain"))
+            continue
+        call_volume = sum(item.volume for item in contracts if item.side == "call")
+        put_volume = sum(item.volume for item in contracts if item.side == "put")
+        prior = prior_rows.get(underlying)
+        call_delta: int | None = None
+        put_delta: int | None = None
+        status: HoldingFlowStatus = "ok"
+        if prior is not None and prior.data_status in ("ok", "reset"):
+            if call_volume < prior.call_volume or put_volume < prior.put_volume:
+                status = "reset"
+            else:
+                call_delta = call_volume - prior.call_volume
+                put_delta = put_volume - prior.put_volume
+        output.append(
+            HoldingOptionFlow(
+                underlying=underlying,
+                call_volume=call_volume,
+                put_volume=put_volume,
+                call_delta=call_delta,
+                put_delta=put_delta,
+                data_status=status,
+            )
+        )
+    return HoldingOptionFlowSnapshot(
+        slot=scan_slot(at),
+        captured_at=at,
+        provider=provider,
+        rows=tuple(output),
+    )
+
+
+def _holding_direction(
+    flow: HoldingOptionFlow,
+) -> Literal["call", "put", "balanced"]:
+    if flow.call_volume > flow.put_volume:
+        return "call"
+    if flow.put_volume > flow.call_volume:
+        return "put"
+    return "balanced"
+
+
+def detect_holding_option_flow_changes(
+    previous: HoldingOptionFlowSnapshot,
+    current: HoldingOptionFlowSnapshot,
+    *,
+    min_delta_volume: int = 5_000,
+    dominance_threshold: float = 0.20,
+) -> tuple[HoldingOptionFlowChange, ...]:
+    """Select holding-volume changes that may share the global alert gate."""
+    if min_delta_volume < 0:
+        raise ValueError("min_delta_volume must not be negative")
+    if not 0 <= dominance_threshold <= 1:
+        raise ValueError("dominance_threshold must be between zero and one")
+    if (
+        previous.session_date != current.session_date
+        or previous.provider != current.provider
+    ):
+        return ()
+    prior = {row.underlying: row for row in previous.rows}
+    output: list[HoldingOptionFlowChange] = []
+    for flow in current.rows:
+        old = prior.get(flow.underlying)
+        if (
+            old is None
+            or flow.data_status != "ok"
+            or old.data_status not in ("ok", "reset")
+        ):
+            continue
+        old_direction = _holding_direction(old)
+        new_direction = _holding_direction(flow)
+        flags: list[str] = []
+        if (
+            old_direction in ("call", "put")
+            and new_direction in ("call", "put")
+            and old_direction != new_direction
+        ):
+            flags.append("DIRECTION_FLIP")
+        delta_total = (
+            flow.call_delta + flow.put_delta
+            if flow.call_delta is not None and flow.put_delta is not None
+            else None
+        )
+        if (
+            flow.dominance is not None
+            and flow.dominance >= dominance_threshold
+            and delta_total is not None
+            and delta_total >= min_delta_volume
+        ):
+            flags.append("VOLUME_IMBALANCE")
+        if flags:
+            output.append(
+                HoldingOptionFlowChange(
+                    flow=flow,
+                    previous_direction=old_direction,
+                    flags=tuple(flags),
+                )
+            )
+    return tuple(output)
 
 
 class OptionFlowEnricher(Protocol):

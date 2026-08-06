@@ -12,9 +12,12 @@ from datetime import date
 from decimal import Decimal
 import math
 import statistics
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from quant_signal.options_flow import OptionSide
+
+if TYPE_CHECKING:
+    from quant_signal.position_tactical import PositionTacticalAnalysis
 
 _ANNUALIZE = math.sqrt(252.0)
 _RV_RETURNS = 20
@@ -34,6 +37,7 @@ class OptionChainContract:
     implied_volatility: float | None
     day_volume: int
     open_interest: int | None
+    gamma: float | None = None
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,12 @@ class OptionChainProvider(Protocol):
     """Provider boundary for one underlying's option chain."""
 
     def fetch_chain(
-        self, underlying: str, *, session: date, max_expiry_days: int
+        self,
+        underlying: str,
+        *,
+        session: date,
+        max_expiry_days: int,
+        include_open_interest: bool = True,
     ) -> OptionChainFetchResult: ...
 
 
@@ -85,6 +94,7 @@ class OptionIntel:
     top_oi_strikes: tuple[TopOIStrike, ...]
     earnings_date: date | None
     data_note: str | None
+    tactical: "PositionTacticalAnalysis | None" = None
 
 
 def realized_vol_20d(closes: Sequence[float]) -> float | None:

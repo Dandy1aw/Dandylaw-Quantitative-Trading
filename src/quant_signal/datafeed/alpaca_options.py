@@ -410,6 +410,7 @@ class AlpacaOptionChainSource:
         *,
         session: date,
         max_expiry_days: int,
+        include_open_interest: bool = True,
     ) -> OptionChainFetchResult:
         root = underlying.strip().upper()
         if not re.fullmatch(r"[A-Z]{1,6}", root):
@@ -419,7 +420,9 @@ class AlpacaOptionChainSource:
         lte = session + timedelta(days=max_expiry_days)
         snapshots, snap_truncated = self._snapshot_pages(root, session, lte)
         oi_map, oi_truncated = (
-            self._open_interest(root, session, lte) if snapshots else ({}, False)
+            self._open_interest(root, session, lte)
+            if snapshots and include_open_interest
+            else ({}, False)
         )
         contracts: list[OptionChainContract] = []
         for symbol, item in snapshots.items():
@@ -429,6 +432,8 @@ class AlpacaOptionChainSource:
             _, expiration, side, strike = parsed
             quote = item.get("latestQuote")
             quote_map = quote if isinstance(quote, Mapping) else {}
+            greeks = item.get("greeks")
+            greek_map = greeks if isinstance(greeks, Mapping) else {}
             daily_bar = item.get("dailyBar")
             bar_map = daily_bar if isinstance(daily_bar, Mapping) else {}
             try:
@@ -447,6 +452,7 @@ class AlpacaOptionChainSource:
                     implied_volatility=_float(item.get("impliedVolatility")),
                     day_volume=day_volume,
                     open_interest=oi_map.get(symbol),
+                    gamma=_float(greek_map.get("gamma")),
                 )
             )
         contracts.sort(key=lambda item: item.contract_symbol)

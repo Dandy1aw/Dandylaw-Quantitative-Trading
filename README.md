@@ -249,6 +249,21 @@ v0.5 起系统从"价格到点提醒器"升级为只读交易执行建议系统�
 STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（feature flag
 `legacy_price_deviation.enabled` 可回滚）。
 
+## 真实持仓股价异动
+
+`holding_price_alert.enabled` 打开后，系统在美股正常交易时段每分钟检查
+最新一份**完整券商截图**里的真实持仓。它同时比较 1/5/15 分钟和当日涨跌，
+个股与 ETF 使用不同的最低门槛，并用近 30 根分钟收益波动率自适应抬高门槛。
+末根分钟成交量达到近 20 根中位数的 4 倍且价格同步变动时，也可触发放量异动。
+同标的、同方向、同时间窗口与同强度等级在 30 分钟内去重；异动从 1 级升到
+2/3 级时会再提醒。实时价格优先使用 Alpaca IEX（部分市场成交量）；
+SIP 在当前账户下延迟约 15 分钟，不作为实时告警主源。
+
+确定要发送的异动会先调用 Codex 联网搜索异动原因：优先公司官网、SEC
+和可核验财经媒体，输出事件分类、置信度、简要结论与最多 3 条来源。
+只有时间接近而没有证据时必须写“原因未确认”。Codex 超时或失败不会吞掉告警，
+卡片会带失败状态继续发出。
+
 ## 美股期权异动提醒（Cboe 四市场）
 
 只观察、不下单的期权热度频道（`option_flow.enabled` 开关），回答三个问题：
@@ -312,9 +327,12 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 
 **能做什么**：
 
-- 发送券商持仓截图 → Codex 解析 → 对账校验 → 更新账户快照（复用
+- 发送券商账户资产页原图（需清晰包含总资产、持仓市值、现金/购买力及完整持仓）
+  → Codex 解析 → 对账校验 → 更新账户快照（复用
   `portfolio_import` 全部安全门槛）。`VALIDATED` 自动应用；`PARTIAL` 列出校验
-  错误并等待 15 分钟内回复「确认导入」；`REJECTED` 绝不应用
+  错误并等待 15 分钟内回复「确认导入」；`REJECTED` 绝不应用。交易日
+  08:15–15:45 ET 导入成功后会立即按新持仓重算并重推今日行动计划；其他时段
+  只安全更新账户，由下一次定时任务重算
 - 文本指令：`状态`（系统概况）/ `持仓`（截图账户+持仓）/ `计划`（活跃执行
   计划）/ `期权`（最新期权榜，读台账不新抓）/ `期权 <代码>`（单标的期权
   情报，现场拉取，如 `期权 MU`）/ `帮助`
@@ -353,6 +371,7 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 | `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
 | `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已开盘 | 20日突破策略，监控 `watchlist` |
 | `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
+| `holding_price_alert` | 09:30–15:59 ET 每分钟 | NYSE 交易日历 + 实际收市时间 | 真实持仓 1/5/15 分钟与当日异动，波动率自适应+放量确认+冷却升级 |
 | `option_flow` | 10:00–15:45 ET 每15分钟 | NYSE 交易日历 | Cboe 四市场期权 Call/Put Top10 扫描，基线/实质变化才推送 |
 | `option_flow_close` | 北京 08:00 (UTC 00:00) | NYSE 交易日历(美东日期) | 期权收盘榜（force_summary；美东晚间抓当日最终数据，随早间统一阅读） |
 | `option_flow_drain` | 16:35–21:35 ET 每小时 | NYSE 交易日历 | 只重试期权 outbox 未发出的卡（不抓数据），保证收盘榜在过期窗口内有真实重试 |
@@ -465,7 +484,9 @@ option_flow:                     # 期权异动提醒（Cboe 四市场，只观�
   max_alerts_per_day: 4          # 含基线与收盘榜
   intraday_expiry_minutes: 45    # 盘中卡过期取消
   closing_expiry_hours: 12       # 收盘榜过期时间
-  min_venue_coverage: 1.0        # 四市场缺一即 fail closed
+  min_venue_coverage: 0.75       # 至少三市场成功；缺失市场会标注覆盖率
+  circuit_breaker_failures: 2    # 单市场连续失败后开启熔断
+  circuit_breaker_cooldown_minutes: 10
 
 option_intel:                    # 持仓期权情报（只观察，不推荐任何期权交易）
   enabled: false
@@ -475,6 +496,31 @@ option_intel:                    # 持仓期权情报（只观察，不推荐任
   iv_rv_warn_ratio: 1.5          # ATM IV / 20日RV 超过此值提示"事件定价"
   retention_days: 400            # 日度快照保留天数（留足一年做 IV 分位数）
   max_tickers: 12                # 每日最多处理的持仓标的数
+
+holding_price_alert:             # 真实持仓分钟级股价异动
+  enabled: true
+  stock_1m_pct: 0.015            # 个股 1 分钟最低门槛 1.5%
+  stock_5m_pct: 0.030
+  stock_15m_pct: 0.050
+  stock_session_pct: 0.080
+  etf_1m_pct: 0.010              # ETF 使用更敏感的门槛
+  etf_5m_pct: 0.020
+  etf_15m_pct: 0.035
+  etf_session_pct: 0.050
+  volume_spike_multiple: 4.0     # 末根量 / 近 20 根中位数
+  min_volume_spike_move_pct: 0.0075
+  cooldown_minutes: 30
+  max_alerts_per_day: 12
+  cause_search:
+    enabled: true
+    command: codex
+    model: gpt-5.6-terra         # 盘中低延迟查因专用
+    reasoning_effort: low
+    timeout_seconds: 60          # 实测联网查因约49秒；超时仍发告警
+    lookback_hours: 24
+    max_sources: 3
+    max_alerts_per_batch: 8
+    max_summary_chars: 220
 
 legacy_price_deviation:          # 旧 ±2% 偏离提醒, 默认下线, 可回滚
   enabled: false

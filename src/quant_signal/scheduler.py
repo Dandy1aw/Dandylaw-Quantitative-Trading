@@ -1,5 +1,6 @@
 import threading
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,7 @@ from quant_signal.calendar import (
     previous_trading_day,
     session_close_utc,
 )
+from quant_signal.logging_setup import redact_text
 from quant_signal.pipelines.us_briefing import BriefingMode
 
 log = structlog.get_logger()
@@ -25,38 +27,128 @@ ET = ZoneInfo("America/New_York")
 HEARTBEAT_FAIL_THRESHOLD = 2
 JOB_ALERT_SILENCE = timedelta(hours=2)
 JOB_RUNNING_DEADLINE = timedelta(minutes=10)
+EXECUTION_BRIEF_COALESCE_WINDOW = timedelta(minutes=5)
 # market_scan 07:00 ET 触发, 07:30 之后仍无当日成功即视为停摆
 _SCAN_DUE_ET = time(7, 30)
 
 
-class JobRuntime:
-    """记录每个 job 的最近开始时间、时长与最近成功时间, 供心跳判断关键任务是否停摆。"""
+class JobReportedFailure(RuntimeError):
+    """A job returned normally but explicitly reported an unsuccessful result."""
 
-    def __init__(self, now_fn: Callable[[], datetime] | None = None) -> None:
+
+class JobRuntime:
+    """Durable per-job health state used by heartbeat and bot diagnostics."""
+
+    def __init__(
+        self,
+        now_fn: Callable[[], datetime] | None = None,
+        ledger: Any | None = None,
+    ) -> None:
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._ledger = ledger
         self._lock = threading.Lock()
         self._starts: dict[str, datetime] = {}
         self._last_success: dict[str, datetime] = {}
+        self._last_failure: dict[str, datetime] = {}
         self._last_duration: dict[str, float] = {}
+        self._last_error: dict[str, str] = {}
+        self._consecutive_failures: dict[str, int] = {}
         self.created_at = self._now_fn()
+        self._restore()
+
+    def _restore(self) -> None:
+        loader = getattr(self._ledger, "job_runtime_snapshot", None)
+        if not callable(loader):
+            return
+        try:
+            rows = loader()
+        except Exception as error:  # noqa: BLE001 - in-memory fallback keeps boot safe
+            log.warning("job_runtime.restore_failed", error=str(error))
+            return
+        for row in rows:
+            job_id = str(row["job_id"])
+            if row.get("running_since"):
+                self._starts[job_id] = datetime.fromisoformat(
+                    str(row["running_since"])
+                )
+            if row.get("last_success"):
+                self._last_success[job_id] = datetime.fromisoformat(
+                    str(row["last_success"])
+                )
+            if row.get("last_failure"):
+                self._last_failure[job_id] = datetime.fromisoformat(
+                    str(row["last_failure"])
+                )
+            if row.get("last_duration") is not None:
+                self._last_duration[job_id] = float(row["last_duration"])
+            if row.get("last_error"):
+                self._last_error[job_id] = str(row["last_error"])
+            self._consecutive_failures[job_id] = int(
+                row.get("consecutive_failures") or 0
+            )
+
+    def _persist(self, method: str, *args: object, **kwargs: object) -> None:
+        writer = getattr(self._ledger, method, None)
+        if not callable(writer):
+            return
+        try:
+            writer(*args, **kwargs)
+        except Exception as error:  # noqa: BLE001 - preserve in-memory diagnostics
+            log.warning("job_runtime.persist_failed", method=method, error=str(error))
 
     def record_start(self, job_id: str) -> None:
+        now = self._now_fn()
         with self._lock:
-            self._starts[job_id] = self._now_fn()
+            self._starts[job_id] = now
+        self._persist("record_job_start", job_id, now=now)
 
-    def wrap(self, job_id: str, func: Callable[[], None]) -> Callable[[], None]:
-        def _wrapped() -> None:
+    def wrap(self, job_id: str, func: Callable[[], object]) -> Callable[[], object]:
+        def _wrapped() -> object:
             self.record_start(job_id)
             try:
-                func()
-            except Exception:
+                result = func()
+                if result is False:
+                    raise JobReportedFailure(
+                        f"{job_id} reported an unsuccessful result"
+                    )
+            except Exception as error:
+                end = self._now_fn()
+                with self._lock:
+                    start = self._starts.get(job_id, end)
+                    duration = (end - start).total_seconds()
+                    safe_error = redact_text(
+                        f"{type(error).__name__}: {error}"
+                    )[:1000]
+                    self._last_failure[job_id] = end
+                    self._last_duration[job_id] = duration
+                    self._last_error[job_id] = safe_error
+                    self._consecutive_failures[job_id] = (
+                        self._consecutive_failures.get(job_id, 0) + 1
+                    )
+                self._persist(
+                    "record_job_failure",
+                    job_id,
+                    now=end,
+                    duration=duration,
+                    error=safe_error,
+                )
                 raise
             else:
                 end = self._now_fn()
                 with self._lock:
                     start = self._starts.get(job_id, end)
+                    duration = (end - start).total_seconds()
                     self._last_success[job_id] = end
-                    self._last_duration[job_id] = (end - start).total_seconds()
+                    self._last_duration[job_id] = duration
+                    self._last_error.pop(job_id, None)
+                    self._consecutive_failures[job_id] = 0
+                self._persist(
+                    "record_job_success",
+                    job_id,
+                    now=end,
+                    duration=duration,
+                )
+                return result
             finally:
                 with self._lock:
                     self._starts.pop(job_id, None)
@@ -76,15 +168,21 @@ class JobRuntime:
             return self._starts.get(job_id)
 
     def snapshot(self) -> dict[str, dict[str, object]]:
-        """所有已知 job 的运行状态只读快照，供机器人「健康」指令渲染。"""
+        """All known jobs, including failures restored after a process restart."""
         with self._lock:
             job_ids = (
-                set(self._starts) | set(self._last_success) | set(self._last_duration)
+                set(self._starts)
+                | set(self._last_success)
+                | set(self._last_failure)
+                | set(self._last_duration)
             )
             return {
                 job_id: {
                     "last_success": self._last_success.get(job_id),
+                    "last_failure": self._last_failure.get(job_id),
                     "last_duration": self._last_duration.get(job_id),
+                    "last_error": self._last_error.get(job_id),
+                    "consecutive_failures": self._consecutive_failures.get(job_id, 0),
                     "running_since": self._starts.get(job_id),
                 }
                 for job_id in sorted(job_ids)
@@ -230,17 +328,17 @@ def build_scheduler(
     sched = BackgroundScheduler(timezone=ET)
     rotation_lock = threading.Lock()
 
-    def run_rotation_once() -> None:
+    def run_rotation_once() -> object:
         # premarket 与亚洲两次 rotation 共用同一 Engine/BarStore，必须跨 job 串行。
         with rotation_lock:
-            engine.run_premarket(datetime.now(timezone.utc))
+            return engine.run_premarket(datetime.now(timezone.utc))
 
-    def premarket() -> None:
+    def premarket() -> object:
         now_et = _now_et()
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="premarket")
-            return
-        run_rotation_once()
+            return None
+        return run_rotation_once()
 
     def intraday() -> None:
         now_et = _now_et()
@@ -263,25 +361,46 @@ def build_scheduler(
             return
         engine.run_negative_overreaction(datetime.now(timezone.utc))
 
-    def rotation_push() -> None:
+    def rotation_push() -> object:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
-        run_rotation_once()
+        return run_rotation_once()
 
-    def us_close_briefing() -> None:
+    def us_close_briefing() -> object:
         with rotation_lock:
-            engine.run_us_briefing(
-                datetime.now(timezone.utc), BriefingMode.US_CLOSE
+            return engine.run_us_briefing(
+                datetime.now(timezone.utc), BriefingMode.US_CLOSE, deliver=False
             )
 
-    def asia_confirm_briefing() -> None:
+    def asia_confirm_briefing() -> object:
         with rotation_lock:
-            engine.run_us_briefing(
-                datetime.now(timezone.utc), BriefingMode.ASIA_CONFIRM
+            return engine.run_us_briefing(
+                datetime.now(timezone.utc), BriefingMode.ASIA_CONFIRM, deliver=False
             )
+
+    def daily_action_briefing() -> object:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="daily_action_briefing")
+            return None
+        with rotation_lock:
+            return engine.run_daily_action_briefing(datetime.now(timezone.utc))
 
     def watch_deviation() -> None:
         engine.run_watch_deviation(datetime.now(timezone.utc))
+
+    def holding_price_alert() -> None:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()) or now_et.time() < time(9, 30):
+            log.info(
+                "skip.non_trading_day_or_before_open", job="holding_price_alert"
+            )
+            return
+        close_utc = session_close_utc(now_et.date())
+        if close_utc is not None and datetime.now(timezone.utc) >= close_utc:
+            log.info("skip.after_close", job="holding_price_alert")
+            return
+        engine.run_holding_price_alert(datetime.now(timezone.utc))
 
     def enrichment() -> None:
         if engine.settings.notify.action_card_only:
@@ -295,6 +414,7 @@ def build_scheduler(
 
     def maintenance() -> None:
         from quant_signal.backup import run_backup
+        from quant_signal.forward_evaluation import evaluate_candidate_forward_returns
         from quant_signal.ingest import ingest_daily_split
 
         if engine is not None:
@@ -304,15 +424,40 @@ def build_scheduler(
                 engine.settings.universe + engine.settings.watchlist,
                 days=10,
             )
+            evaluate_candidate_forward_returns(
+                ledger,
+                store,
+                now=datetime.now(timezone.utc),
+                horizons=engine.settings.forward_evaluation.horizons,
+                benchmark=engine.settings.forward_evaluation.benchmark,
+                transaction_cost_bps_per_side=(
+                    engine.settings.forward_evaluation.transaction_cost_bps_per_side
+                ),
+            )
             # T3(O1)：每日备份台账(不可再生)与行情缓存(尽力)，保留14天
-            run_backup(ledger, engine.settings.db_path, datetime.now(timezone.utc))
+            mirror_dir = (
+                Path(engine.settings.backup.mirror_dir)
+                if engine.settings.backup.mirror_dir
+                else None
+            )
+            run_backup(
+                ledger,
+                engine.settings.db_path,
+                datetime.now(timezone.utc),
+                bar_store=store,
+                keep_days=engine.settings.backup.keep_days,
+                mirror_dir=mirror_dir,
+                require_mirror=engine.settings.backup.require_mirror,
+            )
             before = datetime.now(timezone.utc) - timedelta(
                 days=engine.settings.option_flow.retention_days
             )
             deleted_scans = ledger.prune_option_flow(before)
+            deleted_holding_scans = ledger.prune_holding_option_flow(before)
             log.info(
                 "maintenance.option_flow_pruned",
                 deleted_scans=deleted_scans,
+                deleted_holding_scans=deleted_holding_scans,
                 before=before.isoformat(),
             )
             intel_before = datetime.now(timezone.utc) - timedelta(
@@ -328,6 +473,9 @@ def build_scheduler(
     settings = getattr(engine, "settings", None)
     legacy_deviation_enabled = (
         bool(settings.legacy_price_deviation.enabled) if settings is not None else False
+    )
+    holding_price_alert_enabled = (
+        bool(settings.holding_price_alert.enabled) if settings is not None else False
     )
     execution_enabled = (
         bool(settings.execution_plan.enabled) if settings is not None else True
@@ -346,7 +494,7 @@ def build_scheduler(
     sched.add_listener(
         health.listen, EVENT_JOB_ERROR | EVENT_JOB_MISSED | EVENT_JOB_MAX_INSTANCES
     )
-    runtime = runtime or JobRuntime()
+    runtime = runtime or JobRuntime(ledger=ledger)
     hb = Heartbeat(
         notifier=notifier, check=build_runtime_check(runtime), health=health
     )
@@ -410,6 +558,20 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=3600,
         )
+        if briefing.delivery_mode == "live":
+            sched.add_job(
+                runtime.wrap("daily_action_briefing", daily_action_briefing),
+                CronTrigger(
+                    hour=8,
+                    minute=15,
+                    day_of_week="mon-fri",
+                    timezone=ET,
+                ),
+                id="daily_action_briefing",
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
         sched.add_job(
             runtime.wrap("asia_confirm_briefing", asia_confirm_briefing),
             CronTrigger(
@@ -433,14 +595,29 @@ def build_scheduler(
             misfire_grace_time=240,
         )
 
+    if holding_price_alert_enabled:
+        sched.add_job(
+            runtime.wrap("holding_price_alert", holding_price_alert),
+            CronTrigger(
+                hour="9-15", minute="*", day_of_week="mon-fri", timezone=ET
+            ),
+            id="holding_price_alert",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=50,
+        )
+
     if execution_enabled:
 
-        def execution_brief() -> None:
+        def execution_brief() -> object:
             now_et = _now_et()
             if not is_trading_day(now_et.date()):
                 log.info("skip.non_trading_day", job="execution_brief")
-                return
-            engine.run_execution_brief(datetime.now(timezone.utc))
+                return None
+            return engine.run_execution_brief(
+                datetime.now(timezone.utc),
+                skip_if_run_within=EXECUTION_BRIEF_COALESCE_WINDOW,
+            )
 
         def execution_watch() -> None:
             now_et = _now_et()
@@ -558,15 +735,15 @@ def build_scheduler(
     def performance() -> None:
         engine.run_performance(datetime.now(timezone.utc))
 
-    def data_qa() -> None:
-        engine.run_data_qa(datetime.now(timezone.utc))
+    def data_qa() -> bool:
+        return bool(engine.run_data_qa(datetime.now(timezone.utc)))
 
-    def market_scan() -> None:
+    def market_scan() -> object:
         now_et = _now_et()
         if not is_trading_day(now_et.date()):
             log.info("skip.non_trading_day", job="market_scan")
-            return
-        engine.run_market_scan(datetime.now(timezone.utc))
+            return None
+        return engine.run_market_scan(datetime.now(timezone.utc))
 
     # 每交易日 07:00 ET(早于盘前早报)全市场扫描 Top1；最重的 job, 错过宽限 1h
     sched.add_job(
@@ -593,7 +770,6 @@ def build_scheduler(
         if settings.us_briefing.delivery_mode == "live":
             for legacy_job in (
                 "premarket",
-                "postmarket",
                 "enrichment",
                 "execution_brief",
             ):

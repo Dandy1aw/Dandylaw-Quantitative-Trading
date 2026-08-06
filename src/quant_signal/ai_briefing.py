@@ -9,7 +9,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast
 
 import structlog
@@ -46,7 +46,7 @@ class AIBriefingContext(BaseModel):
 
 class USBriefingAIContext(BaseModel):
     schema_version: Literal["us-briefing-v1"] = "us-briefing-v1"
-    report_kind: Literal["US_CLOSE", "ASIA_CONFIRM"]
+    report_kind: Literal["US_CLOSE", "ASIA_CONFIRM", "DAILY_ACTION"]
     as_of: str
     regime: dict[str, object]
     candidates: list[dict[str, object]] = Field(default_factory=list)
@@ -54,6 +54,14 @@ class USBriefingAIContext(BaseModel):
     portfolio_risk: dict[str, object] = Field(default_factory=dict)
     observations: list[dict[str, object]] = Field(default_factory=list)
     data_quality: list[str] = Field(default_factory=list)
+
+
+class CompanyRationaleAIContext(BaseModel):
+    schema_version: Literal["company-rationale-v1"] = "company-rationale-v1"
+    as_of: str
+    candidates: list[dict[str, object]] = Field(default_factory=list)
+    news: dict[str, list[dict[str, object]]] = Field(default_factory=dict)
+    max_chars_per_company: int = Field(default=220, ge=80, le=500)
 
 
 def _is_secret_like(value: str) -> bool:
@@ -79,8 +87,27 @@ def _sanitize(value: Any) -> Any:
 
 
 def build_ai_briefing_prompt(
-    context: AIBriefingContext | USBriefingAIContext, max_chars: int = 6000
+    context: AIBriefingContext | USBriefingAIContext | CompanyRationaleAIContext,
+    max_chars: int = 6000,
 ) -> str:
+    if isinstance(context, CompanyRationaleAIContext):
+        instructions = (
+            "你是美股候选公司的证据分析员。只使用输入中的公司画像、量化信号和新闻，"
+            "不运行命令、不读文件、不联网。不得新增标的、排名或数字，不得改变价格和股数。"
+            "除股票代码、公司名称和行业专用名词外，全部使用中文。财务比例使用输入中的"
+            "百分比展示值，美元金额使用输入中的亿美元或万亿美元展示值；不得输出未经格式化的长整数。"
+            "三级止盈和买盘资金强度只能解释，不得自行重算或改写。"
+            "每家公司必须严格输出五行：第一行 [TICKER]，随后行首依次为“上涨逻辑：”"
+            "“行业地位：”“壁垒：”“反证：”。行业地位必须原样引用行业内策略排名和"
+            "合格同行市值排名；上涨逻辑要说明可验证驱动，壁垒要说明难复制能力，反证要"
+            "给出最可能令逻辑失效的条件。每家公司四行正文总计不得超过输入中的字符上限。"
+            "禁止使用“必涨、稳赚、垄断、不可替代”等绝对措辞，不使用 Markdown 表格。\n\n"
+            "输入数据：\n"
+        )
+        suffix = "\n\n只输出公司块，不输出总览或免责声明。"
+        budget = max(0, max_chars - len(instructions) - len(suffix))
+        payload = _bounded_company_context_payload(context, budget)
+        return f"{instructions}{payload}{suffix}"[:max_chars]
     if isinstance(context, USBriefingAIContext):
         instructions = (
             "你是量化交易系统的简报解释员。只解释本 prompt 中的结构化数据，"
@@ -90,6 +117,13 @@ def build_ai_briefing_prompt(
             "候选、持仓、风险”四个短段落组织，不使用表格，不声称已经成交。\n\n"
             "输入数据：\n"
         )
+        if context.report_kind == "DAILY_ACTION":
+            instructions = (
+                "你是量化交易系统的行动简报解释员。只解释本 prompt 中的结构化数据，"
+                "不运行命令、不读文件、不联网，不新增或修改数字和标的。"
+                "只输出三行，行首必须依次为“主线：”“持仓：”“动作：”，"
+                "总计最多180个字符，不使用表格或Markdown。\n\n输入数据：\n"
+            )
         suffix = "\n\n必须保留：仅供观察，不构成投资建议。"
         budget = max(0, max_chars - len(instructions) - len(suffix))
         payload = _bounded_us_context_payload(context, budget)
@@ -98,8 +132,8 @@ def build_ai_briefing_prompt(
         instructions = (
             "你是量化交易系统的行动卡分析员。只分析本 prompt 输入，不运行命令、不读文件、不联网。"
             "结构化执行计划中的价格、数量、止损和止盈不可改写或补算。"
-            "只输出主线、最大风险、今日倾向三点，总计最多300个中文字符；不要表格、不要复述全部标的。"
-            "必须保留：仅供观察，不构成投资建议。\n\n输入数据：\n"
+            "只输出三行，行首必须依次为“主线：”“持仓：”“动作：”，总计最多180个字符；"
+            "不要表格、不要Markdown、不要复述全部标的。\n\n输入数据：\n"
         )
     else:
         instructions = (
@@ -320,6 +354,97 @@ def _bounded_us_context_payload(
     return serialized if len(serialized) <= budget else "{}"
 
 
+def _bounded_company_context_payload(
+    context: CompanyRationaleAIContext, budget: int
+) -> str:
+    candidate_fields = (
+        "ticker", "company_name", "gics_sector", "candidate_group", "industry", "market_cap_usd",
+        "sector_strategy_rank", "sector_market_cap_rank", "business_summary",
+        "total_revenue", "revenue_growth", "earnings_growth", "profit_margin",
+        "return_on_equity", "free_cash_flow", "lane", "reasons", "entry_low",
+        "entry_high", "invalidation_price", "target_price", "profit_targets",
+        "recommended_target_stage", "recent_buying_notional",
+        "buying_pressure_score", "buying_pressure_label", "nearby_resistance",
+    )
+    candidates = [
+        _selected_fields(row, candidate_fields) for row in context.candidates
+    ]
+    for summary_limit, news_limit in ((500, 5), (300, 3), (160, 2), (80, 1), (0, 0)):
+        compact_candidates: list[dict[str, object]] = []
+        for row in candidates:
+            compact = dict(row)
+            compact.update(_company_display_fields(compact))
+            for raw_key in (
+                "market_cap_usd",
+                "total_revenue",
+                "revenue_growth",
+                "earnings_growth",
+                "profit_margin",
+                "return_on_equity",
+                "free_cash_flow",
+                "recent_buying_notional",
+                "buying_pressure_score",
+            ):
+                compact.pop(raw_key, None)
+            compact["required_rank_text"] = (
+                f"行业策略第{row.get('sector_strategy_rank')}；"
+                f"合格同行市值第{row.get('sector_market_cap_rank')}"
+            )
+            if "business_summary" in compact:
+                compact["business_summary"] = _truncate_text(
+                    str(compact["business_summary"]), summary_limit
+                )
+            compact_candidates.append(compact)
+        compact_news = {
+            ticker: [
+                _selected_fields(item, ("created_at", "headline", "summary", "source"))
+                for item in items[:news_limit]
+            ]
+            for ticker, items in context.news.items()
+            if items and news_limit
+        }
+        payload = {
+            "schema_version": context.schema_version,
+            "as_of": context.as_of,
+            "max_chars_per_company": context.max_chars_per_company,
+            "candidates": compact_candidates,
+            "news": compact_news,
+        }
+        serialized = json.dumps(
+            _sanitize(payload), ensure_ascii=False, separators=(",", ": ")
+        )
+        if len(serialized) <= budget:
+            return serialized
+    return "{}"
+
+
+def _company_display_fields(row: Mapping[str, object]) -> dict[str, str]:
+    output: dict[str, str] = {}
+    for key in (
+        "revenue_growth",
+        "earnings_growth",
+        "profit_margin",
+        "return_on_equity",
+        "buying_pressure_score",
+    ):
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output[f"{key}_display"] = f"{float(value) * 100:.1f}%"
+    for key in ("total_revenue", "free_cash_flow", "recent_buying_notional"):
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            output[f"{key}_display"] = f"{float(value) / 100_000_000:.2f}亿美元"
+    market_cap = row.get("market_cap_usd")
+    if isinstance(market_cap, (int, float)) and not isinstance(market_cap, bool):
+        amount = float(market_cap)
+        output["market_cap_display"] = (
+            f"{amount / 1_000_000_000_000:.2f}万亿美元"
+            if amount >= 1_000_000_000_000
+            else f"{amount / 100_000_000:.0f}亿美元"
+        )
+    return output
+
+
 def _truncate_text(text: str, limit: int) -> str:
     if limit <= 0:
         return ""
@@ -373,7 +498,7 @@ def _resolve_windows_script_command(command: list[str]) -> list[str]:
 
 def run_ai_briefing(
     settings: AIBriefingSettings,
-    context: AIBriefingContext | USBriefingAIContext,
+    context: AIBriefingContext | USBriefingAIContext | CompanyRationaleAIContext,
     runner: Runner = subprocess.run,
 ) -> str | None:
     if not settings.enabled:
@@ -435,9 +560,39 @@ def run_ai_briefing(
         )
         output_path_obj.unlink(missing_ok=True)
         if output:
-            return output
+            return _validate_briefing_output(settings, context, output)
     output = completed.stdout.strip()
-    return output or None
+    return _validate_briefing_output(settings, context, output) if output else None
+
+
+def _validate_briefing_output(
+    settings: AIBriefingSettings,
+    context: AIBriefingContext | USBriefingAIContext | CompanyRationaleAIContext,
+    output: str,
+) -> str | None:
+    compact_action = (
+        isinstance(context, AIBriefingContext) and context.output_mode == "action_card"
+    ) or (
+        isinstance(context, USBriefingAIContext)
+        and context.report_kind == "DAILY_ACTION"
+    )
+    if not compact_action:
+        return output
+    compact = output.strip()
+    if len(compact) > settings.output_max_chars or "|" in compact:
+        log.warning("ai_briefing.action_output_invalid", reason="length_or_table")
+        return None
+    lines = [line.strip() for line in compact.splitlines() if line.strip()]
+    prefixes = ("主线：", "持仓：", "动作：")
+    if len(lines) != 3 or any(
+        not line.startswith(prefix) for line, prefix in zip(lines, prefixes)
+    ):
+        log.warning("ai_briefing.action_output_invalid", reason="three_line_schema")
+        return None
+    if any(line.startswith(("-", "*", "#", ">")) for line in lines):
+        log.warning("ai_briefing.action_output_invalid", reason="markdown")
+        return None
+    return "\n".join(lines)
 
 
 _NUMBER_TOKEN = re.compile(r"\d+(?:\.\d+)?")
@@ -539,3 +694,108 @@ def validate_us_briefing_output(
             log.warning("ai_briefing.ticker_guard_rejected", token=token)
             return None
     return output.strip() or None
+
+
+_COMPANY_BLOCK_HEADER = re.compile(r"(?m)^\[([A-Z][A-Z0-9.-]{0,9})\]\s*$")
+_COMPANY_LINE_PREFIXES = ("上涨逻辑：", "行业地位：", "壁垒：", "反证：")
+_ABSOLUTE_CLAIMS = ("必涨", "稳赚", "垄断", "不可替代")
+
+
+def parse_company_rationales(
+    output: str,
+    context: CompanyRationaleAIContext,
+) -> dict[str, str]:
+    """Parse and fail closed on unsupported facts in per-company AI blocks."""
+    candidates = {
+        str(row.get("ticker", "")).upper(): row
+        for row in context.candidates
+        if row.get("ticker")
+    }
+    allowed_numbers: set[Decimal] = set()
+    for value in _walk_values(context.model_dump(mode="json")):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            number = _canonical_number(str(value))
+            if number is not None:
+                allowed_numbers.add(number)
+                if abs(number) <= 1:
+                    allowed_numbers.add((number * 100).normalize())
+        elif isinstance(value, str):
+            allowed_numbers.update(
+                number
+                for token in _NUMBER_TOKEN.findall(value)
+                if (number := _canonical_number(token)) is not None
+            )
+    for display_row in context.candidates:
+        for value in _company_display_fields(display_row).values():
+            allowed_numbers.update(
+                number
+                for token in _NUMBER_TOKEN.findall(value)
+                if (number := _canonical_number(token)) is not None
+            )
+    matches = list(_COMPANY_BLOCK_HEADER.finditer(output.strip()))
+    parsed: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        ticker = match.group(1).upper()
+        candidate = candidates.get(ticker)
+        if candidate is None or ticker in parsed:
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(output)
+        lines = [
+            line.strip()
+            for line in output[match.end():end].splitlines()
+            if line.strip()
+        ]
+        if len(lines) != 4 or any(
+            not line.startswith(prefix)
+            for line, prefix in zip(lines, _COMPANY_LINE_PREFIXES)
+        ):
+            log.warning("ai_briefing.company_block_rejected", ticker=ticker, reason="schema")
+            continue
+        body = "\n".join(lines)
+        if len(body) > context.max_chars_per_company:
+            log.warning("ai_briefing.company_block_rejected", ticker=ticker, reason="length")
+            continue
+        if any(claim in body for claim in _ABSOLUTE_CLAIMS):
+            log.warning("ai_briefing.company_block_rejected", ticker=ticker, reason="absolute_claim")
+            continue
+        strategy_rank = candidate.get("sector_strategy_rank")
+        market_cap_rank = candidate.get("sector_market_cap_rank")
+        rank_line = lines[1]
+        strategy_rank_tokens = (
+            f"策略第{strategy_rank}",
+            f"策略排名{strategy_rank}",
+        )
+        market_cap_rank_tokens = (
+            f"市值第{market_cap_rank}",
+            f"市值排名{market_cap_rank}",
+        )
+        if (
+            strategy_rank is None
+            or market_cap_rank is None
+            or not any(token in rank_line for token in strategy_rank_tokens)
+            or not any(token in rank_line for token in market_cap_rank_tokens)
+        ):
+            log.warning("ai_briefing.company_block_rejected", ticker=ticker, reason="rank")
+            continue
+        numeric_tokens = _NUMBER_TOKEN.findall(body)
+        if any(
+            (number := _canonical_number(token)) is not None
+            and abs(number) >= Decimal("1000000")
+            for token in numeric_tokens
+        ):
+            log.warning(
+                "ai_briefing.company_block_rejected",
+                ticker=ticker,
+                reason="unformatted_large_number",
+            )
+            continue
+        invalid_number = any(
+            (number := _canonical_number(token)) is not None
+            and number not in allowed_numbers
+            for token in numeric_tokens
+        )
+        if invalid_number:
+            log.warning("ai_briefing.company_block_rejected", ticker=ticker, reason="number")
+            continue
+        parsed[ticker] = body
+    return parsed

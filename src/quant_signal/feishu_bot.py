@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import queue
 import threading
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol
 from zoneinfo import ZoneInfo
 
@@ -44,7 +45,7 @@ _HELP_TEXT = (
     "信号 / signals — 今日各策略信号\n"
     "扫描 / scan — 最新指数池 Top20 观察榜\n"
     "健康 / health — 定时任务运行状态\n"
-    "发送券商持仓截图 — 解析并更新账户快照\n"
+    "发送券商账户原图 — 需含总资产/持仓市值/现金/购买力及完整持仓\n"
     "确认导入 — 应用最近一次校验不完整(PARTIAL)的导入"
 )
 
@@ -401,7 +402,20 @@ class FeishuBotService:
             duration_text = (
                 f"，耗时 {duration:.0f}s" if isinstance(duration, float) else ""
             )
-            lines.append(f"· {job_id}: 最近成功 {when}{duration_text}")
+            raw_failure_count = state.get("consecutive_failures")
+            failure_count = (
+                raw_failure_count if isinstance(raw_failure_count, int) else 0
+            )
+            last_failure = state.get("last_failure")
+            if failure_count and isinstance(last_failure, datetime):
+                failed_when = f"{last_failure.astimezone(_ET):%m/%d %H:%M ET}"
+                last_error = str(state.get("last_error") or "未知错误")[:160]
+                lines.append(
+                    f"· {job_id}: ⚠️连续失败 {failure_count} 次，最近 {failed_when}；"
+                    f"最后成功 {when}{duration_text}；{last_error}"
+                )
+            else:
+                lines.append(f"· {job_id}: 最近成功 {when}{duration_text}")
         return "\n".join(lines)
 
     def _reply_options(self, chat_id: str, now: datetime) -> None:
@@ -430,6 +444,8 @@ class FeishuBotService:
             enrichment_status=enrichment,
             display_dedupe=cfg.display_dedupe_underlying,
             display_sort_by_expiry=cfg.display_sort_by_expiry,
+            holding_snapshot=self._ledger.latest_holding_option_flow_snapshot(session),
+            etf_underlyings=frozenset(cfg.etf_roots),
         )
         self._transport.send_card(chat_id, card)
 
@@ -522,9 +538,26 @@ class FeishuBotService:
         from quant_signal.portfolio_import import ImportStatus, apply_validated_import
 
         if record.status is ImportStatus.REJECTED:
-            errors = "、".join(record.validation_errors) or "未知原因"
+            labels = {
+                "MISSING_ACCOUNT_SUMMARY": "截图缺少账户总资产、持仓市值、现金或购买力",
+                "MISSING_ACCOUNT_CURRENCY": "无法确认账户币种",
+                "INVALID_ACCOUNT_VALUES": "账户金额无效",
+                "ACCOUNT_RECONCILIATION_FAILED": "账户总资产与现金、持仓市值无法对账",
+                "POSITION_COUNT_MISMATCH": "页面持仓数量与可见持仓不一致",
+                "POSITION_DETAILS_INCOMPLETE": "部分持仓缺少数量、成本价、现价或市值",
+            }
+            errors = "；".join(
+                labels.get(error, error) for error in record.validation_errors
+            ) or "未知原因"
+            guidance = ""
+            if "MISSING_ACCOUNT_SUMMARY" in record.validation_errors:
+                guidance = (
+                    "\n请发送券商账户资产页的完整原图，确保账户总资产、持仓市值、"
+                    "现金/可用资金和持仓数量清晰可见；不要发送聊天窗口的二次截图。"
+                )
             self._transport.send_text(
-                message.chat_id, f"导入被拒绝（REJECTED）：{errors}。账户未更新。"
+                message.chat_id,
+                f"导入被拒绝（REJECTED）：{errors}。账户未更新。{guidance}",
             )
             return
         if record.status is ImportStatus.VALIDATED:
@@ -534,8 +567,12 @@ class FeishuBotService:
                     message.chat_id, "该截图此前已导入过，账户未变化。"
                 )
                 return
+            refresh_status = self._refresh_execution_plan(now)
             self._transport.send_text(
-                message.chat_id, self._import_receipt(record, applied=True)
+                message.chat_id,
+                self._import_receipt(
+                    record, applied=True, refresh_status=refresh_status
+                ),
             )
             return
         # PARTIAL：不自动应用，等待明确确认
@@ -573,14 +610,23 @@ class FeishuBotService:
             return
         applied = apply_validated_import(self._ledger, record, now=now)
         if applied:
+            refresh_status = self._refresh_execution_plan(now)
             self._transport.send_text(
-                chat_id, f"已应用 PARTIAL 导入。\n{self._import_receipt(record, applied=True)}"
+                chat_id,
+                "已应用 PARTIAL 导入。\n"
+                + self._import_receipt(
+                    record, applied=True, refresh_status=refresh_status
+                ),
             )
         else:
             self._transport.send_text(chat_id, "应用失败：该截图此前已导入过。")
 
     def _import_receipt(
-        self, record: "ValidatedPortfolioImport", *, applied: bool
+        self,
+        record: "ValidatedPortfolioImport",
+        *,
+        applied: bool,
+        refresh_status: str | None = None,
     ) -> str:
         account = record.extraction.account
         symbols = "、".join(row.symbol for row in record.positions) or "无"
@@ -589,8 +635,58 @@ class FeishuBotService:
             f"持仓({len(record.positions)}): {symbols}",
         ]
         if applied:
-            lines.insert(0, "账户快照已更新，现有执行计划已按 ACCOUNT_CHANGED 失效重算。")
+            lines.insert(
+                0,
+                refresh_status
+                or "账户快照已更新，现有执行计划已按 ACCOUNT_CHANGED 失效。",
+            )
         return "\n".join(lines)
+
+    def _refresh_execution_plan(self, now: datetime) -> str:
+        if self._engine is None:
+            return (
+                "账户快照已更新，现有执行计划已按 ACCOUNT_CHANGED 失效；"
+                "执行引擎不可用，尚未重算。"
+            )
+        if not self._settings.execution_plan.enabled:
+            return "账户快照已更新，执行计划功能未启用。"
+        from quant_signal.calendar import is_trading_day
+
+        now_et = now.astimezone(_ET)
+        current_minute = now_et.hour * 60 + now_et.minute
+        if (
+            not is_trading_day(now_et.date())
+            or current_minute < 8 * 60 + 15
+            or current_minute > 15 * 60 + 45
+        ):
+            return (
+                "账户快照已更新，现有执行计划已失效；"
+                "当前不在自动重算时段（08:15–15:45 ET），"
+                "将在下一次定时任务重算。"
+            )
+        try:
+            if (
+                self._settings.us_briefing.enabled
+                and self._settings.us_briefing.delivery_mode == "live"
+            ):
+                delivered = self._engine.run_daily_action_briefing(now)
+            else:
+                delivered = self._engine.run_execution_brief(now)
+        except Exception as error:  # noqa: BLE001 - account import must remain committed
+            log.warning(
+                "feishu_bot.execution_refresh_failed",
+                error=str(error),
+            )
+            return (
+                "账户快照已更新，现有执行计划已失效；"
+                "自动重算失败，将由定时任务再试。"
+            )
+        if delivered:
+            return "账户快照已更新，执行计划已按新持仓重算，并已重新推送今日行动计划。"
+        return (
+            "账户快照已更新，执行计划已按新持仓重算；"
+            "今日行动计划推送失败。"
+        )
 
 
 # ---- lark-oapi 边界：事件解包（纯 dict，可单测） ----
@@ -638,9 +734,12 @@ def message_from_event(payload: object) -> BotMessage | None:
 class LarkTransport:
     """自建应用 REST：发单聊消息、下载图片。凭据不进日志。"""
 
-    def __init__(self, app_id: str, app_secret: str) -> None:
+    def __init__(
+        self, app_id: str, app_secret: str, proxy_url: str = ""
+    ) -> None:
         import lark_oapi as lark
 
+        configure_lark_proxy(proxy_url)
         self._client = (
             lark.Client.builder().app_id(app_id).app_secret(app_secret).build()
         )
@@ -731,11 +830,46 @@ class LarkTransport:
         return bytes(data)
 
 
-def run_ws_forever(service: FeishuBotService, app_id: str, app_secret: str) -> None:
+def configure_lark_proxy(proxy_url: str) -> None:
+    """Apply a Feishu-only proxy to the SDK REST and WebSocket transports."""
+    if not proxy_url:
+        return
+    import requests
+    import lark_oapi.core.http.transport as lark_http
+    import lark_oapi.ws.client as lark_ws
+
+    direct_request: Callable[..., object] = requests.request
+
+    def proxied_request(*args: object, **kwargs: object) -> object:
+        kwargs.setdefault(
+            "proxies", {"http": proxy_url, "https": proxy_url}
+        )
+        return direct_request(*args, **kwargs)
+
+    # Replace only the SDK module's requests reference; other providers keep
+    # their own network routing and cannot accidentally inherit this proxy.
+    lark_http.requests = SimpleNamespace(request=proxied_request)
+    ws_kwargs = lambda: {"proxy": proxy_url}
+    if hasattr(lark_ws, "_ws_connect_kwargs"):
+        lark_ws._ws_connect_kwargs = ws_kwargs
+    elif hasattr(lark_ws, "_get_ws_connect_kwargs"):
+        lark_ws._get_ws_connect_kwargs = ws_kwargs
+    else:
+        raise RuntimeError("installed lark-oapi does not expose WebSocket proxy hooks")
+
+
+def run_ws_forever(
+    service: FeishuBotService,
+    app_id: str,
+    app_secret: str,
+    proxy_url: str = "",
+) -> None:
     """长连接事件循环：SDK 自带重连之外的兜底重启（退避），永不外抛。"""
     import time as time_module
 
     import lark_oapi as lark
+
+    configure_lark_proxy(proxy_url)
 
     def on_message(data: object) -> None:
         try:

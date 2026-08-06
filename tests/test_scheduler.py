@@ -86,10 +86,18 @@ class _USBriefingEngine:
             us_briefing=USBriefingSettings(enabled=True, delivery_mode=delivery_mode),  # type: ignore[arg-type]
         )
         self.briefing_calls: list[str] = []
+        self.briefing_deliveries: list[bool | None] = []
+        self.daily_action_calls = 0
         self.option_calls: list[bool] = []
 
-    def run_us_briefing(self, now: datetime, mode: object) -> None:
+    def run_us_briefing(
+        self, now: datetime, mode: object, *, deliver: bool | None = None
+    ) -> None:
         self.briefing_calls.append(str(getattr(mode, "value", mode)))
+        self.briefing_deliveries.append(deliver)
+
+    def run_daily_action_briefing(self, now: datetime) -> None:
+        self.daily_action_calls += 1
 
     def run_option_flow(
         self, now: datetime, *, force_summary: bool = False
@@ -112,9 +120,11 @@ def test_us_briefing_replaces_legacy_rotation_jobs() -> None:
     assert "rotation_asia_open" not in jobs
     assert "rotation_asia_close" not in jobs
     assert "premarket" not in jobs
-    assert "postmarket" not in jobs
+    assert "postmarket" in jobs
     assert "enrichment" not in jobs
-    assert {"us_close_briefing", "asia_confirm_briefing"} <= jobs.keys()
+    assert {
+        "us_close_briefing", "asia_confirm_briefing", "daily_action_briefing"
+    } <= jobs.keys()
     close_trigger = str(jobs["us_close_briefing"].trigger)
     assert "day_of_week='tue-sat'" in close_trigger
     assert "hour='0'" in close_trigger and "minute='0'" in close_trigger
@@ -123,10 +133,16 @@ def test_us_briefing_replaces_legacy_rotation_jobs() -> None:
     assert "day_of_week='mon-fri'" in asia_trigger
     assert "hour='7'" in asia_trigger and "minute='30'" in asia_trigger
     assert str(jobs["asia_confirm_briefing"].trigger.timezone) == "UTC"
+    daily_trigger = str(jobs["daily_action_briefing"].trigger)
+    assert "hour='8'" in daily_trigger and "minute='15'" in daily_trigger
+    assert str(jobs["daily_action_briefing"].trigger.timezone) == "America/New_York"
 
     jobs["us_close_briefing"].func()
     jobs["asia_confirm_briefing"].func()
+    jobs["daily_action_briefing"].func()
     assert engine.briefing_calls == ["US_CLOSE", "ASIA_CONFIRM"]
+    assert engine.briefing_deliveries == [False, False]
+    assert engine.daily_action_calls == 1
 
 
 def test_option_close_is_staggered_when_us_briefing_is_enabled() -> None:
@@ -227,6 +243,37 @@ def test_option_flow_jobs_registered_only_when_enabled() -> None:
     assert drain.max_instances == 1
     assert drain.coalesce is True
     assert drain.misfire_grace_time == 600
+
+
+def test_holding_price_alert_job_registered_each_market_minute() -> None:
+    from types import SimpleNamespace
+
+    from conftest import make_test_settings
+    from quant_signal.config import (
+        ExecutionPlanSettings,
+        HoldingPriceAlertSettings,
+    )
+
+    engine = SimpleNamespace(
+        settings=make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            holding_price_alert=HoldingPriceAlertSettings(enabled=True),
+        )
+    )
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    job = jobs["holding_price_alert"]
+    trigger = str(job.trigger)
+    assert "hour='9-15'" in trigger
+    assert "minute='*'" in trigger
+    assert str(job.trigger.timezone) == "America/New_York"
+    assert job.max_instances == 1
+    assert job.coalesce is True
 
 
 def test_option_flow_jobs_use_trading_day_gate_and_ignore_action_card_only(
@@ -544,6 +591,13 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
             calls["prune_intel_before"] = before
             return 3
 
+        def prune_holding_option_flow(self, before: datetime) -> int:
+            order = calls["order"]
+            assert isinstance(order, list)
+            order.append("prune_holdings")
+            calls["prune_holdings_before"] = before
+            return 2
+
     ledger = Ledger()
 
     def fake_ingest(
@@ -562,11 +616,46 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
         actual_ledger: object,
         db_path: object,
         now: datetime,
+        *,
+        bar_store: object,
+        keep_days: int,
+        mirror_dir: object,
+        require_mirror: bool,
     ) -> None:
         order = calls["order"]
         assert isinstance(order, list)
         order.append("backup")
-        calls["backup"] = (actual_ledger, db_path, now)
+        calls["backup"] = (
+            actual_ledger,
+            db_path,
+            now,
+            bar_store,
+            keep_days,
+            mirror_dir,
+            require_mirror,
+        )
+
+    def fake_forward_evaluation(
+        actual_ledger: object,
+        actual_store: object,
+        *,
+        now: datetime,
+        horizons: tuple[int, ...],
+        benchmark: str,
+        transaction_cost_bps_per_side: float,
+    ) -> int:
+        order = calls["order"]
+        assert isinstance(order, list)
+        order.append("forward_evaluation")
+        calls["forward_evaluation"] = (
+            actual_ledger,
+            actual_store,
+            now,
+            horizons,
+            benchmark,
+            transaction_cost_bps_per_side,
+        )
+        return 2
 
     class RecordingLog:
         def __init__(self) -> None:
@@ -583,6 +672,10 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
     logger = RecordingLog()
     monkeypatch.setattr("quant_signal.ingest.ingest_daily_split", fake_ingest)
     monkeypatch.setattr("quant_signal.backup.run_backup", fake_backup)
+    monkeypatch.setattr(
+        "quant_signal.forward_evaluation.evaluate_candidate_forward_returns",
+        fake_forward_evaluation,
+    )
     sched = build_scheduler(
         engine=engine, ledger=ledger, store=store, notifier=FakeNotifier()
     )
@@ -596,8 +689,24 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
     intel_cutoff = fixed_now - timedelta(
         days=settings.option_intel.retention_days
     )
-    assert calls["order"] == ["ingest", "backup", "prune", "prune_intel"]
+    assert calls["order"] == [
+        "ingest",
+        "forward_evaluation",
+        "backup",
+        "prune",
+        "prune_holdings",
+        "prune_intel",
+    ]
+    assert calls["forward_evaluation"] == (
+        ledger,
+        store,
+        fixed_now,
+        settings.forward_evaluation.horizons,
+        "QQQ",
+        5.0,
+    )
     assert calls["prune_before"] == cutoff
+    assert calls["prune_holdings_before"] == cutoff
     assert calls["prune_intel_before"] == intel_cutoff
     assert calls["ingest"] == (
         store,
@@ -605,11 +714,23 @@ def test_maintenance_prunes_option_history_and_keeps_existing_work(
         settings.universe + settings.watchlist,
         10,
     )
-    assert calls["backup"] == (ledger, settings.db_path, fixed_now)
+    assert calls["backup"] == (
+        ledger,
+        settings.db_path,
+        fixed_now,
+        store,
+        settings.backup.keep_days,
+        None,
+        settings.backup.require_mirror,
+    )
     assert logger.events == [
         (
             "maintenance.option_flow_pruned",
-            {"deleted_scans": 7, "before": cutoff.isoformat()},
+            {
+                "deleted_scans": 7,
+                "deleted_holding_scans": 2,
+                "before": cutoff.isoformat(),
+            },
         ),
         (
             "maintenance.option_intel_pruned",
@@ -819,6 +940,46 @@ def test_job_runtime_failure_does_not_record_success() -> None:
 
     assert runtime.last_success("market_scan") is None
     assert runtime.running_since("market_scan") is None
+
+
+def test_job_runtime_false_result_is_a_durable_failure(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from quant_signal.ledger import SignalLedger
+    from quant_signal.scheduler import JobReportedFailure, JobRuntime
+
+    clock = _Clock(_utc(2026, 7, 10, 11, 5))
+    ledger = SignalLedger(Path(str(tmp_path)) / "signals.db")
+    runtime = JobRuntime(now_fn=clock.now, ledger=ledger)
+
+    with pytest.raises(JobReportedFailure):
+        runtime.wrap("market_scan", lambda: False)()
+
+    restored = JobRuntime(now_fn=clock.now, ledger=ledger).snapshot()["market_scan"]
+    assert restored["last_success"] is None
+    assert restored["last_failure"] == clock.value
+    assert restored["consecutive_failures"] == 1
+    assert "JobReportedFailure" in str(restored["last_error"])
+
+
+def test_job_runtime_redacts_credentials_from_persisted_errors(tmp_path: object) -> None:
+    from pathlib import Path
+
+    from quant_signal.ledger import SignalLedger
+    from quant_signal.scheduler import JobRuntime
+
+    ledger = SignalLedger(Path(str(tmp_path)) / "signals.db")
+    runtime = JobRuntime(ledger=ledger)
+
+    def fail() -> None:
+        raise RuntimeError("ALPACA_SECRET=do-not-store")
+
+    with pytest.raises(RuntimeError):
+        runtime.wrap("premarket", fail)()
+
+    error = str(ledger.job_runtime_snapshot()[0]["last_error"])
+    assert "do-not-store" not in error
+    assert "***" in error
 
 
 def test_runtime_check_fails_when_market_scan_misses_todays_run() -> None:

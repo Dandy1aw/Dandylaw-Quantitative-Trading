@@ -151,3 +151,27 @@ class AlpacaSource:
 
         start = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
         return self._fetch(tickers, "5Min", start, None)
+
+    def fetch_minute_bars(
+        self, tickers: list[str], lookback_minutes: int = 45
+    ) -> pd.DataFrame:
+        """获取持仓异动所需的 1 分钟线。
+
+        Alpaca 免费账户的 SIP 端点会成功返回但延迟约 15 分钟，不能用于
+        实时告警。IEX 虽是部分市场，但可提供新鲜价格，因此实时链路优先 IEX。
+        """
+        from datetime import datetime, timedelta, timezone
+
+        # 跨午休/隔夜也要能取到当日开盘价，因此至少回看 24 小时。
+        minutes = max(lookback_minutes, 24 * 60)
+        start = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        try:
+            frame = self._fetch(tickers, "1Min", start, None, feed="iex")
+            frame.attrs["feed"] = "alpaca_iex_1m_realtime_partial"
+            return frame
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code not in {401, 403}:
+                raise
+        frame = self._fetch(tickers, "1Min", start, None, feed="sip")
+        frame.attrs["feed"] = "alpaca_sip_1m_delayed"
+        return frame

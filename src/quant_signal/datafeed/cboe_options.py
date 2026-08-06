@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import time
 from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import httpx
+import structlog
 
 from quant_signal.options_flow import (
     OptionFlowSnapshot,
@@ -30,6 +31,7 @@ _TRANSIENT_ERRORS = (
 _DEFAULT_INDEX_ROOTS = frozenset(
     {"SPX", "SPXW", "VIX", "RUT", "RUTW", "NDX", "XSP", "OEX"}
 )
+log = structlog.get_logger()
 
 
 class OptionFlowFetchError(RuntimeError):
@@ -52,12 +54,21 @@ class CboeOptionFlowSource:
         venues: tuple[str, ...] = ("cone", "ctwo", "opt", "exo"),
         discovery_limit: int = 50,
         top_n: int = 10,
+        min_venue_coverage: float = 1.0,
+        circuit_breaker_failures: int = 2,
+        circuit_breaker_cooldown_minutes: int = 10,
         excluded_index_roots: frozenset[str] = _DEFAULT_INDEX_ROOTS,
     ) -> None:
         if not venues or len(set(venues)) != len(venues):
             raise ValueError("Cboe venues must be unique and non-empty")
         if discovery_limit < top_n or top_n < 1:
             raise ValueError("discovery_limit must be at least top_n")
+        if not 0 < min_venue_coverage <= 1:
+            raise ValueError("min_venue_coverage must be in (0, 1]")
+        if circuit_breaker_failures < 1:
+            raise ValueError("circuit_breaker_failures must be positive")
+        if circuit_breaker_cooldown_minutes < 1:
+            raise ValueError("circuit_breaker_cooldown_minutes must be positive")
         self._client = client or cast(
             _HTTPClient,
             httpx.Client(
@@ -70,6 +81,13 @@ class CboeOptionFlowSource:
         self._venues = venues
         self._discovery_limit = discovery_limit
         self._top_n = top_n
+        self._min_venue_coverage = min_venue_coverage
+        self._circuit_breaker_failures = circuit_breaker_failures
+        self._circuit_breaker_cooldown = timedelta(
+            minutes=circuit_breaker_cooldown_minutes
+        )
+        self._consecutive_failures = {venue: 0 for venue in venues}
+        self._open_until: dict[str, datetime] = {}
         self._excluded_index_roots = frozenset(
             root.strip().upper() for root in excluded_index_roots
         )
@@ -171,17 +189,50 @@ class CboeOptionFlowSource:
         if now.tzinfo is None:
             raise ValueError("option flow scan time must be timezone-aware")
         venue_rows: list[VenueOptionVolume] = []
+        failures: dict[str, str] = {}
         for venue in self._venues:
+            open_until = self._open_until.get(venue)
+            if open_until is not None and now < open_until:
+                failures[venue] = f"circuit open until {open_until.isoformat()}"
+                log.warning(
+                    "cboe_options.venue_circuit_open",
+                    venue=venue,
+                    open_until=open_until.isoformat(),
+                )
+                continue
             try:
                 response = self._get(venue)
                 payload: Any = response.json()
                 venue_rows.extend(self._parse_venue(venue, payload, now))
+                if self._consecutive_failures[venue] > 0 or open_until is not None:
+                    log.info("cboe_options.venue_recovered", venue=venue)
+                self._consecutive_failures[venue] = 0
+                self._open_until.pop(venue, None)
             except Exception as error:
-                raise OptionFlowFetchError(f"Cboe venue {venue} failed: {error}") from error
+                failures[venue] = str(error)
+                consecutive = self._consecutive_failures[venue] + 1
+                self._consecutive_failures[venue] = consecutive
+                if consecutive >= self._circuit_breaker_failures:
+                    self._open_until[venue] = now + self._circuit_breaker_cooldown
+                log.warning(
+                    "cboe_options.venue_failed",
+                    venue=venue,
+                    error=str(error),
+                    consecutive_failures=consecutive,
+                    circuit_open_until=(
+                        self._open_until[venue].isoformat()
+                        if venue in self._open_until
+                        else None
+                    ),
+                )
 
-        # 任一市场失败都已在上面 raise，走到这里覆盖率必然 100%；
-        # 若将来放宽成部分容忍，这里必须改回真实计算。
-        coverage = 1.0
+        coverage = (len(self._venues) - len(failures)) / len(self._venues)
+        if coverage < self._min_venue_coverage:
+            failed = ",".join(sorted(failures))
+            raise OptionFlowFetchError(
+                f"Cboe venue coverage {coverage:.0%} below "
+                f"{self._min_venue_coverage:.0%}; failed={failed}"
+            )
         ranked = aggregate_and_rank(
             venue_rows,
             session=now.astimezone(_ET).date(),
@@ -192,7 +243,11 @@ class CboeOptionFlowSource:
             len(top_by_side(ranked, "call", self._top_n)) < self._top_n
             or len(top_by_side(ranked, "put", self._top_n)) < self._top_n
         ):
-            raise OptionFlowFetchError("Cboe aggregate has fewer than ten valid calls or puts")
+            failed = ",".join(sorted(failures)) or "none"
+            raise OptionFlowFetchError(
+                "Cboe aggregate has fewer than ten valid calls or puts; "
+                f"coverage={coverage:.0%}; failed={failed}"
+            )
         return OptionFlowSnapshot(
             slot=scan_slot(now),
             captured_at=now,

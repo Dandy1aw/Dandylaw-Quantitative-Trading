@@ -13,6 +13,7 @@ from quant_signal.engine import Engine
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card
 from quant_signal.options_flow import OptionContractVolume, OptionFlowSnapshot, scan_slot
+from quant_signal.options_intel import OptionChainContract, OptionChainFetchResult
 
 NOW = datetime(2026, 7, 10, 14, 15, tzinfo=UTC)  # 10:15 ET
 ROOTS = ("AAPL", "NVDA", "MSFT", "TSLA", "AMZN", "META", "GOOGL", "AMD", "MU", "INTC", "PLTR", "NFLX")
@@ -94,6 +95,7 @@ def make_engine(
     notifier: Notifier | None = None,
     option_enricher: object | None = None,
     policy: OptionFlowSettings | None = None,
+    option_chain_source: object | None = None,
 ) -> tuple[Engine, Notifier]:
     settings = make_test_settings(
         option_flow=policy
@@ -108,17 +110,169 @@ def make_engine(
         output,
         option_flow_source=option_source or OptionSource(),
         option_flow_enricher=option_enricher,  # type: ignore[arg-type]
+        option_chain_source=option_chain_source,  # type: ignore[arg-type]
     )
     return engine, output
 
 
+class HoldingChainSource:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, bool]] = []
+
+    def fetch_chain(
+        self,
+        underlying: str,
+        *,
+        session: date,
+        max_expiry_days: int,
+        include_open_interest: bool = True,
+    ) -> OptionChainFetchResult:
+        self.calls.append((underlying, max_expiry_days, include_open_interest))
+        if underlying == "MRVL":
+            raise RuntimeError("temporary chain failure")
+        contracts = ()
+        if underlying == "NVDA":
+            contracts = (
+                OptionChainContract(
+                    "NVDA260717C00210000", "NVDA", "call", date(2026, 7, 17),
+                    Decimal("210"), None, None, None, 82_140, None,
+                ),
+                OptionChainContract(
+                    "NVDA260717P00200000", "NVDA", "put", date(2026, 7, 17),
+                    Decimal("200"), None, None, None, 61_900, None,
+                ),
+            )
+        return OptionChainFetchResult(contracts=contracts, truncated=False)
+
+
+class ChangingHoldingChainSource:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def fetch_chain(
+        self,
+        underlying: str,
+        *,
+        session: date,
+        max_expiry_days: int,
+        include_open_interest: bool = True,
+    ) -> OptionChainFetchResult:
+        self.calls += 1
+        volumes = (1_000, 2_000) if self.calls == 1 else (9_000, 2_500)
+        return OptionChainFetchResult(
+            contracts=(
+                OptionChainContract(
+                    "NVDA260717C00210000", "NVDA", "call", date(2026, 7, 17),
+                    Decimal("210"), None, None, None, volumes[0], None,
+                ),
+                OptionChainContract(
+                    "NVDA260717P00200000", "NVDA", "put", date(2026, 7, 17),
+                    Decimal("200"), None, None, None, volumes[1], None,
+                ),
+            ),
+            truncated=False,
+        )
+
+
 def test_first_scan_queues_and_sends_one_baseline(tmp_path: Path) -> None:
-    engine, notifier = make_engine(tmp_path)
+    policy = OptionFlowSettings(
+        enabled=True,
+        min_volume=5_000,
+        cooldown_minutes=60,
+        etf_roots=["AAPL"],
+    )
+    engine, notifier = make_engine(tmp_path, policy=policy)
     engine.run_option_flow(NOW)
     assert len(notifier.cards) == 1
     assert "Cboe四市场" in notifier.cards[0].title
+    assert "AAPL · ETF" in notifier.cards[0].body_md
     assert engine.ledger.option_flow_alert_count(NOW.date()) == 1
     assert engine.ledger.due_option_flow_alerts(NOW) == []
+
+
+def test_baseline_monitors_only_positive_observed_holdings_and_degrades_per_symbol(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chains = HoldingChainSource()
+    engine, notifier = make_engine(tmp_path, option_chain_source=chains)
+    monkeypatch.setattr(
+        engine.ledger,
+        "active_observed_positions",
+        lambda **_: [
+            {"symbol": "NVDA", "qty": "5"},
+            {"symbol": "SKHY", "qty": "2"},
+            {"symbol": "MRVL", "qty": "3"},
+            {"symbol": "MU", "qty": "0"},
+        ],
+    )
+
+    engine.run_option_flow(NOW)
+
+    assert chains.calls == [
+        ("MRVL", 14, False),
+        ("NVDA", 14, False),
+        ("SKHY", 14, False),
+    ]
+    assert len(notifier.cards) == 1
+    body = notifier.cards[0].body_md
+    assert "📌 我的持仓期权" in body
+    assert "Call 82,140 / Put 61,900" in body
+    assert "SKHY · 无可用期权链" in body
+    assert "MRVL · 期权数据暂不可用" in body
+    assert "MU ·" not in body
+    saved = engine.ledger.latest_holding_option_flow_snapshot(NOW.date())
+    assert saved is not None
+    assert {row.underlying for row in saved.rows} == {"NVDA", "SKHY", "MRVL"}
+
+
+def test_material_holding_flow_change_uses_existing_change_alert_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chains = ChangingHoldingChainSource()
+    engine, notifier = make_engine(tmp_path, option_chain_source=chains)
+    monkeypatch.setattr(
+        engine.ledger,
+        "active_observed_positions",
+        lambda **_: [{"symbol": "NVDA", "qty": "5"}],
+    )
+
+    engine.run_option_flow(NOW)
+    engine.run_option_flow(NOW + timedelta(minutes=15))
+
+    assert len(notifier.cards) == 2
+    assert notifier.cards[-1].kind.value == "signal"
+    assert "Call 9,000 / Put 2,500" in notifier.cards[-1].body_md
+
+
+def test_holding_flow_has_independent_quota_when_market_quota_is_reserved_for_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chains = ChangingHoldingChainSource()
+    policy = OptionFlowSettings(
+        enabled=True,
+        min_volume=5_000,
+        max_alerts_per_day=2,
+        holding_max_alerts_per_day=3,
+        holding_cooldown_minutes=60,
+    )
+    engine, notifier = make_engine(
+        tmp_path,
+        policy=policy,
+        option_chain_source=chains,
+    )
+    monkeypatch.setattr(
+        engine.ledger,
+        "active_observed_positions",
+        lambda **_: [{"symbol": "NVDA", "qty": "5"}],
+    )
+
+    engine.run_option_flow(NOW)
+    engine.run_option_flow(NOW + timedelta(minutes=15))
+
+    assert len(notifier.cards) == 2
+    assert "持仓异动" in notifier.cards[-1].body_md
+    slot = scan_slot(NOW + timedelta(minutes=15))
+    assert engine.ledger.option_flow_alert_status(slot, "holding_change") == "SENT"
 
 
 def test_ordinary_rank_noise_is_stored_without_push(tmp_path: Path) -> None:

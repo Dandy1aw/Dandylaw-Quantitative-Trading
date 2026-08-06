@@ -11,10 +11,15 @@ from quant_signal.datafeed.alpaca_options import AlpacaOptionChainSource
 SESSION = date(2026, 7, 10)
 
 
-def snapshot_item(volume: int = 150, iv: float = 0.5) -> dict[str, Any]:
+def snapshot_item(
+    volume: int = 150,
+    iv: float = 0.5,
+    gamma: float = 0.0123,
+) -> dict[str, Any]:
     return {
         "latestQuote": {"bp": 2.0, "ap": 2.2, "t": "2026-07-10T14:00:01Z"},
         "impliedVolatility": iv,
+        "greeks": {"gamma": gamma},
         "dailyBar": {"v": volume},
     }
 
@@ -93,6 +98,7 @@ def test_merges_snapshot_quotes_with_contract_oi() -> None:
     assert call.implied_volatility == 0.55
     assert call.day_volume == 300
     assert call.open_interest == 900
+    assert call.gamma == 0.0123
     put = by_symbol[put_symbol]
     assert put.side == "put" and put.strike == Decimal("95")
     assert put.open_interest is None  # contracts 端点没给,不猜
@@ -170,3 +176,17 @@ def test_missing_quote_fields_become_none() -> None:
     assert item.bid is None and item.ask is None
     assert item.implied_volatility is None
     assert item.day_volume == 0
+
+
+def test_lightweight_holding_chain_skips_open_interest_endpoint() -> None:
+    symbol = "MU260724C00100000"
+    client = FakeChainClient(
+        snapshot_pages=[({symbol: snapshot_item(volume=321)}, None)],
+        contract_pages=[([contract_item(symbol, oi=999)], None)],
+    )
+
+    result = fetch(client, include_open_interest=False)
+
+    assert result.contracts[0].day_volume == 321
+    assert result.contracts[0].open_interest is None
+    assert all("/options/contracts" not in str(call["url"]) for call in client.calls)
