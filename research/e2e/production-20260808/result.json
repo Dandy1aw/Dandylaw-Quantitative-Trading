@@ -1,0 +1,47 @@
+{
+  "status": "complete",
+  "session": "2026-08-07",
+  "portfolio_symbols": [
+    "AAOI",
+    "GOOGL",
+    "MRVL",
+    "MUU",
+    "SKHY",
+    "SMH"
+  ],
+  "extreme_movers": {
+    "feed": "hybrid",
+    "universe_count": 12501,
+    "covered_count": 12274,
+    "screened_count": 629,
+    "confirmed_count": 608,
+    "event_count": 413,
+    "eligible_count": 75,
+    "up_count": 64,
+    "down_count": 11,
+    "stock_rank_count": 75,
+    "sector_rank_count": 15
+  },
+  "bot_commands_verified": [
+    "异动榜 60",
+    "异动板块 科技",
+    "异动 ABNB"
+  ],
+  "bot_output_count": 3,
+  "live_notifications": {
+    "portfolio_sent": true,
+    "movers_sent": true,
+    "cards_attempted": 2
+  },
+  "service": {
+    "scheduler_started": true,
+    "extreme_movers_close_registered": true,
+    "extreme_movers_premarket_registered": true,
+    "stderr_bytes": 0
+  },
+  "certificate_probe": {
+    "ticker": "AAPL",
+    "rows": 2,
+    "status": "passed"
+  }
+}
