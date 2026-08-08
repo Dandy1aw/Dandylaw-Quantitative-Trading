@@ -7,6 +7,7 @@ from quant_signal.config import (
     DataQASettings,
     EnrichmentSettings,
     ExecutionPlanSettings,
+    ExtremeMoverSettings,
     ForwardEvaluationSettings,
     IndexUniverseSettings,
     NotifySettings,
@@ -48,6 +49,7 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.option_flow.max_alerts_per_day == 4
     assert s.option_flow.retention_days == 120
     assert s.holding_price_alert.enabled is True
+    assert s.extreme_movers.enabled is True
     assert s.holding_price_alert.stock_1m_pct == 0.015
     assert s.holding_price_alert.etf_1m_pct == 0.010
     assert s.holding_price_alert.cooldown_minutes == 30
@@ -58,6 +60,16 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.holding_price_alert.cause_search.timeout_seconds == 60
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
+
+
+def test_extreme_mover_defaults_are_bounded() -> None:
+    cfg = ExtremeMoverSettings(enabled=True)
+
+    assert cfg.threshold == Decimal("0.10")
+    assert cfg.windows == (20, 60, 252)
+    assert cfg.default_window == 60
+    assert cfg.min_price == Decimal("5")
+    assert cfg.min_dollar_volume == Decimal("20000000")
 
 
 def test_us_briefing_defaults_are_safe() -> None:

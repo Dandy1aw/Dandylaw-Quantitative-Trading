@@ -23,6 +23,10 @@ from quant_signal.notifier.base import Notifier
 from quant_signal.notifier.dedup import DedupResult, apply_dedup
 from quant_signal.pipelines.deviation import run as run_deviation_pipeline
 from quant_signal.pipelines.enrichment import run as run_enrichment_pipeline
+from quant_signal.pipelines.extreme_movers import (
+    run_close as run_extreme_movers_close_pipeline,
+    run_premarket as run_extreme_movers_premarket_pipeline,
+)
 from quant_signal.pipelines.holding_price_alert import run as run_holding_price_alert_pipeline
 from quant_signal.pipelines.execution_plan import (
     run_daily as run_execution_brief_pipeline,
@@ -363,6 +367,12 @@ class Engine:
 
     def run_market_scan(self, now: datetime) -> bool:
         return run_market_scan_pipeline(self, now)
+
+    def run_extreme_movers_close(self, now: datetime) -> bool:
+        return run_extreme_movers_close_pipeline(self, now)
+
+    def run_extreme_movers_premarket(self, now: datetime) -> bool:
+        return run_extreme_movers_premarket_pipeline(self, now)
 
     def run_negative_overreaction(self, now: datetime) -> None:
         run_negative_overreaction_pipeline(self, now)

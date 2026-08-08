@@ -413,6 +413,33 @@ class HoldingPriceAlertSettings(BaseModel):
     cause_search: PriceMoveCauseSearchSettings = PriceMoveCauseSearchSettings()
 
 
+class ExtremeMoverSettings(BaseModel):
+    """Full-market daily ±10% event collection and ranking."""
+
+    enabled: bool = False
+    threshold: Decimal = Field(default=Decimal("0.10"), gt=0, le=Decimal("1"))
+    min_price: Decimal = Field(default=Decimal("5"), ge=0)
+    min_dollar_volume: Decimal = Field(default=Decimal("20000000"), ge=0)
+    windows: tuple[int, ...] = (20, 60, 252)
+    default_window: int = 60
+    chunk_size: int = Field(default=200, ge=1, le=500)
+    min_coverage: float = Field(default=0.90, gt=0, le=1)
+    top_stocks: int = Field(default=10, ge=1, le=50)
+    top_sectors: int = Field(default=5, ge=1, le=11)
+    close_hour_et: int = Field(default=16, ge=0, le=23)
+    close_minute_et: int = Field(default=30, ge=0, le=59)
+    premarket_hour_et: int = Field(default=8, ge=0, le=23)
+    premarket_minute_et: int = Field(default=0, ge=0, le=59)
+
+    @model_validator(mode="after")
+    def validate_windows(self) -> Self:
+        if not self.windows or any(window < 1 or window > 504 for window in self.windows):
+            raise ValueError("extreme mover windows must be between 1 and 504")
+        if self.default_window not in self.windows:
+            raise ValueError("default_window must be included in windows")
+        return self
+
+
 class LegacyPriceDeviationSettings(BaseModel):
     enabled: bool = False
 
@@ -570,6 +597,7 @@ class Settings(BaseModel):
     option_flow: OptionFlowSettings = OptionFlowSettings()
     option_intel: OptionIntelSettings = OptionIntelSettings()
     holding_price_alert: HoldingPriceAlertSettings = HoldingPriceAlertSettings()
+    extreme_movers: ExtremeMoverSettings = ExtremeMoverSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     feishu_bot: FeishuBotSettings = FeishuBotSettings()
     backup: BackupSettings = BackupSettings()

@@ -2,10 +2,19 @@ from datetime import datetime, timezone
 
 from quant_signal.notifier import cards as cards_module
 from quant_signal.notifier.cards import (
+    extreme_movers_close_card,
+    extreme_movers_premarket_card,
     premarket_cards,
     report_card,
     signal_card,
     us_briefing_card,
+)
+from quant_signal.extreme_movers import (
+    Eligibility,
+    ExtremeMoverEvent,
+    MoverDirection,
+    rank_movers,
+    rank_sectors,
 )
 from quant_signal.strategies.base import Direction, Signal
 
@@ -28,6 +37,47 @@ def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None, mome
 
 def _card_by(cards, needle):  # type: ignore[no-untyped-def]
     return next(c for c in cards if needle in c.title)
+
+
+def _mover(ticker: str, direction: MoverDirection, value: str) -> ExtremeMoverEvent:
+    from datetime import date
+    from decimal import Decimal
+
+    return ExtremeMoverEvent(
+        session=date(2026, 8, 7), ticker=ticker, direction=direction,
+        daily_return=Decimal(value), close=Decimal("20"),
+        avg_dollar_volume_20d=Decimal("30000000"),
+        sector="Information Technology", industry="Software", quote_type="EQUITY",
+        eligibility=Eligibility.ELIGIBLE,
+    )
+
+
+def test_extreme_mover_close_card_has_separate_boards_and_coverage() -> None:
+    card = extreme_movers_close_card(
+        [_mover("UP", MoverDirection.UP, "0.12"), _mover("DN", MoverDirection.DOWN, "-0.11")],
+        universe_count=100,
+        covered_count=98,
+    )
+
+    assert "上涨 ≥10%" in card.body_md
+    assert "下跌 ≤-10%" in card.body_md
+    assert "覆盖 98/100" in card.body_md
+    assert "推荐" not in card.body_md
+
+
+def test_extreme_mover_premarket_card_shows_sector_top5() -> None:
+    events = [_mover("A", MoverDirection.UP, "0.12"), _mover("B", MoverDirection.UP, "0.11")]
+    card = extreme_movers_premarket_card(
+        session=events[0].session,
+        window_sessions=60,
+        movers=rank_movers(events, window_sessions=60),
+        sectors=rank_sectors(events, window_sessions=60),
+    )
+
+    assert "盘前" in card.title
+    assert "板块 Top5" in card.body_md
+    assert "累计入榜 2 天" in card.body_md
+    assert "市场宽度" in card.body_md
 
 
 def test_signal_card_labels_sell_once_after_delayed_warning() -> None:
