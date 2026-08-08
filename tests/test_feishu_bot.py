@@ -176,6 +176,40 @@ def test_text_commands_route_case_insensitively() -> None:
         assert route(msg(content={"text": text}), ALLOWED) is expected, text
 
 
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        ("异动榜", BotIntent.MOVERS),
+        ("异动榜 60", BotIntent.MOVERS),
+        ("异动板块 科技", BotIntent.MOVER_SECTORS),
+        ("异动 AAOI", BotIntent.MOVER_TICKER),
+        ("监控", BotIntent.MONITORS),
+        ("监控 AAOI", BotIntent.MONITOR_ADD),
+        ("取消监控 AAOI", BotIntent.MONITOR_REMOVE),
+        ("重推", BotIntent.REPUSH),
+        ("重推 异动榜", BotIntent.REPUSH_MOVERS),
+    ],
+)
+def test_new_commands_route(text: str, intent: BotIntent) -> None:
+    assert route(msg(content={"text": text}), ALLOWED) is intent
+
+
+def test_invalid_mover_window_and_ticker_do_not_route() -> None:
+    assert route(msg(content={"text": "异动榜 30"}), ALLOWED) is BotIntent.UNKNOWN
+    assert route(msg(content={"text": "监控 BRK.B"}), ALLOWED) is BotIntent.UNKNOWN
+
+
+def test_group_rejects_mutating_monitor_and_repush_commands(tmp_path: Path) -> None:
+    service, out, _ = make_service(tmp_path)
+    for index, text in enumerate(("监控 AAOI", "取消监控 AAOI", "重推")):
+        service.handle(msg(
+            message_id=f"om_mutating_{index}", chat_type="group", mentioned=True,
+            content={"text": f"@_user_1 {text}"},
+        ))
+
+    assert all("单聊" in text for _, text in out.texts)
+
+
 def test_image_message_routes_to_import() -> None:
     message = msg(message_type="image", content={"image_key": "img_v3_x"})
     assert route(message, ALLOWED) is BotIntent.IMPORT_IMAGE

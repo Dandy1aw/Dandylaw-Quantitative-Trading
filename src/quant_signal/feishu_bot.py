@@ -48,6 +48,13 @@ _HELP_TEXT = (
     "发送券商账户原图 — 需含总资产/持仓市值/现金/购买力及完整持仓\n"
     "确认导入 — 应用最近一次校验不完整(PARTIAL)的导入"
 )
+_HELP_TEXT += (
+    "\n异动榜 [20|60|252] — 累计入榜个股 Top 榜"
+    "\n异动板块 [板块] — 板块累计异动 Top5"
+    "\n异动 <代码> — 查询单只股票的入榜记录"
+    "\n监控 [代码] / 取消监控 <代码> — 管理实时价格监控"
+    "\n重推 / 重推 异动榜 — 重新发送最新持仓或异动榜"
+)
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,14 @@ class BotIntent(str, Enum):
     SIGNALS = "signals"
     SCAN = "scan"
     HEALTH = "health"
+    MOVERS = "movers"
+    MOVER_SECTORS = "mover_sectors"
+    MOVER_TICKER = "mover_ticker"
+    MONITORS = "monitors"
+    MONITOR_ADD = "monitor_add"
+    MONITOR_REMOVE = "monitor_remove"
+    REPUSH = "repush"
+    REPUSH_MOVERS = "repush_movers"
     IMPORT_IMAGE = "import_image"
     CONFIRM_IMPORT = "confirm_import"
     UNKNOWN = "unknown"
@@ -96,6 +111,11 @@ _TEXT_COMMANDS = {
     "健康": BotIntent.HEALTH,
     "health": BotIntent.HEALTH,
     "确认导入": BotIntent.CONFIRM_IMPORT,
+    "异动榜": BotIntent.MOVERS,
+    "异动板块": BotIntent.MOVER_SECTORS,
+    "监控": BotIntent.MONITORS,
+    "重推": BotIntent.REPUSH,
+    "重推 异动榜": BotIntent.REPUSH_MOVERS,
 }
 
 
@@ -113,6 +133,11 @@ def parse_text(content_json: str) -> str:
 
 
 _OPTION_TICKER = re.compile(r"^[A-Z]{1,6}$")
+_MOVER_WINDOW = re.compile(r"^异动榜\s+(20|60|252)$")
+_MOVER_SECTOR = re.compile(r"^异动板块\s+\S.+$")
+_MOVER_TICKER = re.compile(r"^异动\s+([A-Za-z]{1,6})$")
+_MONITOR_ADD = re.compile(r"^监控\s+([A-Za-z]{1,6})$")
+_MONITOR_REMOVE = re.compile(r"^取消监控\s+([A-Za-z]{1,6})$")
 
 
 def parse_option_ticker(text: str) -> str | None:
@@ -160,6 +185,16 @@ def route(message: BotMessage, allowed_open_ids: frozenset[str]) -> BotIntent:
         return exact
     if parse_option_ticker(text) is not None:
         return BotIntent.OPTION_INTEL
+    if _MOVER_WINDOW.fullmatch(text):
+        return BotIntent.MOVERS
+    if _MOVER_SECTOR.fullmatch(text):
+        return BotIntent.MOVER_SECTORS
+    if _MOVER_TICKER.fullmatch(text):
+        return BotIntent.MOVER_TICKER
+    if _MONITOR_ADD.fullmatch(text):
+        return BotIntent.MONITOR_ADD
+    if _MONITOR_REMOVE.fullmatch(text):
+        return BotIntent.MONITOR_REMOVE
     return BotIntent.UNKNOWN
 
 
@@ -248,9 +283,16 @@ class FeishuBotService:
     def _dispatch(self, intent: BotIntent, message: BotMessage, now: datetime) -> None:
         if message.chat_type == "group":
             # 群里只提供只读查询；改状态的操作一律引导回单聊
-            if intent in (BotIntent.IMPORT_IMAGE, BotIntent.CONFIRM_IMPORT):
+            if intent in (
+                BotIntent.IMPORT_IMAGE,
+                BotIntent.CONFIRM_IMPORT,
+                BotIntent.MONITOR_ADD,
+                BotIntent.MONITOR_REMOVE,
+                BotIntent.REPUSH,
+                BotIntent.REPUSH_MOVERS,
+            ):
                 self._transport.send_text(
-                    message.chat_id, "导入相关操作请在与机器人的单聊中进行。"
+                    message.chat_id, "该操作会修改状态或重新推送，请在与机器人的单聊中进行。"
                 )
                 return
             if intent is BotIntent.HOLDINGS:
@@ -286,6 +328,30 @@ class FeishuBotService:
             self._transport.send_text(message.chat_id, self._scan_text())
         elif intent is BotIntent.HEALTH:
             self._transport.send_text(message.chat_id, self._health_text(now))
+        elif intent in (BotIntent.MOVERS, BotIntent.MOVER_SECTORS):
+            self._reply_movers(
+                message.chat_id,
+                parse_text(message.content_json),
+            )
+        elif intent is BotIntent.MOVER_TICKER:
+            self._transport.send_text(
+                message.chat_id,
+                self._mover_ticker_text(parse_text(message.content_json)),
+            )
+        elif intent is BotIntent.MONITORS:
+            self._transport.send_text(message.chat_id, self._monitors_text())
+        elif intent is BotIntent.MONITOR_ADD:
+            self._handle_monitor_add(
+                message.chat_id, parse_text(message.content_json), now
+            )
+        elif intent is BotIntent.MONITOR_REMOVE:
+            self._handle_monitor_remove(
+                message.chat_id, parse_text(message.content_json), now
+            )
+        elif intent is BotIntent.REPUSH:
+            self._handle_repush(message.chat_id)
+        elif intent is BotIntent.REPUSH_MOVERS:
+            self._handle_repush_movers(message.chat_id)
         elif intent is BotIntent.IMPORT_IMAGE:
             self._handle_import(message, now)
         elif intent is BotIntent.CONFIRM_IMPORT:
@@ -377,6 +443,136 @@ class FeishuBotService:
                 f" · 得分 {row.get('score')} · {row.get('price')}"
             )
         return "\n".join(lines)
+
+    def _mover_window(self, text: str) -> int:
+        match = _MOVER_WINDOW.fullmatch(text)
+        return int(match.group(1)) if match else self._settings.extreme_movers.default_window
+
+    def _mover_card(self, text: str) -> Card | None:
+        from quant_signal.extreme_movers import rank_movers, rank_sectors
+        from quant_signal.notifier.cards import extreme_movers_premarket_card
+
+        session = self._ledger.latest_complete_extreme_mover_session()
+        if session is None:
+            return None
+        window = self._mover_window(text)
+        events = self._ledger.extreme_mover_events(session, window_sessions=window)
+        return extreme_movers_premarket_card(
+            session=session,
+            window_sessions=window,
+            movers=rank_movers(events, window_sessions=window),
+            sectors=rank_sectors(events, window_sessions=window),
+            backfill_warning=any(event.backfilled for event in events),
+        )
+
+    def _reply_movers(self, chat_id: str, text: str) -> None:
+        card = self._mover_card(text)
+        if card is None:
+            self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
+            return
+        self._transport.send_card(chat_id, card)
+
+    def _mover_ticker_text(self, text: str) -> str:
+        from decimal import Decimal
+
+        match = _MOVER_TICKER.fullmatch(text)
+        if match is None:
+            return "用法：异动 <美股代码>，例如「异动 AAOI」。"
+        ticker = match.group(1).upper()
+        session = self._ledger.latest_complete_extreme_mover_session()
+        if session is None:
+            return "暂无已完成的极端异动统计。"
+        window = self._settings.extreme_movers.default_window
+        events = [
+            event
+            for event in self._ledger.extreme_mover_events(
+                session, window_sessions=window
+            )
+            if event.ticker == ticker
+        ]
+        if not events:
+            return f"{ticker} 在最近 {window} 个已统计交易日内未进入 ±10% 榜单。"
+        compound = Decimal("1")
+        for event in events:
+            compound *= Decimal("1") + event.daily_return
+        return (
+            f"{ticker}｜最近 {window} 个已统计交易日\n"
+            f"累计入榜: {len(events)} 天\n"
+            f"事件日复合涨跌幅: {compound - Decimal('1'):+.2%}\n"
+            f"最近一次: {max(event.session for event in events).isoformat()}"
+        )
+
+    def _held_symbols(self) -> list[str]:
+        from decimal import Decimal
+
+        symbols: list[str] = []
+        for row in self._ledger.active_observed_positions():
+            try:
+                positive = Decimal(str(row.get("qty") or "0")) > 0
+            except Exception:  # noqa: BLE001
+                positive = False
+            if positive:
+                symbols.append(str(row.get("symbol") or "").upper())
+        return sorted({symbol for symbol in symbols if symbol})
+
+    def _monitors_text(self) -> str:
+        holdings = self._held_symbols()
+        manual = self._ledger.active_manual_monitors()
+        return (
+            "实时价格监控\n"
+            f"持仓强制监控: {', '.join(holdings) if holdings else '无'}\n"
+            f"手动监控: {', '.join(manual) if manual else '无'}"
+        )
+
+    def _handle_monitor_add(self, chat_id: str, text: str, now: datetime) -> None:
+        match = _MONITOR_ADD.fullmatch(text)
+        assert match is not None
+        ticker = match.group(1).upper()
+        if ticker in self._held_symbols():
+            self._transport.send_text(chat_id, f"{ticker} 是当前持仓，已经强制实时监控。")
+            return
+        limit = self._settings.holding_price_alert.max_tickers
+        if len(self._ledger.active_manual_monitors()) >= limit:
+            self._transport.send_text(chat_id, f"手动监控已达到上限 {limit} 个。")
+            return
+        changed = self._ledger.enable_manual_monitor(ticker, now=now)
+        suffix = "已加入" if changed else "已在"
+        self._transport.send_text(chat_id, f"{ticker} {suffix}实时价格监控。")
+
+    def _handle_monitor_remove(self, chat_id: str, text: str, now: datetime) -> None:
+        match = _MONITOR_REMOVE.fullmatch(text)
+        assert match is not None
+        ticker = match.group(1).upper()
+        if ticker in self._held_symbols():
+            self._transport.send_text(chat_id, f"{ticker} 是当前持仓，持仓实时监控仍会保留。")
+            return
+        changed = self._ledger.disable_manual_monitor(ticker, now=now)
+        self._transport.send_text(
+            chat_id, f"{ticker} {'已取消' if changed else '不在'}手动监控。"
+        )
+
+    def _handle_repush(self, chat_id: str) -> None:
+        receive_id = self._cfg.push_receive_id
+        if not receive_id:
+            self._transport.send_text(chat_id, "未配置推送接收群。")
+            return
+        sent = self._transport.send_text_to(
+            receive_id, "chat_id", self._holdings_text()
+        )
+        self._transport.send_text(
+            chat_id, "最新持仓已重新推送。" if sent else "重新推送失败。"
+        )
+
+    def _handle_repush_movers(self, chat_id: str) -> None:
+        card = self._mover_card("异动榜")
+        if card is None:
+            self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
+            return
+        receive_id = self._cfg.push_receive_id
+        sent = bool(receive_id) and self._transport.send_card(receive_id, card)
+        self._transport.send_text(
+            chat_id, "最新异动榜已重新推送。" if sent else "重新推送失败。"
+        )
 
     def _health_text(self, now: datetime) -> str:
         if self._runtime is None:
