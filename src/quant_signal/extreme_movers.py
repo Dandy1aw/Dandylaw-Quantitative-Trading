@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -39,6 +39,15 @@ class ExtremeMoverEvent:
     eligibility: Eligibility = Eligibility.PROFILE_UNAVAILABLE
     source: str = "alpaca_sip"
     backfilled: bool = False
+
+
+@dataclass(frozen=True)
+class ExtremeMoverRun:
+    session: date
+    status: str
+    universe_count: int
+    covered_count: int
+    completed_at: datetime
 
 
 @dataclass(frozen=True)

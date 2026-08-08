@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 15
+_SCHEMA_VERSION = 16
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -379,6 +379,36 @@ CREATE TABLE IF NOT EXISTS us_briefing_runs (
     completed_at TEXT,
     UNIQUE(report_kind, as_of)
 );
+CREATE TABLE IF NOT EXISTS extreme_mover_runs (
+    session_date TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    universe_count INTEGER NOT NULL,
+    covered_count INTEGER NOT NULL,
+    completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS extreme_mover_events (
+    session_date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    daily_return TEXT NOT NULL,
+    close_price TEXT NOT NULL,
+    avg_dollar_volume_20d TEXT,
+    sector TEXT,
+    industry TEXT,
+    quote_type TEXT,
+    eligibility TEXT NOT NULL,
+    source TEXT NOT NULL,
+    backfilled INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(session_date, ticker)
+);
+CREATE INDEX IF NOT EXISTS idx_extreme_mover_events_window
+    ON extreme_mover_events(session_date DESC, eligibility, direction);
+CREATE TABLE IF NOT EXISTS manual_price_monitors (
+    ticker TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -452,6 +482,162 @@ class SignalLedger:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
         return int(row["value"]) if row else 0
+
+    def replace_extreme_mover_run(
+        self,
+        run: object,
+        events: Sequence[object],
+    ) -> None:
+        """Atomically replace one completed session and its immutable events."""
+        from quant_signal.extreme_movers import ExtremeMoverEvent, ExtremeMoverRun
+
+        if not isinstance(run, ExtremeMoverRun):
+            raise TypeError("run must be an ExtremeMoverRun")
+        typed_events: list[ExtremeMoverEvent] = []
+        for event in events:
+            if not isinstance(event, ExtremeMoverEvent):
+                raise TypeError("events must contain ExtremeMoverEvent values")
+            if event.session != run.session:
+                raise ValueError("event session must match run session")
+            typed_events.append(event)
+        with self._lock:
+            try:
+                self._con.execute("BEGIN")
+                self._con.execute(
+                    "INSERT INTO extreme_mover_runs"
+                    " (session_date, status, universe_count, covered_count, completed_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(session_date) DO UPDATE SET"
+                    " status=excluded.status, universe_count=excluded.universe_count,"
+                    " covered_count=excluded.covered_count, completed_at=excluded.completed_at",
+                    (
+                        run.session.isoformat(),
+                        run.status,
+                        run.universe_count,
+                        run.covered_count,
+                        run.completed_at.astimezone(timezone.utc).isoformat(),
+                    ),
+                )
+                self._con.execute(
+                    "DELETE FROM extreme_mover_events WHERE session_date = ?",
+                    (run.session.isoformat(),),
+                )
+                self._con.executemany(
+                    "INSERT INTO extreme_mover_events"
+                    " (session_date, ticker, direction, daily_return, close_price,"
+                    " avg_dollar_volume_20d, sector, industry, quote_type, eligibility,"
+                    " source, backfilled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            event.session.isoformat(), event.ticker,
+                            event.direction.value, str(event.daily_return),
+                            str(event.close),
+                            str(event.avg_dollar_volume_20d)
+                            if event.avg_dollar_volume_20d is not None else None,
+                            event.sector, event.industry, event.quote_type,
+                            event.eligibility.value, event.source,
+                            int(event.backfilled),
+                        )
+                        for event in typed_events
+                    ],
+                )
+                self._con.commit()
+            except Exception:
+                self._con.rollback()
+                raise
+
+    def latest_complete_extreme_mover_session(self) -> date | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT session_date FROM extreme_mover_runs"
+                " WHERE status = 'COMPLETE' ORDER BY session_date DESC LIMIT 1"
+            ).fetchone()
+        return date.fromisoformat(str(row["session_date"])) if row else None
+
+    def extreme_mover_events(
+        self,
+        through: date,
+        *,
+        window_sessions: int = 1,
+    ) -> list[object]:
+        from quant_signal.extreme_movers import (
+            Eligibility,
+            ExtremeMoverEvent,
+            MoverDirection,
+        )
+
+        if window_sessions < 1:
+            raise ValueError("window_sessions must be positive")
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT e.* FROM extreme_mover_events e"
+                " WHERE e.session_date IN ("
+                "  SELECT session_date FROM extreme_mover_runs"
+                "  WHERE status = 'COMPLETE' AND session_date <= ?"
+                "  ORDER BY session_date DESC LIMIT ?"
+                " ) ORDER BY e.session_date, e.ticker",
+                (through.isoformat(), window_sessions),
+            ).fetchall()
+        return [
+            ExtremeMoverEvent(
+                session=date.fromisoformat(str(row["session_date"])),
+                ticker=str(row["ticker"]),
+                direction=MoverDirection(str(row["direction"])),
+                daily_return=Decimal(str(row["daily_return"])),
+                close=Decimal(str(row["close_price"])),
+                avg_dollar_volume_20d=(
+                    Decimal(str(row["avg_dollar_volume_20d"]))
+                    if row["avg_dollar_volume_20d"] is not None else None
+                ),
+                sector=str(row["sector"]) if row["sector"] is not None else None,
+                industry=str(row["industry"]) if row["industry"] is not None else None,
+                quote_type=(
+                    str(row["quote_type"]) if row["quote_type"] is not None else None
+                ),
+                eligibility=Eligibility(str(row["eligibility"])),
+                source=str(row["source"]),
+                backfilled=bool(row["backfilled"]),
+            )
+            for row in rows
+        ]
+
+    def enable_manual_monitor(self, ticker: str, *, now: datetime) -> bool:
+        symbol = ticker.strip().upper()
+        if not symbol:
+            raise ValueError("ticker is required")
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            existing = self._con.execute(
+                "SELECT enabled FROM manual_price_monitors WHERE ticker = ?", (symbol,)
+            ).fetchone()
+            changed = existing is None or not bool(existing["enabled"])
+            self._con.execute(
+                "INSERT INTO manual_price_monitors"
+                " (ticker, enabled, created_at, updated_at) VALUES (?, 1, ?, ?)"
+                " ON CONFLICT(ticker) DO UPDATE SET enabled=1, updated_at=excluded.updated_at",
+                (symbol, timestamp, timestamp),
+            )
+            self._con.commit()
+        return changed
+
+    def disable_manual_monitor(self, ticker: str, *, now: datetime) -> bool:
+        symbol = ticker.strip().upper()
+        with self._lock:
+            cursor = self._con.execute(
+                "UPDATE manual_price_monitors SET enabled=0, updated_at=?"
+                " WHERE ticker=? AND enabled=1",
+                (now.astimezone(timezone.utc).isoformat(), symbol),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    def active_manual_monitors(self) -> list[str]:
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT ticker FROM manual_price_monitors"
+                " WHERE enabled=1 ORDER BY ticker"
+            ).fetchall()
+        return [str(row["ticker"]) for row in rows]
 
     def save_company_profiles(
         self,

@@ -15,6 +15,12 @@ from quant_signal.account import (
     BrokerPosition,
 )
 from quant_signal.execution import ExecutionPlan, PlanState
+from quant_signal.extreme_movers import (
+    Eligibility,
+    ExtremeMoverEvent,
+    ExtremeMoverRun,
+    MoverDirection,
+)
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.options_flow import (
@@ -1025,3 +1031,59 @@ def test_us_briefing_delivery_status_is_persisted(ledger: SignalLedger) -> None:
     assert stored is not None
     assert stored["status"] == "DELIVERED"
     assert stored["payload"] == {"regime": "PULLBACK"}
+
+
+def _mover_event(ticker: str, session: date = date(2026, 8, 7)) -> ExtremeMoverEvent:
+    return ExtremeMoverEvent(
+        session=session,
+        ticker=ticker,
+        direction=MoverDirection.UP,
+        daily_return=Decimal("0.12"),
+        close=Decimal("112"),
+        avg_dollar_volume_20d=Decimal("25000000"),
+        sector="Information Technology",
+        industry="Software",
+        quote_type="EQUITY",
+        eligibility=Eligibility.ELIGIBLE,
+    )
+
+
+def test_extreme_mover_snapshot_replaces_same_session_atomically(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 7)
+    first = ExtremeMoverRun(session, "COMPLETE", 100, 99, NOW)
+    second = ExtremeMoverRun(session, "COMPLETE", 101, 101, NOW + timedelta(minutes=1))
+
+    ledger.replace_extreme_mover_run(first, [_mover_event("A")])
+    ledger.replace_extreme_mover_run(second, [_mover_event("B")])
+
+    assert [row.ticker for row in ledger.extreme_mover_events(session)] == ["B"]
+    assert ledger.latest_complete_extreme_mover_session() == session
+
+
+def test_extreme_mover_history_is_window_bounded(ledger: SignalLedger) -> None:
+    for day, ticker in ((5, "A"), (6, "B"), (7, "C")):
+        session = date(2026, 8, day)
+        ledger.replace_extreme_mover_run(
+            ExtremeMoverRun(session, "COMPLETE", 1, 1, NOW),
+            [_mover_event(ticker, session)],
+        )
+
+    assert [
+        row.ticker
+        for row in ledger.extreme_mover_events(
+            date(2026, 8, 7), window_sessions=2
+        )
+    ] == ["B", "C"]
+
+
+def test_manual_monitors_are_idempotent_and_soft_deleted(
+    ledger: SignalLedger,
+) -> None:
+    assert ledger.enable_manual_monitor("aaoi", now=NOW)
+    assert not ledger.enable_manual_monitor("AAOI", now=NOW)
+    assert ledger.active_manual_monitors() == ["AAOI"]
+    assert ledger.disable_manual_monitor("AAOI", now=NOW)
+    assert not ledger.disable_manual_monitor("AAOI", now=NOW)
+    assert ledger.active_manual_monitors() == []
