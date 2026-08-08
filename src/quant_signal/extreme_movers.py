@@ -9,6 +9,7 @@ from enum import Enum
 
 import pandas as pd
 
+from quant_signal.calendar import previous_trading_day
 from quant_signal.company_profiles import CompanyProfile
 
 
@@ -48,6 +49,12 @@ class ExtremeMoverRun:
     universe_count: int
     covered_count: int
     completed_at: datetime
+    screened_count: int = 0
+    confirmed_count: int = 0
+    feed: str = "unknown"
+    error: str | None = None
+    universe_hash: str = ""
+    config_hash: str = ""
 
 
 @dataclass(frozen=True)
@@ -95,11 +102,20 @@ def detect_extreme_movers(
         rows = frame.reset_index(level="ticker", drop=True).sort_index()
         rows = rows[rows.index.map(lambda value: value.date() <= session)]
         rows = rows[~rows.index.duplicated(keep="last")]
-        if len(rows) < 2 or rows.index[-1].date() != session:
+        if (
+            len(rows) < 2
+            or rows.index[-1].date() != session
+            or rows.index[-2].date() != previous_trading_day(session)
+        ):
             continue
         previous_close = _decimal(rows.iloc[-2]["close"])
         current_close = _decimal(rows.iloc[-1]["close"])
-        if previous_close <= 0 or current_close <= 0:
+        if (
+            not previous_close.is_finite()
+            or not current_close.is_finite()
+            or previous_close <= 0
+            or current_close <= 0
+        ):
             continue
         daily_return = current_close / previous_close - Decimal("1")
         if daily_return >= threshold:
@@ -128,7 +144,7 @@ def average_dollar_volume(frame: pd.DataFrame, *, sessions: int = 20) -> Decimal
         frame["volume"], errors="coerce"
     )
     values = values.dropna().tail(sessions)
-    if values.empty:
+    if len(values) < sessions:
         return Decimal("0")
     return _decimal(values.mean())
 
@@ -224,8 +240,10 @@ def rank_sectors(
         raise ValueError("window_sessions must be positive")
     grouped: dict[tuple[str, MoverDirection], list[ExtremeMoverEvent]] = {}
     for event in events:
-        if event.eligibility is Eligibility.ELIGIBLE and event.sector:
-            grouped.setdefault((event.sector, event.direction), []).append(event)
+        if event.eligibility is Eligibility.ELIGIBLE:
+            grouped.setdefault(
+                (event.sector or "未分类", event.direction), []
+            ).append(event)
 
     rows: list[SectorRanking] = []
     for (sector, direction), sector_events in grouped.items():

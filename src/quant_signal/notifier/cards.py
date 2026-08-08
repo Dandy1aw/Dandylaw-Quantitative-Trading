@@ -42,7 +42,13 @@ _SELL_RELIABILITY_NOTE = "⚠️ SELL 信号历史胜率偏低（回测 32–42%
 
 
 def extreme_movers_close_card(
-    events: Sequence["ExtremeMoverEvent"], *, universe_count: int, covered_count: int
+    events: Sequence["ExtremeMoverEvent"],
+    *,
+    universe_count: int,
+    covered_count: int,
+    top_n: int = 10,
+    source_label: str | None = None,
+    session: date | None = None,
 ) -> Card:
     from quant_signal.extreme_movers import Eligibility, MoverDirection
 
@@ -56,12 +62,13 @@ def extreme_movers_close_card(
         rows.sort(key=lambda event: (-abs(event.daily_return), event.ticker))
         return [
             f"{index}. **{event.ticker}** {event.daily_return:+.1%}｜{event.sector or '板块未知'}"
-            for index, event in enumerate(rows[:10], start=1)
+            for index, event in enumerate(rows[:top_n], start=1)
         ] or ["暂无符合主榜条件的个股"]
 
-    session = max((event.session for event in events), default=date.today())
+    session = session or max((event.session for event in events), default=date.today())
     lines = [
         f"数据日 {session.isoformat()}｜覆盖 {covered_count}/{universe_count}",
+        f"数据语义: {source_label}" if source_label else "数据语义: 见事件来源",
         "", "**上涨 ≥10%**", *board(MoverDirection.UP),
         "", "**下跌 ≤-10%**", *board(MoverDirection.DOWN), "",
         "> 仅记录经价格、流动性和个股类型过滤后的客观异动，不构成投资建议。",
@@ -76,16 +83,30 @@ def extreme_movers_premarket_card(
     movers: Sequence["MoverRanking"],
     sectors: Sequence["SectorRanking"],
     backfill_warning: bool = False,
+    top_stocks: int = 10,
+    top_sectors: int = 5,
+    source_label: str | None = None,
+    window_summaries: Mapping[int, tuple[int, int]] | None = None,
 ) -> Card:
     from quant_signal.extreme_movers import MoverDirection
 
     lines = [f"截至 {session.isoformat()}｜统计窗口 {window_sessions} 个交易日"]
+    if source_label:
+        lines.append(f"数据语义: {source_label}")
+    if window_summaries:
+        lines.append(
+            "窗口事件天数: "
+            + "｜".join(
+                f"{window}日 ↑{counts[0]} ↓{counts[1]}"
+                for window, counts in sorted(window_summaries.items())
+            )
+        )
     for direction, label in (
         (MoverDirection.UP, "上涨个股 Top10"),
         (MoverDirection.DOWN, "下跌个股 Top10"),
     ):
         lines.extend(["", f"**{label}**"])
-        rows = [row for row in movers if row.direction is direction][:10]
+        rows = [row for row in movers if row.direction is direction][:top_stocks]
         lines.extend(
             [
                 f"{index}. **{row.ticker}**｜累计入榜 {row.event_days} 天｜事件日复合 {row.event_compound_return:+.1%}"
@@ -94,7 +115,7 @@ def extreme_movers_premarket_card(
         )
     lines.extend(["", "**板块 Top5**"])
     for direction, marker in ((MoverDirection.UP, "涨"), (MoverDirection.DOWN, "跌")):
-        sector_rows = [row for row in sectors if row.direction is direction][:5]
+        sector_rows = [row for row in sectors if row.direction is direction][:top_sectors]
         for index, row in enumerate(sector_rows, start=1):
             lines.append(
                 f"{marker}{index}. **{row.sector}**｜累计入榜 {row.event_days} 天｜"
@@ -107,6 +128,39 @@ def extreme_movers_premarket_card(
     if backfill_warning:
         lines.append("> 历史回填基于当前仍活跃标的，存在幸存者偏差。")
     return Card(CardKind.REPORT, f"盘前极端异动累计榜｜{session:%m/%d}", "\n".join(lines))
+
+
+def extreme_mover_sectors_card(
+    *,
+    session: date,
+    window_sessions: int,
+    sectors: Sequence["SectorRanking"],
+    sector_filter: str | None = None,
+) -> Card:
+    from quant_signal.extreme_movers import MoverDirection
+
+    selected = list(sectors)
+    if sector_filter:
+        selected = [row for row in selected if row.sector == sector_filter]
+    lines = [
+        f"截至 {session.isoformat()}｜统计窗口 {window_sessions} 个交易日",
+        f"筛选: {sector_filter}" if sector_filter else "筛选: 全部板块",
+    ]
+    for direction, label in (
+        (MoverDirection.UP, "上涨板块 Top5"),
+        (MoverDirection.DOWN, "下跌板块 Top5"),
+    ):
+        lines.extend(["", f"**{label}**"])
+        rows = [row for row in selected if row.direction is direction][:5]
+        lines.extend(
+            [
+                f"{index}. **{row.sector}**｜累计入榜 {row.event_days} 天｜"
+                f"{row.unique_movers} 股｜重复强度 {row.repeat_intensity:.2%}"
+                for index, row in enumerate(rows, start=1)
+            ] or ["暂无"]
+        )
+    lines.extend(["", "> 板块榜衡量累计异动活跃度，不代表市场宽度。"])
+    return Card(CardKind.REPORT, f"极端异动板块榜｜{session:%m/%d}", "\n".join(lines))
 
 
 def option_flow_card(

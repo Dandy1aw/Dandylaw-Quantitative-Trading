@@ -47,6 +47,12 @@ class Source:
         self.calls.append(tuple(symbols))
         return _bars(symbols, start, end)
 
+    def fetch_daily_bars(
+        self, symbols: list[str], start: date, end: date
+    ) -> pd.DataFrame:
+        self.calls.append(tuple(symbols))
+        return _bars(symbols, start, end)
+
 
 class Profiles:
     def __init__(self) -> None:
@@ -81,6 +87,7 @@ def _engine(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         settings=SimpleNamespace(extreme_movers=ExtremeMoverSettings(enabled=True)),
         source=Source(),
+        confirmation_source=Source(),
         fundamentals_source=Profiles(),
         ledger=SignalLedger(tmp_path / "signals.db"),
         notifier=Notifier(),
@@ -96,6 +103,10 @@ def test_close_pipeline_enriches_only_detected_movers(tmp_path: Path) -> None:
     assert engine.fundamentals_source.requested == {"UP", "DOWN"}
     assert engine.ledger.latest_complete_extreme_mover_session() == date(2026, 8, 7)
     assert len(engine.ledger.extreme_mover_events(date(2026, 8, 7))) == 2
+    assert all(
+        event.source == "alpaca_iex_screen+yfinance_adjusted_confirm"
+        for event in engine.ledger.extreme_mover_events(date(2026, 8, 7))
+    )
     assert "美股单日极端异动" in engine.notifier.cards[-1].title
 
 
@@ -106,6 +117,7 @@ def test_close_pipeline_fails_closed_below_coverage(tmp_path: Path) -> None:
 
     assert run_close(engine, NOW) is False
     assert engine.ledger.latest_complete_extreme_mover_session() is None
+    assert engine.ledger.extreme_mover_run(date(2026, 8, 7))["status"] == "FAILED"
     assert engine.notifier.cards == []
 
 
@@ -119,3 +131,11 @@ def test_premarket_reads_latest_complete_session_without_refetch(tmp_path: Path)
 
     assert engine.source.calls == []
     assert engine.notifier.cards[-1].title.startswith("盘前极端异动累计榜")
+
+
+def test_delivery_failure_is_reported_after_complete_snapshot(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine.notifier.send = lambda card: False
+
+    assert run_close(engine, NOW) is False
+    assert engine.ledger.latest_complete_extreme_mover_session() == date(2026, 8, 7)

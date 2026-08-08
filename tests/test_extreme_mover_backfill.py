@@ -12,16 +12,15 @@ from research.backfill_extreme_movers import build_backfill_events
 
 
 def test_backfill_is_session_bounded_and_marks_survivorship() -> None:
-    dates = pd.to_datetime(
-        ["2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07"], utc=True
-    )
+    dates = pd.date_range(end="2026-08-07", periods=24, freq="B", tz="UTC")
+    closes = [100.0] * 22 + [80.0, 90.0]
     frame = pd.DataFrame(
         {
-            "open": [100.0, 111.0, 90.0, 100.0],
-            "high": [100.0, 111.0, 90.0, 100.0],
-            "low": [100.0, 111.0, 90.0, 100.0],
-            "close": [100.0, 111.0, 90.0, 100.0],
-            "volume": [3_000_000] * 4,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": [3_000_000] * len(closes),
         },
         index=pd.MultiIndex.from_product([["AAA"], dates], names=["ticker", "ts"]),
     )
@@ -47,5 +46,5 @@ def test_backfill_is_session_bounded_and_marks_survivorship() -> None:
         for rows in result.values() for event in rows
     )
     assert [event.daily_return for event in result[date(2026, 8, 6)]] == [
-        Decimal("-0.1891891891891891891891891892")
+        Decimal("-0.2")
     ]

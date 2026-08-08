@@ -275,7 +275,12 @@ SIP 在当前账户下延迟约 15 分钟，不作为实时告警主源。
 天数和“只复合入榜日收益”的事件日复合涨跌幅；板块 Top5 按累计合格事件天数、
 重复强度、涉及个股数排序。板块榜是异动活跃度，不是市场宽度，也不等于连续
 持有收益。收盘后 16:30 ET 推当天新事件，下一交易日 08:00 ET 只读台账推累计榜。
-覆盖率不足时 fail closed，不保存残缺快照。
+覆盖率不足时 fail closed，不保存残缺快照。`feed` 可选 `hybrid`/`sip`；生产账户
+当前无 SIP 权限，采用 IEX 全市场 8% 初筛，再用 Yahoo adjusted 日线确认 ±10%
+并计算完整市场口径的 20 日平均成交额。候选确认覆盖必须至少 95%，未确认候选
+保留为不可用审计事件且绝不进入主榜；不足 20 个有效确认交易日的标的也不会进入主榜。
+混合模式可能漏掉 IEX 初筛未达到 8% 的极端异动，因此卡片标为 best-effort；升级
+SIP 权限后可切换到严格的单源模式。
 
 历史初始化可运行 `research/backfill_extreme_movers.py`。回填使用当前仍活跃标的，
 因此明确标记 `current_active_symbols` 幸存者偏差；默认不发送通知。
@@ -392,7 +397,7 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 | `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
 | `holding_price_alert` | 09:30–15:59 ET 每分钟 | NYSE 交易日历 + 实际收市时间 | 真实持仓 1/5/15 分钟与当日异动，波动率自适应+放量确认+冷却升级 |
 | `extreme_movers_premarket` | 08:00 ET | NYSE 交易日历 | 只读最新完整事件台账，推 60 日个股/板块累计榜 |
-| `extreme_movers_close` | 16:30 ET | NYSE 交易日历 | 全市场 SIP adjusted 日线扫描，记录并推送单日 ±10% 个股 |
+| `extreme_movers_close` | 16:30 ET | NYSE 交易日历 | 全市场 configured-feed adjusted 日线扫描，记录并推送单日 ±10% 个股 |
 | `option_flow` | 10:00–15:45 ET 每15分钟 | NYSE 交易日历 | Cboe 四市场期权 Call/Put Top10 扫描，基线/实质变化才推送 |
 | `option_flow_close` | 北京 08:00 (UTC 00:00) | NYSE 交易日历(美东日期) | 期权收盘榜（force_summary；美东晚间抓当日最终数据，随早间统一阅读） |
 | `option_flow_drain` | 16:35–21:35 ET 每小时 | NYSE 交易日历 | 只重试期权 outbox 未发出的卡（不抓数据），保证收盘榜在过期窗口内有真实重试 |

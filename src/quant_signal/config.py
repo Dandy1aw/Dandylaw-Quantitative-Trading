@@ -417,13 +417,18 @@ class ExtremeMoverSettings(BaseModel):
     """Full-market daily ±10% event collection and ranking."""
 
     enabled: bool = False
+    feed: Literal["hybrid", "sip"] = "hybrid"
     threshold: Decimal = Field(default=Decimal("0.10"), gt=0, le=Decimal("1"))
+    screen_threshold: Decimal = Field(default=Decimal("0.08"), gt=0, le=Decimal("1"))
     min_price: Decimal = Field(default=Decimal("5"), ge=0)
     min_dollar_volume: Decimal = Field(default=Decimal("20000000"), ge=0)
     windows: tuple[int, ...] = (20, 60, 252)
     default_window: int = 60
     chunk_size: int = Field(default=200, ge=1, le=500)
+    confirmation_chunk_size: int = Field(default=50, ge=1, le=200)
+    deadline_seconds: int = Field(default=600, ge=60, le=3600)
     min_coverage: float = Field(default=0.90, gt=0, le=1)
+    min_confirmation_coverage: float = Field(default=0.95, gt=0, le=1)
     top_stocks: int = Field(default=10, ge=1, le=50)
     top_sectors: int = Field(default=5, ge=1, le=11)
     close_hour_et: int = Field(default=16, ge=0, le=23)
@@ -437,6 +442,8 @@ class ExtremeMoverSettings(BaseModel):
             raise ValueError("extreme mover windows must be between 1 and 504")
         if self.default_window not in self.windows:
             raise ValueError("default_window must be included in windows")
+        if self.screen_threshold > self.threshold:
+            raise ValueError("screen_threshold cannot exceed threshold")
         return self
 
 

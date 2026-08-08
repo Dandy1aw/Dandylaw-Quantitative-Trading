@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,7 @@ from quant_signal.calendar import previous_trading_day  # noqa: E402
 from quant_signal.config import ExtremeMoverSettings, load_settings  # noqa: E402
 from quant_signal.datafeed.alpaca_source import AlpacaSource  # noqa: E402
 from quant_signal.datafeed.fundamentals import YFinanceFundamentals  # noqa: E402
+from quant_signal.datafeed.yf_source import YFinanceSource  # noqa: E402
 from quant_signal.extreme_movers import (  # noqa: E402
     ExtremeMoverEvent,
     ExtremeMoverRun,
@@ -49,6 +51,14 @@ def build_backfill_events(
         detected = detect_extreme_movers(bars, session, threshold=settings.threshold)
         qualified: list[ExtremeMoverEvent] = []
         for event in detected:
+            event = replace(
+                event,
+                source=(
+                    "alpaca_iex_screen+yfinance_adjusted_confirm"
+                    if settings.feed == "hybrid"
+                    else "alpaca_sip_adjustment_all"
+                ),
+            )
             frame = bars.xs(event.ticker, level="ticker").sort_index()
             history = frame[frame.index.map(lambda value: value.date() <= session)]
             adv = average_dollar_volume(history, sessions=20)
@@ -69,21 +79,35 @@ def build_backfill_events(
 
 
 def _fetch_all(
-    source: AlpacaSource,
+    source: object,
     symbols: list[str],
     start: date,
     end: date,
     chunk_size: int,
+    feed: str,
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for offset in range(0, len(symbols), chunk_size):
-        frame = source.fetch_sip_daily_bars(
-            symbols[offset : offset + chunk_size], start, end
+        fetch = getattr(
+            source,
+            "fetch_sip_daily_bars" if feed == "sip" else "fetch_daily_bars",
         )
+        frame = fetch(symbols[offset : offset + chunk_size], start, end)
         if not frame.empty:
             frames.append(frame)
         print(f"bars {min(offset + chunk_size, len(symbols))}/{len(symbols)}")
     return pd.concat(frames).sort_index() if frames else pd.DataFrame()
+
+
+def _covered(bars: pd.DataFrame, session: date) -> set[str]:
+    if bars.empty:
+        return set()
+    output: set[str] = set()
+    for ticker, frame in bars.groupby(level="ticker"):
+        dates = {value.date() for value in frame.index.get_level_values("ts")}
+        if session in dates and previous_trading_day(session) in dates:
+            output.add(str(ticker))
+    return output
 
 
 def main() -> None:
@@ -102,41 +126,106 @@ def main() -> None:
     cfg = app_settings.extreme_movers
     through = args.through or previous_trading_day(date.today())
     sessions = _sessions(through, args.sessions)
+    if args.checkpoint and args.checkpoint.exists():
+        checkpoint = json.loads(args.checkpoint.read_text(encoding="utf-8"))
+        completed_through = date.fromisoformat(str(checkpoint["through"]))
+        sessions = tuple(session for session in sessions if session > completed_through)
+        if not sessions:
+            print(json.dumps({"status": "already_complete", "sessions": 0}))
+            return
     source = AlpacaSource(app_settings.alpaca_key, app_settings.alpaca_secret)
     symbols = source.list_active_symbols()
-    bars = _fetch_all(
+    screen_bars = _fetch_all(
         source,
         symbols,
         sessions[0] - timedelta(days=40),
         sessions[-1] + timedelta(days=1),
         cfg.chunk_size,
+        cfg.feed,
     )
-    detected_symbols = sorted(
-        {
-            event.ticker
-            for session in sessions
-            for event in detect_extreme_movers(bars, session, threshold=cfg.threshold)
-        }
+    screen_events = {
+        session: detect_extreme_movers(
+            screen_bars,
+            session,
+            threshold=(cfg.threshold if cfg.feed == "sip" else cfg.screen_threshold),
+        )
+        for session in sessions
+    }
+    screened_symbols = sorted(
+        {event.ticker for rows in screen_events.values() for event in rows}
     )
+    confirmation_bars = screen_bars
+    if cfg.feed == "hybrid" and screened_symbols:
+        confirmation_bars = _fetch_all(
+            YFinanceSource(),
+            screened_symbols,
+            sessions[0] - timedelta(days=40),
+            sessions[-1] + timedelta(days=1),
+            cfg.confirmation_chunk_size,
+            "daily",
+        )
+    for session in sessions:
+        universe_coverage = len(_covered(screen_bars, session)) / len(symbols)
+        if universe_coverage < cfg.min_coverage:
+            raise RuntimeError(
+                f"universe coverage failed for {session}: {universe_coverage:.3%}"
+            )
+        expected = {event.ticker for event in screen_events[session]}
+        confirmed = _covered(confirmation_bars, session) & expected
+        if expected and len(confirmed) / len(expected) < cfg.min_confirmation_coverage:
+            raise RuntimeError(
+                f"confirmation coverage failed for {session}: "
+                f"{len(confirmed)}/{len(expected)}"
+            )
+    detected_symbols = sorted({
+        event.ticker
+        for session in sessions
+        for event in detect_extreme_movers(
+            confirmation_bars, session, threshold=cfg.threshold
+        )
+    })
     profiles = YFinanceFundamentals().profiles(detected_symbols)
     events = build_backfill_events(
-        bars, sessions=sessions, profiles=profiles, settings=cfg
+        confirmation_bars, sessions=sessions, profiles=profiles, settings=cfg
     )
+    for session in sessions:
+        missing = {
+            event.ticker: event for event in screen_events[session]
+            if event.ticker not in _covered(confirmation_bars, session)
+        }
+        audit_rows = tuple(
+            replace(
+                qualify_event(
+                    replace(
+                        event,
+                        source="alpaca_iex_screen+confirmation_unavailable",
+                    ),
+                    None,
+                    avg_dollar_volume_20d=Decimal("0"),
+                    min_price=cfg.min_price,
+                    min_dollar_volume=cfg.min_dollar_volume,
+                ),
+                backfilled=True,
+            )
+            for event in missing.values()
+        )
+        events[session] = tuple(sorted(
+            (*events[session], *audit_rows), key=lambda event: event.ticker
+        ))
     ledger = SignalLedger((args.db or (app_settings.db_path / "signals.db")).resolve())
     for index, session in enumerate(sessions, start=1):
-        covered = len(
-            {
-                str(ticker)
-                for ticker, frame in bars.groupby(level="ticker")
-                if session in {
-                    value.date() for value in frame.index.get_level_values("ts")
-                }
-            }
-        )
+        covered = len(_covered(screen_bars, session))
+        screened = len(screen_events[session])
+        confirmed = len(_covered(confirmation_bars, session) & {
+            event.ticker for event in screen_events[session]
+        })
         ledger.replace_extreme_mover_run(
             ExtremeMoverRun(
                 session, "COMPLETE", len(symbols), covered,
                 datetime.now(timezone.utc),
+                screened_count=screened,
+                confirmed_count=confirmed,
+                feed=cfg.feed,
             ),
             events[session],
         )

@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 16
+_SCHEMA_VERSION = 17
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -385,7 +385,13 @@ CREATE TABLE IF NOT EXISTS extreme_mover_runs (
     status TEXT NOT NULL,
     universe_count INTEGER NOT NULL,
     covered_count INTEGER NOT NULL,
-    completed_at TEXT NOT NULL
+    completed_at TEXT NOT NULL,
+    screened_count INTEGER NOT NULL DEFAULT 0,
+    confirmed_count INTEGER NOT NULL DEFAULT 0,
+    feed TEXT NOT NULL DEFAULT 'unknown',
+    error TEXT,
+    universe_hash TEXT NOT NULL DEFAULT '',
+    config_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS extreme_mover_events (
     session_date TEXT NOT NULL,
@@ -506,17 +512,28 @@ class SignalLedger:
                 self._con.execute("BEGIN")
                 self._con.execute(
                     "INSERT INTO extreme_mover_runs"
-                    " (session_date, status, universe_count, covered_count, completed_at)"
-                    " VALUES (?, ?, ?, ?, ?)"
+                    " (session_date, status, universe_count, covered_count, completed_at,"
+                    " screened_count, confirmed_count, feed, error, universe_hash,"
+                    " config_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     " ON CONFLICT(session_date) DO UPDATE SET"
                     " status=excluded.status, universe_count=excluded.universe_count,"
-                    " covered_count=excluded.covered_count, completed_at=excluded.completed_at",
+                    " covered_count=excluded.covered_count, completed_at=excluded.completed_at,"
+                    " screened_count=excluded.screened_count,"
+                    " confirmed_count=excluded.confirmed_count, feed=excluded.feed,"
+                    " error=excluded.error, universe_hash=excluded.universe_hash,"
+                    " config_hash=excluded.config_hash",
                     (
                         run.session.isoformat(),
                         run.status,
                         run.universe_count,
                         run.covered_count,
                         run.completed_at.astimezone(timezone.utc).isoformat(),
+                        run.screened_count,
+                        run.confirmed_count,
+                        run.feed,
+                        run.error,
+                        run.universe_hash,
+                        run.config_hash,
                     ),
                 )
                 self._con.execute(
@@ -546,6 +563,44 @@ class SignalLedger:
             except Exception:
                 self._con.rollback()
                 raise
+
+    def record_extreme_mover_run(self, run: object) -> None:
+        """Persist a failed/incomplete attempt without downgrading a complete session."""
+        from quant_signal.extreme_movers import ExtremeMoverRun
+
+        if not isinstance(run, ExtremeMoverRun):
+            raise TypeError("run must be an ExtremeMoverRun")
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO extreme_mover_runs"
+                " (session_date, status, universe_count, covered_count, completed_at,"
+                " screened_count, confirmed_count, feed, error, universe_hash,"
+                " config_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " ON CONFLICT(session_date) DO UPDATE SET"
+                " status=excluded.status, universe_count=excluded.universe_count,"
+                " covered_count=excluded.covered_count, completed_at=excluded.completed_at,"
+                " screened_count=excluded.screened_count,"
+                " confirmed_count=excluded.confirmed_count, feed=excluded.feed,"
+                " error=excluded.error, universe_hash=excluded.universe_hash,"
+                " config_hash=excluded.config_hash"
+                " WHERE extreme_mover_runs.status != 'COMPLETE'",
+                (
+                    run.session.isoformat(), run.status, run.universe_count,
+                    run.covered_count,
+                    run.completed_at.astimezone(timezone.utc).isoformat(),
+                    run.screened_count, run.confirmed_count, run.feed, run.error,
+                    run.universe_hash, run.config_hash,
+                ),
+            )
+            self._con.commit()
+
+    def extreme_mover_run(self, session: date) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM extreme_mover_runs WHERE session_date = ?",
+                (session.isoformat(),),
+            ).fetchone()
+        return dict(row) if row else None
 
     def latest_complete_extreme_mover_session(self) -> date | None:
         with self._lock:
@@ -707,6 +762,25 @@ class SignalLedger:
                 self._con.execute(
                     f"ALTER TABLE candidate_forward_evaluations "
                     f"ADD COLUMN {column} {declaration}"
+                )
+        mover_columns = {
+            str(row[1])
+            for row in self._con.execute(
+                "PRAGMA table_info(extreme_mover_runs)"
+            ).fetchall()
+        }
+        mover_additions = {
+            "screened_count": "INTEGER NOT NULL DEFAULT 0",
+            "confirmed_count": "INTEGER NOT NULL DEFAULT 0",
+            "feed": "TEXT NOT NULL DEFAULT 'unknown'",
+            "error": "TEXT",
+            "universe_hash": "TEXT NOT NULL DEFAULT ''",
+            "config_hash": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, declaration in mover_additions.items():
+            if column not in mover_columns:
+                self._con.execute(
+                    f"ALTER TABLE extreme_mover_runs ADD COLUMN {column} {declaration}"
                 )
 
     def cached_company_profiles(

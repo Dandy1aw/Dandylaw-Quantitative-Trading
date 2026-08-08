@@ -102,7 +102,13 @@ def run(engine: Engine, now: datetime) -> None:
     settings = engine.settings.holding_price_alert
     if not settings.enabled:
         return
-    positions = _monitored_positions(engine)[: settings.max_tickers]
+    monitored = _monitored_positions(engine)
+    holdings = [
+        row for row in monitored if row.get("monitor_origin") == "holding"
+    ]
+    manuals = [row for row in monitored if row.get("monitor_origin") == "manual"]
+    manual_capacity = max(0, settings.max_tickers - len(holdings))
+    positions = holdings + manuals[:manual_capacity]
     if not positions:
         log.info("holding_price_alert.skip", reason="no_monitored_symbols")
         return

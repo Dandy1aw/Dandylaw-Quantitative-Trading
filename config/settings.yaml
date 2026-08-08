@@ -272,13 +272,18 @@ holding_price_alert:              # 真实持仓分钟级股价异动
 
 extreme_movers:                   # 全市场个股单日 ±10% 异动榜
   enabled: true
+  feed: hybrid                    # IEX 全市场初筛 + Yahoo adjusted 日线/成交量确认
   threshold: 0.10
+  screen_threshold: 0.08
   min_price: 5
   min_dollar_volume: 20000000
   windows: [20, 60, 252]
   default_window: 60
   chunk_size: 200
+  confirmation_chunk_size: 50
+  deadline_seconds: 600
   min_coverage: 0.90
+  min_confirmation_coverage: 0.95
   top_stocks: 10
   top_sectors: 5
   close_hour_et: 16

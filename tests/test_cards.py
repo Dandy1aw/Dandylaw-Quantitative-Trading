@@ -4,6 +4,7 @@ from quant_signal.notifier import cards as cards_module
 from quant_signal.notifier.cards import (
     extreme_movers_close_card,
     extreme_movers_premarket_card,
+    extreme_mover_sectors_card,
     premarket_cards,
     report_card,
     signal_card,
@@ -78,6 +79,20 @@ def test_extreme_mover_premarket_card_shows_sector_top5() -> None:
     assert "板块 Top5" in card.body_md
     assert "累计入榜 2 天" in card.body_md
     assert "市场宽度" in card.body_md
+
+
+def test_extreme_mover_sector_card_can_filter_one_sector() -> None:
+    events = [_mover("A", MoverDirection.UP, "0.12")]
+    card = extreme_mover_sectors_card(
+        session=events[0].session,
+        window_sessions=60,
+        sectors=rank_sectors(events, window_sessions=60),
+        sector_filter="Information Technology",
+    )
+
+    assert "Information Technology" in card.body_md
+    assert "上涨个股" not in card.body_md
+    assert "筛选" in card.body_md
 
 
 def test_signal_card_labels_sell_once_after_delayed_warning() -> None:

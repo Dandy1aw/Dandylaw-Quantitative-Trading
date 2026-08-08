@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
+from hashlib import sha256
+import json
+import time as monotonic_time
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -42,12 +46,18 @@ def _fetch_chunks(
     start: date,
     end: date,
     chunk_size: int,
+    feed: str,
+    deadline: float | None = None,
 ) -> pd.DataFrame:
-    fetch = getattr(source, "fetch_sip_daily_bars", None)
+    method = "fetch_sip_daily_bars" if feed == "sip" else "fetch_daily_bars"
+    fetch = getattr(source, method, None)
     if fetch is None:
         return pd.DataFrame()
     frames: list[pd.DataFrame] = []
     for offset in range(0, len(symbols), chunk_size):
+        if deadline is not None and monotonic_time.monotonic() >= deadline:
+            log.warning("extreme_movers.deadline_exceeded", offset=offset)
+            break
         chunk = symbols[offset : offset + chunk_size]
         try:
             frame = fetch(chunk, start, end)
@@ -86,9 +96,35 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     if not symbols:
         return False
     session = _session_for_close(now)
+    deadline = monotonic_time.monotonic() + cfg.deadline_seconds
+    universe_hash = sha256("\n".join(symbols).encode("utf-8")).hexdigest()
+    config_hash = sha256(
+        json.dumps(cfg.model_dump(mode="json"), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+    def fail(
+        reason: str,
+        *,
+        covered_count: int = 0,
+        screened_count: int = 0,
+        confirmed_count: int = 0,
+    ) -> bool:
+        engine.ledger.record_extreme_mover_run(
+            ExtremeMoverRun(
+                session, "FAILED", len(symbols), covered_count, now,
+                screened_count=screened_count,
+                confirmed_count=confirmed_count,
+                feed=cfg.feed,
+                error=reason,
+                universe_hash=universe_hash,
+                config_hash=config_hash,
+            )
+        )
+        return False
+
     short_bars = _fetch_chunks(
         engine.source, symbols, session - timedelta(days=10), session + timedelta(days=1),
-        cfg.chunk_size,
+        cfg.chunk_size, cfg.feed, deadline,
     )
     covered = _covered_symbols(short_bars, session)
     if len(covered) / len(symbols) < cfg.min_coverage:
@@ -96,13 +132,53 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
             "extreme_movers.coverage_failed",
             covered=len(covered), universe=len(symbols), required=cfg.min_coverage,
         )
-        return False
-    detected = detect_extreme_movers(short_bars, session, threshold=cfg.threshold)
-    detected_symbols = [event.ticker for event in detected]
+        return fail("UNIVERSE_COVERAGE_FAILED", covered_count=len(covered))
+    screen_threshold = cfg.threshold if cfg.feed == "sip" else cfg.screen_threshold
+    screened = detect_extreme_movers(
+        short_bars, session, threshold=screen_threshold
+    )
+    screened_symbols = [event.ticker for event in screened]
+    confirmation_source = engine.source
+    confirmation_feed = "sip"
+    confirmation_chunk_size = cfg.chunk_size
+    if cfg.feed == "hybrid":
+        confirmation_source = getattr(engine, "confirmation_source", None) or getattr(
+            engine, "_intl_source", None
+        )
+        confirmation_feed = "daily"
+        confirmation_chunk_size = cfg.confirmation_chunk_size
+    if confirmation_source is None and screened_symbols:
+        log.warning("extreme_movers.skip", reason="confirmation_source_unavailable")
+        return fail(
+            "CONFIRMATION_SOURCE_UNAVAILABLE",
+            covered_count=len(covered),
+            screened_count=len(screened_symbols),
+        )
     long_bars = _fetch_chunks(
-        engine.source, detected_symbols, session - timedelta(days=400),
-        session + timedelta(days=1), cfg.chunk_size,
-    ) if detected_symbols else pd.DataFrame()
+        confirmation_source, screened_symbols, session - timedelta(days=400),
+        session + timedelta(days=1), confirmation_chunk_size, confirmation_feed,
+        deadline,
+    ) if screened_symbols else pd.DataFrame()
+    confirmed_coverage = _covered_symbols(long_bars, session)
+    if screened_symbols and (
+        len(confirmed_coverage) / len(screened_symbols)
+        < cfg.min_confirmation_coverage
+    ):
+        log.warning(
+            "extreme_movers.confirmation_coverage_failed",
+            covered=len(confirmed_coverage), candidates=len(screened_symbols),
+            required=cfg.min_confirmation_coverage,
+        )
+        return fail(
+            "CONFIRMATION_COVERAGE_FAILED",
+            covered_count=len(covered),
+            screened_count=len(screened_symbols),
+            confirmed_count=len(confirmed_coverage),
+        )
+    detected = detect_extreme_movers(
+        long_bars, session, threshold=cfg.threshold
+    ) if screened_symbols else ()
+    detected_symbols = [event.ticker for event in detected]
     profile_source = engine.fundamentals_source
     profiles = (
         profile_source.profiles(detected_symbols)
@@ -110,6 +186,12 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     )
     qualified: list[ExtremeMoverEvent] = []
     for event in detected:
+        source_label = (
+            "alpaca_sip_adjustment_all"
+            if cfg.feed == "sip"
+            else "alpaca_iex_screen+yfinance_adjusted_confirm"
+        )
+        event = replace(event, source=source_label)
         try:
             frame = cast(pd.DataFrame, long_bars.xs(event.ticker, level="ticker"))
             adv = average_dollar_volume(frame, sessions=20)
@@ -123,16 +205,46 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
                 min_dollar_volume=cfg.min_dollar_volume,
             )
         )
+    screened_by_ticker = {event.ticker: event for event in screened}
+    for ticker in sorted(set(screened_symbols) - confirmed_coverage):
+        qualified.append(
+            qualify_event(
+                replace(
+                    screened_by_ticker[ticker],
+                    source="alpaca_iex_screen+confirmation_unavailable",
+                ),
+                None,
+                avg_dollar_volume_20d=Decimal("0"),
+                min_price=cfg.min_price,
+                min_dollar_volume=cfg.min_dollar_volume,
+            )
+        )
     engine.ledger.replace_extreme_mover_run(
-        ExtremeMoverRun(session, "COMPLETE", len(symbols), len(covered), now),
+        ExtremeMoverRun(
+            session, "COMPLETE", len(symbols), len(covered), now,
+            screened_count=len(screened_symbols),
+            confirmed_count=len(confirmed_coverage),
+            feed=cfg.feed,
+            universe_hash=universe_hash,
+            config_hash=config_hash,
+        ),
         qualified,
     )
     if notify:
-        engine.notifier.send(
+        return bool(engine.notifier.send(
             extreme_movers_close_card(
-                qualified, universe_count=len(symbols), covered_count=len(covered)
+                qualified,
+                universe_count=len(symbols),
+                covered_count=len(covered),
+                top_n=cfg.top_stocks,
+                source_label=(
+                    "best-effort IEX 8% 初筛 + Yahoo adjusted 确认"
+                    if cfg.feed == "hybrid"
+                    else "Alpaca SIP adjusted 严格模式"
+                ),
+                session=session,
             )
-        )
+        ))
     return True
 
 
@@ -154,13 +266,40 @@ def run_premarket(
     if window not in cfg.windows:
         raise ValueError("unsupported extreme mover window")
     events = engine.ledger.extreme_mover_events(session, window_sessions=window)
+    window_summaries: dict[int, tuple[int, int]] = {}
+    from quant_signal.extreme_movers import Eligibility, MoverDirection
+
+    for summary_window in cfg.windows:
+        summary_events = engine.ledger.extreme_mover_events(
+            session, window_sessions=summary_window
+        )
+        window_summaries[summary_window] = (
+            sum(
+                event.eligibility is Eligibility.ELIGIBLE
+                and event.direction is MoverDirection.UP
+                for event in summary_events
+            ),
+            sum(
+                event.eligibility is Eligibility.ELIGIBLE
+                and event.direction is MoverDirection.DOWN
+                for event in summary_events
+            ),
+        )
     card = extreme_movers_premarket_card(
         session=session,
         window_sessions=window,
         movers=rank_movers(events, window_sessions=window),
         sectors=rank_sectors(events, window_sessions=window),
         backfill_warning=any(event.backfilled for event in events),
+        top_stocks=cfg.top_stocks,
+        top_sectors=cfg.top_sectors,
+        source_label=(
+            "best-effort IEX 初筛 + Yahoo adjusted 确认"
+            if cfg.feed == "hybrid"
+            else "Alpaca SIP adjusted 严格模式"
+        ),
+        window_summaries=window_summaries,
     )
     if notify:
-        engine.notifier.send(card)
+        return bool(engine.notifier.send(card))
     return True

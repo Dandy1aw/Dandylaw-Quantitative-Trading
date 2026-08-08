@@ -449,7 +449,12 @@ class FeishuBotService:
         return int(match.group(1)) if match else self._settings.extreme_movers.default_window
 
     def _mover_card(self, text: str) -> Card | None:
-        from quant_signal.extreme_movers import rank_movers, rank_sectors
+        from quant_signal.extreme_movers import (
+            Eligibility,
+            MoverDirection,
+            rank_movers,
+            rank_sectors,
+        )
         from quant_signal.notifier.cards import extreme_movers_premarket_card
 
         session = self._ledger.latest_complete_extreme_mover_session()
@@ -457,15 +462,79 @@ class FeishuBotService:
             return None
         window = self._mover_window(text)
         events = self._ledger.extreme_mover_events(session, window_sessions=window)
+        window_summaries: dict[int, tuple[int, int]] = {}
+        for summary_window in self._settings.extreme_movers.windows:
+            summary_events = self._ledger.extreme_mover_events(
+                session, window_sessions=summary_window
+            )
+            window_summaries[summary_window] = (
+                sum(
+                    event.eligibility is Eligibility.ELIGIBLE
+                    and event.direction is MoverDirection.UP
+                    for event in summary_events
+                ),
+                sum(
+                    event.eligibility is Eligibility.ELIGIBLE
+                    and event.direction is MoverDirection.DOWN
+                    for event in summary_events
+                ),
+            )
         return extreme_movers_premarket_card(
             session=session,
             window_sessions=window,
             movers=rank_movers(events, window_sessions=window),
             sectors=rank_sectors(events, window_sessions=window),
             backfill_warning=any(event.backfilled for event in events),
+            top_stocks=self._settings.extreme_movers.top_stocks,
+            top_sectors=self._settings.extreme_movers.top_sectors,
+            source_label=(
+                "best-effort IEX 初筛 + Yahoo adjusted 确认"
+                if self._settings.extreme_movers.feed == "hybrid"
+                else "Alpaca SIP adjusted 严格模式"
+            ),
+            window_summaries=window_summaries,
         )
 
     def _reply_movers(self, chat_id: str, text: str) -> None:
+        if text.startswith("异动板块"):
+            from quant_signal.extreme_movers import rank_sectors
+            from quant_signal.notifier.cards import extreme_mover_sectors_card
+
+            session = self._ledger.latest_complete_extreme_mover_session()
+            if session is None:
+                self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
+                return
+            window = self._settings.extreme_movers.default_window
+            events = self._ledger.extreme_mover_events(
+                session, window_sessions=window
+            )
+            query = text.removeprefix("异动板块").strip()
+            aliases = {
+                "科技": "Information Technology",
+                "信息技术": "Information Technology",
+                "医疗": "Health Care",
+                "金融": "Financials",
+                "能源": "Energy",
+                "工业": "Industrials",
+                "材料": "Materials",
+                "地产": "Real Estate",
+                "公用事业": "Utilities",
+                "通信": "Communication Services",
+                "可选消费": "Consumer Discretionary",
+                "必选消费": "Consumer Staples",
+                "未分类": "未分类",
+            }
+            sector_filter = aliases.get(query, query) if query else None
+            self._transport.send_card(
+                chat_id,
+                extreme_mover_sectors_card(
+                    session=session,
+                    window_sessions=window,
+                    sectors=rank_sectors(events, window_sessions=window),
+                    sector_filter=sector_filter,
+                ),
+            )
+            return
         card = self._mover_card(text)
         if card is None:
             self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
@@ -482,25 +551,39 @@ class FeishuBotService:
         session = self._ledger.latest_complete_extreme_mover_session()
         if session is None:
             return "暂无已完成的极端异动统计。"
-        window = self._settings.extreme_movers.default_window
-        events = [
-            event
-            for event in self._ledger.extreme_mover_events(
-                session, window_sessions=window
+        lines = [f"{ticker}｜±10% 入榜统计"]
+        found = False
+        for window in self._settings.extreme_movers.windows:
+            events = [
+                event
+                for event in self._ledger.extreme_mover_events(
+                    session, window_sessions=window
+                )
+                if event.ticker == ticker
+            ]
+            compound = Decimal("1")
+            for event in events:
+                compound *= Decimal("1") + event.daily_return
+            found = found or bool(events)
+            lines.append(
+                f"{window}日: 入榜 {len(events)} 天｜事件日复合 "
+                f"{compound - Decimal('1'):+.2%}"
             )
-            if event.ticker == ticker
-        ]
-        if not events:
-            return f"{ticker} 在最近 {window} 个已统计交易日内未进入 ±10% 榜单。"
-        compound = Decimal("1")
-        for event in events:
-            compound *= Decimal("1") + event.daily_return
-        return (
-            f"{ticker}｜最近 {window} 个已统计交易日\n"
-            f"累计入榜: {len(events)} 天\n"
-            f"事件日复合涨跌幅: {compound - Decimal('1'):+.2%}\n"
-            f"最近一次: {max(event.session for event in events).isoformat()}"
-        )
+        if not found:
+            lines.append("最近 252 个已统计交易日内未进入榜单。")
+        else:
+            latest_events = [
+                event
+                for event in self._ledger.extreme_mover_events(
+                    session,
+                    window_sessions=max(self._settings.extreme_movers.windows),
+                )
+                if event.ticker == ticker
+            ]
+            lines.append(
+                f"最近一次: {max(event.session for event in latest_events).isoformat()}"
+            )
+        return "\n".join(lines)
 
     def _held_symbols(self) -> list[str]:
         from decimal import Decimal
@@ -531,7 +614,11 @@ class FeishuBotService:
         if ticker in self._held_symbols():
             self._transport.send_text(chat_id, f"{ticker} 是当前持仓，已经强制实时监控。")
             return
-        limit = self._settings.holding_price_alert.max_tickers
+        limit = max(
+            0,
+            self._settings.holding_price_alert.max_tickers
+            - len(self._held_symbols()),
+        )
         if len(self._ledger.active_manual_monitors()) >= limit:
             self._transport.send_text(chat_id, f"手动监控已达到上限 {limit} 个。")
             return

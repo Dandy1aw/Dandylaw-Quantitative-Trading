@@ -100,6 +100,19 @@ def test_detection_requires_two_distinct_sessions_and_current_final_bar() -> Non
     assert [row.ticker for row in events] == ["OK"]
 
 
+def test_detection_rejects_gap_and_non_finite_close() -> None:
+    rows = pd.DataFrame(
+        [
+            {"ticker": "GAP", "ts": pd.Timestamp("2026-08-05", tz="UTC"), "close": 10.0},
+            {"ticker": "GAP", "ts": pd.Timestamp("2026-08-07", tz="UTC"), "close": 12.0},
+            {"ticker": "NAN", "ts": pd.Timestamp("2026-08-06", tz="UTC"), "close": 10.0},
+            {"ticker": "NAN", "ts": pd.Timestamp("2026-08-07", tz="UTC"), "close": float("nan")},
+        ]
+    ).set_index(["ticker", "ts"])
+
+    assert detect_extreme_movers(rows, SESSION) == ()
+
+
 def test_qualification_requires_equity_price_and_liquidity() -> None:
     source_events = {
         event.ticker: event
@@ -158,6 +171,15 @@ def test_average_dollar_volume_uses_last_twenty_complete_rows() -> None:
     )
 
     assert average_dollar_volume(frame, sessions=20) == Decimal("20000000")
+
+
+def test_average_dollar_volume_requires_full_window() -> None:
+    frame = pd.DataFrame(
+        {"close": [10.0] * 19, "volume": [3_000_000] * 19},
+        index=pd.date_range("2026-07-01", periods=19, freq="B", tz="UTC"),
+    )
+
+    assert average_dollar_volume(frame, sessions=20) == Decimal("0")
 
 
 def _eligible(
@@ -231,6 +253,14 @@ def test_rank_sectors_uses_event_days_then_repeat_intensity() -> None:
     assert ranked[0].event_days == 4
     assert ranked[0].unique_movers == 2
     assert ranked[0].repeat_intensity == Decimal(4) / Decimal(2 * 60)
+
+
+def test_rank_sectors_keeps_eligible_unknown_sector_as_uncategorized() -> None:
+    event = _eligible("A", "0.12", day=2)
+
+    ranked = rank_sectors([event.__class__(**{**event.__dict__, "sector": None})], window_sessions=20)
+
+    assert ranked[0].sector == "未分类"
 
 
 def test_window_total_return_uses_first_and_last_close() -> None:

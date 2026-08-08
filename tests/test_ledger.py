@@ -1078,6 +1078,30 @@ def test_extreme_mover_history_is_window_bounded(ledger: SignalLedger) -> None:
     ] == ["B", "C"]
 
 
+def test_failed_mover_run_does_not_replace_complete_session(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 7)
+    ledger.replace_extreme_mover_run(
+        ExtremeMoverRun(
+            session, "COMPLETE", 100, 99, NOW,
+            screened_count=10, confirmed_count=10, feed="hybrid",
+        ),
+        [_mover_event("A")],
+    )
+    ledger.record_extreme_mover_run(
+        ExtremeMoverRun(
+            session, "FAILED", 100, 0, NOW + timedelta(minutes=1),
+            feed="hybrid", error="COVERAGE_FAILED",
+        )
+    )
+
+    stored = ledger.extreme_mover_run(session)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["screened_count"] == 10
+
+
 def test_manual_monitors_are_idempotent_and_soft_deleted(
     ledger: SignalLedger,
 ) -> None:

@@ -70,6 +70,8 @@ def test_extreme_mover_defaults_are_bounded() -> None:
     assert cfg.default_window == 60
     assert cfg.min_price == Decimal("5")
     assert cfg.min_dollar_volume == Decimal("20000000")
+    assert cfg.feed == "hybrid"
+    assert cfg.screen_threshold == Decimal("0.08")
 
 
 def test_us_briefing_defaults_are_safe() -> None:

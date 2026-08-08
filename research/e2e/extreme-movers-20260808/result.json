@@ -1,0 +1,43 @@
+{
+  "status": "complete",
+  "session": "2026-08-07",
+  "close_ok": true,
+  "premarket_ok": true,
+  "event_count": 413,
+  "eligible_count": 72,
+  "up_count": 61,
+  "down_count": 11,
+  "stock_rank_count": 72,
+  "sector_rank_count": 14,
+  "universe_count": 12501,
+  "covered_count": 12274,
+  "screened_count": 629,
+  "confirmed_count": 608,
+  "feed": "hybrid",
+  "eligibility_counts": {
+    "profile_unavailable": 148,
+    "low_liquidity": 74,
+    "eligible": 72,
+    "low_price": 119
+  },
+  "session_finalized": true,
+  "bot_commands": [
+    "异动榜 60",
+    "异动板块 科技",
+    "异动 ABNB"
+  ],
+  "bot_output_count": 3,
+  "card_titles": [
+    "美股单日极端异动｜08/07",
+    "盘前极端异动累计榜｜08/07",
+    "盘前极端异动累计榜｜08/07",
+    "极端异动板块榜｜08/07",
+    "text:e2e-recording-chat"
+  ],
+  "notifications_sent": 0,
+  "data_sources": [
+    "alpaca_iex_screen+yfinance_adjusted_confirm",
+    "yfinance_profiles"
+  ],
+  "known_limit": "best-effort hybrid may miss symbols below the IEX 8% screen"
+}
