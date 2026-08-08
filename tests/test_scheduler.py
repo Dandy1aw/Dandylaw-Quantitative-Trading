@@ -108,7 +108,13 @@ class _USBriefingEngine:
         return None
 
 
-def test_us_briefing_replaces_legacy_rotation_jobs() -> None:
+def test_us_briefing_replaces_legacy_rotation_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "quant_signal.scheduler._now_et",
+        lambda: datetime(2026, 7, 10, 8, 15, tzinfo=ZoneInfo("America/New_York")),
+    )
     engine = _USBriefingEngine()
     jobs = {
         job.id: job
