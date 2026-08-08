@@ -1,0 +1,23 @@
+{
+  "status": "VALIDATED",
+  "content_sha256": "2f69ee56a3c71f7e7a8bc81edfc0b1bee9c891760dec7f476184f95f5ab32636",
+  "import_digest": "acdf5f94adc47fb02f7c2c6ab97577465572c4b601f569a4c07c87461fc39fc3",
+  "account_valid": true,
+  "positions_complete": true,
+  "validation_errors": [],
+  "applied": true,
+  "account": {
+    "equity": "6045.21",
+    "market_value": "6025.66",
+    "cash": "19.55",
+    "buying_power": "2779.33"
+  },
+  "active": [
+    {"symbol": "AAOI", "qty": "5", "avg_entry_price": "129.800", "current_price": "146.650", "market_value": "733.25"},
+    {"symbol": "GOOGL", "qty": "7", "avg_entry_price": "367.627", "current_price": "355.255", "market_value": "2486.79"},
+    {"symbol": "MRVL", "qty": "1", "avg_entry_price": "311.305", "current_price": "213.540", "market_value": "213.54"},
+    {"symbol": "MUU", "qty": "41", "avg_entry_price": "25.586", "current_price": "25.780", "market_value": "1056.98"},
+    {"symbol": "SKHY", "qty": "7", "avg_entry_price": "130.680", "current_price": "136.450", "market_value": "955.15"},
+    {"symbol": "SMH", "qty": "1", "avg_entry_price": "707.520", "current_price": "579.950", "market_value": "579.95"}
+  ]
+}
