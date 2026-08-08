@@ -41,6 +41,28 @@ class ExtremeMoverEvent:
     backfilled: bool = False
 
 
+@dataclass(frozen=True)
+class MoverRanking:
+    ticker: str
+    direction: MoverDirection
+    event_days: int
+    event_compound_return: Decimal
+    most_recent_event: date
+    window_sessions: int
+    sector: str | None = None
+
+
+@dataclass(frozen=True)
+class SectorRanking:
+    sector: str
+    direction: MoverDirection
+    event_days: int
+    unique_movers: int
+    repeat_intensity: Decimal
+    most_recent_event: date
+    window_sessions: int
+
+
 def _decimal(value: object) -> Decimal:
     return Decimal(str(value))
 
@@ -130,3 +152,98 @@ def qualify_event(
         quote_type=profile.quote_type if profile else None,
         eligibility=eligibility,
     )
+
+
+def window_total_return(closes: list[Decimal] | tuple[Decimal, ...]) -> Decimal | None:
+    """Return first-to-last close performance for a bounded window."""
+    if len(closes) < 2 or closes[0] <= 0:
+        return None
+    return closes[-1] / closes[0] - Decimal("1")
+
+
+def rank_movers(
+    events: list[ExtremeMoverEvent] | tuple[ExtremeMoverEvent, ...],
+    *,
+    window_sessions: int,
+) -> tuple[MoverRanking, ...]:
+    """Aggregate eligible events by symbol and direction."""
+    if window_sessions < 1:
+        raise ValueError("window_sessions must be positive")
+    grouped: dict[tuple[str, MoverDirection], list[ExtremeMoverEvent]] = {}
+    for event in events:
+        if event.eligibility is not Eligibility.ELIGIBLE:
+            continue
+        grouped.setdefault((event.ticker, event.direction), []).append(event)
+
+    rows: list[MoverRanking] = []
+    for (ticker, direction), ticker_events in grouped.items():
+        compounded = Decimal("1")
+        for event in ticker_events:
+            compounded *= Decimal("1") + event.daily_return
+        rows.append(
+            MoverRanking(
+                ticker=ticker,
+                direction=direction,
+                event_days=len(ticker_events),
+                event_compound_return=compounded - Decimal("1"),
+                most_recent_event=max(event.session for event in ticker_events),
+                window_sessions=window_sessions,
+                sector=next(
+                    (event.sector for event in ticker_events if event.sector), None
+                ),
+            )
+        )
+    rows.sort(
+        key=lambda row: (
+            row.direction.value,
+            -row.event_days,
+            -abs(row.event_compound_return),
+            -row.most_recent_event.toordinal(),
+            row.ticker,
+        )
+    )
+    return tuple(rows)
+
+
+def rank_sectors(
+    events: list[ExtremeMoverEvent] | tuple[ExtremeMoverEvent, ...],
+    *,
+    window_sessions: int,
+) -> tuple[SectorRanking, ...]:
+    """Rank sectors by repeatable event activity, separately by direction."""
+    if window_sessions < 1:
+        raise ValueError("window_sessions must be positive")
+    grouped: dict[tuple[str, MoverDirection], list[ExtremeMoverEvent]] = {}
+    for event in events:
+        if event.eligibility is Eligibility.ELIGIBLE and event.sector:
+            grouped.setdefault((event.sector, event.direction), []).append(event)
+
+    rows: list[SectorRanking] = []
+    for (sector, direction), sector_events in grouped.items():
+        movers = {event.ticker for event in sector_events}
+        event_days = len(sector_events)
+        rows.append(
+            SectorRanking(
+                sector=sector,
+                direction=direction,
+                event_days=event_days,
+                unique_movers=len(movers),
+                repeat_intensity=(
+                    Decimal(event_days)
+                    / Decimal(len(movers) * window_sessions)
+                ),
+                most_recent_event=max(event.session for event in sector_events),
+                window_sessions=window_sessions,
+            )
+        )
+    rows.sort(
+        key=lambda row: (
+            row.direction.value,
+            -row.event_days,
+            -row.repeat_intensity,
+            -row.unique_movers,
+            -row.most_recent_event.toordinal(),
+            row.sector,
+        )
+    )
+    return tuple(rows)

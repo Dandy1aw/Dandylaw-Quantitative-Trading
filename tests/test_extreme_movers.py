@@ -8,10 +8,14 @@ import pandas as pd
 from quant_signal.company_profiles import CompanyProfile
 from quant_signal.extreme_movers import (
     Eligibility,
+    ExtremeMoverEvent,
     MoverDirection,
     average_dollar_volume,
     detect_extreme_movers,
     qualify_event,
+    rank_movers,
+    rank_sectors,
+    window_total_return,
 )
 
 
@@ -155,3 +159,80 @@ def test_average_dollar_volume_uses_last_twenty_complete_rows() -> None:
 
     assert average_dollar_volume(frame, sessions=20) == Decimal("20000000")
 
+
+def _eligible(
+    ticker: str,
+    daily_return: str,
+    *,
+    day: int,
+    sector: str = "Information Technology",
+) -> ExtremeMoverEvent:
+    return ExtremeMoverEvent(
+        session=date(2026, 8, day),
+        ticker=ticker,
+        direction=(
+            MoverDirection.UP
+            if Decimal(daily_return) > 0
+            else MoverDirection.DOWN
+        ),
+        daily_return=Decimal(daily_return),
+        close=Decimal("20"),
+        avg_dollar_volume_20d=Decimal("30000000"),
+        sector=sector,
+        industry="Software",
+        quote_type="EQUITY",
+        eligibility=Eligibility.ELIGIBLE,
+    )
+
+
+def test_rank_movers_counts_days_and_compounds_event_returns() -> None:
+    rows = [
+        _eligible("A", "0.10", day=1),
+        _eligible("A", "0.20", day=2),
+        _eligible("B", "0.15", day=2),
+    ]
+
+    ranked = rank_movers(rows, window_sessions=60)
+
+    assert ranked[0].ticker == "A"
+    assert ranked[0].event_days == 2
+    assert ranked[0].event_compound_return == Decimal("0.32")
+    assert ranked[0].most_recent_event == date(2026, 8, 2)
+
+
+def test_rank_movers_keeps_up_and_down_boards_separate() -> None:
+    rows = [
+        _eligible("A", "0.11", day=1),
+        _eligible("A", "-0.12", day=2),
+        _eligible("B", "-0.15", day=3),
+    ]
+
+    ranked = rank_movers(rows, window_sessions=20)
+
+    assert [(row.ticker, row.direction, row.event_days) for row in ranked] == [
+        ("B", MoverDirection.DOWN, 1),
+        ("A", MoverDirection.DOWN, 1),
+        ("A", MoverDirection.UP, 1),
+    ]
+
+
+def test_rank_sectors_uses_event_days_then_repeat_intensity() -> None:
+    rows = [
+        _eligible("A", "0.10", day=1),
+        _eligible("A", "0.11", day=2),
+        _eligible("B", "0.12", day=2),
+        _eligible("B", "0.13", day=3),
+        _eligible("C", "0.20", day=3, sector="Energy"),
+    ]
+
+    ranked = rank_sectors(rows, window_sessions=60)
+
+    assert ranked[0].sector == "Information Technology"
+    assert ranked[0].event_days == 4
+    assert ranked[0].unique_movers == 2
+    assert ranked[0].repeat_intensity == Decimal(4) / Decimal(2 * 60)
+
+
+def test_window_total_return_uses_first_and_last_close() -> None:
+    assert window_total_return([Decimal("100"), Decimal("80"), Decimal("120")]) == Decimal("0.2")
+    assert window_total_return([]) is None
