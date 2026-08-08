@@ -43,8 +43,13 @@ class _Source:
 
 
 class _Ledger:
-    def __init__(self, positions: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        positions: list[dict[str, object]],
+        manual: list[str] | None = None,
+    ) -> None:
         self.positions = positions
+        self.manual = manual or []
         self.pushed: dict[str, datetime] = {}
         self.inserted: list[tuple[object, bool]] = []
 
@@ -53,6 +58,9 @@ class _Ledger:
     ) -> list[dict[str, object]]:
         assert exact_only is True
         return self.positions
+
+    def active_manual_monitors(self) -> list[str]:
+        return self.manual
 
     def last_push_by_key(self, since: datetime) -> dict[str, datetime]:
         return {key: value for key, value in self.pushed.items() if value >= since}
@@ -84,6 +92,7 @@ class _Engine:
         positions: list[dict[str, object]],
         *,
         cause_search: bool = False,
+        manual: list[str] | None = None,
     ) -> None:
         self.settings = make_test_settings(
             holding_price_alert=HoldingPriceAlertSettings(
@@ -94,7 +103,7 @@ class _Engine:
         self.source = _Source(frame)
         self._intl_source = self.source
         self.news_source = None
-        self.ledger = _Ledger(positions)
+        self.ledger = _Ledger(positions, manual)
         self.notifier = _Notifier()
 
 
@@ -122,6 +131,19 @@ def test_pipeline_does_not_fetch_without_an_exact_position_snapshot() -> None:
     run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
     assert engine.source.calls == 0
     assert engine.notifier.cards == []
+
+
+def test_pipeline_monitors_manual_symbol_without_position_pnl() -> None:
+    engine = _Engine(_bars(104.0), [], manual=["AAA"])
+
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert engine.source.calls == 1
+    assert len(engine.notifier.cards) == 1
+    card = engine.notifier.cards[0]
+    assert "个股股价异动" in card.title
+    assert "持仓语境" not in card.body_md
+    assert "相对成本" not in card.body_md
 
 
 def test_pipeline_searches_only_after_dedup_and_attaches_cause(

@@ -72,6 +72,22 @@ def test_one_minute_stock_spike_triggers_and_card_is_observational() -> None:
     assert "SELL 信号" not in card.body_md
 
 
+def test_manual_symbol_signal_omits_position_context() -> None:
+    position = {"symbol": "AAA", "monitor_origin": "manual"}
+    signals = detect_holding_price_alerts(
+        _bars([100.0] * 30 + [102.0]),
+        [position],
+        now=datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        settings=HoldingPriceAlertSettings(),
+        etf_symbols=frozenset(),
+    )
+
+    card = holding_price_alert_card(signals[0])
+    assert signals[0].extra["monitor_origin"] == "manual"
+    assert "个股股价异动" in card.title
+    assert "持仓语境" not in card.body_md
+
+
 def test_adaptive_volatility_threshold_suppresses_a_noisy_stock() -> None:
     returns = [0.025 if index % 2 == 0 else -0.025 for index in range(30)]
     closes = [100.0]

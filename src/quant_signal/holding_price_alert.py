@@ -227,6 +227,9 @@ def evaluate_holding_price_alerts(
                     "asset_type": "ETF" if is_etf else "个股",
                     "data_feed": feed,
                     "observed_at": latest_at.isoformat(),
+                    "monitor_origin": str(
+                        position.get("monitor_origin") or "holding"
+                    ),
                 },
                 dedup_suffix=f"{window.replace('分钟', 'm').replace('当日', 'session').replace('放量1m', 'volume')}:{direction_key}:t{tier}",
             )

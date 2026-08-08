@@ -556,11 +556,16 @@ def holding_price_alert_card(signal: Signal) -> Card:
             cause_lines.append(f"搜索耗时 {float(elapsed):.1f}秒")
         cause_lines.append("相关性不等于因果；结论会随新消息更新。")
         cause_section = CardSection("\n".join(cause_lines))
-    holding = CardSection(
-        "**持仓语境**\n"
-        f"数量 {quantity_text} · 成本 {price(extra.get('avg_entry_price'))} · "
-        f"相对成本 {percent(extra.get('pnl_from_cost_pct'))}\n"
-        "本提醒用于实时观察，不代表自动买入、卖出或调仓。"
+    is_manual = extra.get("monitor_origin") == "manual"
+    holding = (
+        None
+        if is_manual
+        else CardSection(
+            "**持仓语境**\n"
+            f"数量 {quantity_text} · 成本 {price(extra.get('avg_entry_price'))} · "
+            f"相对成本 {percent(extra.get('pnl_from_cost_pct'))}\n"
+            "本提醒用于实时观察，不代表自动买入、卖出或调仓。"
+        )
     )
     data = CardSection(
         "**数据身份**\n"
@@ -574,7 +579,9 @@ def holding_price_alert_card(signal: Signal) -> Card:
     )
     return Card(
         kind=CardKind.ALERT,
-        title=f"⚡ 持仓股价异动 · {signal.ticker} · {severity}级",
+        title=(
+            f"⚡ {'个股' if is_manual else '持仓'}股价异动 · {signal.ticker} · {severity}级"
+        ),
         body_md="\n\n".join(section.content_md for section in sections),
         sections=sections,
     )

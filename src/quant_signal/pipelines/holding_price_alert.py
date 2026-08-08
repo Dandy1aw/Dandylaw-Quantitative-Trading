@@ -22,7 +22,7 @@ log = structlog.get_logger()
 _ET = ZoneInfo("America/New_York")
 
 
-def _positive_positions(engine: Engine) -> list[dict[str, object]]:
+def _monitored_positions(engine: Engine) -> list[dict[str, object]]:
     positions: list[dict[str, object]] = []
     for row in engine.ledger.active_observed_positions(exact_only=True):
         try:
@@ -30,7 +30,23 @@ def _positive_positions(engine: Engine) -> list[dict[str, object]]:
         except (InvalidOperation, ValueError):
             continue
         if quantity > 0 and str(row.get("symbol", "")).strip():
-            positions.append(row)
+            item = dict(row)
+            item["monitor_origin"] = "holding"
+            positions.append(item)
+    held = {str(row["symbol"]).strip().upper() for row in positions}
+    manual_loader = getattr(engine.ledger, "active_manual_monitors", None)
+    manual = manual_loader() if callable(manual_loader) else []
+    for ticker in manual:
+        symbol = str(ticker).strip().upper()
+        if symbol and symbol not in held:
+            positions.append(
+                {
+                    "symbol": symbol,
+                    "qty": None,
+                    "avg_entry_price": None,
+                    "monitor_origin": "manual",
+                }
+            )
     return positions
 
 
@@ -86,9 +102,9 @@ def run(engine: Engine, now: datetime) -> None:
     settings = engine.settings.holding_price_alert
     if not settings.enabled:
         return
-    positions = _positive_positions(engine)[: settings.max_tickers]
+    positions = _monitored_positions(engine)[: settings.max_tickers]
     if not positions:
-        log.info("holding_price_alert.skip", reason="no_exact_positions")
+        log.info("holding_price_alert.skip", reason="no_monitored_symbols")
         return
 
     tickers = sorted({str(row["symbol"]).strip().upper() for row in positions})
