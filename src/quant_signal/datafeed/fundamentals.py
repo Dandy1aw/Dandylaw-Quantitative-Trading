@@ -8,7 +8,7 @@ yfinance Ticker.info 尽力而为，取不到就当没有。
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
@@ -72,7 +72,7 @@ class YFinanceFundamentals:
         return out
 
     def profiles(self, tickers: list[str]) -> dict[str, CompanyProfile]:
-        as_of = date.today()
+        as_of = datetime.now(UTC).date()
         unique = [ticker.strip().upper() for ticker in dict.fromkeys(tickers) if ticker.strip()]
 
         def fetch(raw_ticker: str) -> CompanyProfile:
@@ -90,11 +90,10 @@ class YFinanceFundamentals:
             market_cap = _int(info.get("marketCap"))
             gics = _SECTOR_TO_GICS.get(str(sector)) if sector is not None else None
             quote_type = str(info.get("quoteType") or "").upper() or None
-            status = (
-                "ok"
-                if market_cap is not None and gics is not None and quote_type is not None
-                else "unavailable"
-            )
+            # ``data_status`` describes whether the instrument type was verified.
+            # Sector and market cap are optional enrichment fields; downstream
+            # strategies apply their own completeness requirements.
+            status = "ok" if quote_type is not None else "unavailable"
             return CompanyProfile(
                 ticker=ticker,
                 as_of=as_of,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -95,7 +96,7 @@ def detect_extreme_movers(
     if bars.empty:
         return ()
     if not isinstance(bars.index, pd.MultiIndex):
-        raise ValueError("bars must use a ticker/ts MultiIndex")
+        raise TypeError("bars must use a ticker/ts MultiIndex")
 
     events: list[ExtremeMoverEvent] = []
     for ticker, frame in bars.groupby(level="ticker", sort=True):
@@ -117,7 +118,7 @@ def detect_extreme_movers(
             or current_close <= 0
         ):
             continue
-        daily_return = current_close / previous_close - Decimal("1")
+        daily_return = current_close / previous_close - Decimal(1)
         if daily_return >= threshold:
             direction = MoverDirection.UP
         elif daily_return <= -threshold:
@@ -143,9 +144,11 @@ def average_dollar_volume(frame: pd.DataFrame, *, sessions: int = 20) -> Decimal
     values = pd.to_numeric(frame["close"], errors="coerce") * pd.to_numeric(
         frame["volume"], errors="coerce"
     )
-    values = values.dropna().tail(sessions)
+    values = values.dropna()
+    values = values[values.map(lambda value: math.isfinite(float(value)))]
+    values = values.tail(sessions)
     if len(values) < sessions:
-        return Decimal("0")
+        return Decimal(0)
     return _decimal(values.mean())
 
 
@@ -183,7 +186,7 @@ def window_total_return(closes: list[Decimal] | tuple[Decimal, ...]) -> Decimal 
     """Return first-to-last close performance for a bounded window."""
     if len(closes) < 2 or closes[0] <= 0:
         return None
-    return closes[-1] / closes[0] - Decimal("1")
+    return closes[-1] / closes[0] - Decimal(1)
 
 
 def rank_movers(
@@ -202,15 +205,15 @@ def rank_movers(
 
     rows: list[MoverRanking] = []
     for (ticker, direction), ticker_events in grouped.items():
-        compounded = Decimal("1")
+        compounded = Decimal(1)
         for event in ticker_events:
-            compounded *= Decimal("1") + event.daily_return
+            compounded *= Decimal(1) + event.daily_return
         rows.append(
             MoverRanking(
                 ticker=ticker,
                 direction=direction,
                 event_days=len(ticker_events),
-                event_compound_return=compounded - Decimal("1"),
+                event_compound_return=compounded - Decimal(1),
                 most_recent_event=max(event.session for event in ticker_events),
                 window_sessions=window_sessions,
                 sector=next(

@@ -28,6 +28,8 @@ class _FakeTicker:
                 "freeCashflow": 80_000_000_000,
                 "quoteType": "EQUITY",
             }
+        if self._symbol == "NOSECTOR":
+            return {"shortName": "Unclassified Corp", "quoteType": "EQUITY"}
         return {"returnOnEquity": 0.25, "debtToEquity": 80.0}
 
 
@@ -53,3 +55,18 @@ def test_profiles_maps_yfinance_fields_and_failures(monkeypatch: pytest.MonkeyPa
     assert msft.quote_type == "EQUITY"
     assert msft.data_status == "ok"
     assert profiles["BOOM"].data_status == "unavailable"
+
+
+def test_equity_profile_remains_usable_without_sector_or_market_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import quant_signal.datafeed.fundamentals as m
+
+    monkeypatch.setattr(m.yf, "Ticker", _FakeTicker)
+
+    profile = YFinanceFundamentals().profiles(["NOSECTOR"])["NOSECTOR"]
+
+    assert profile.quote_type == "EQUITY"
+    assert profile.gics_sector is None
+    assert profile.market_cap_usd is None
+    assert profile.data_status == "ok"

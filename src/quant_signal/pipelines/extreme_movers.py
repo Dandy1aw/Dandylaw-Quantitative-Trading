@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import time as monotonic_time
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from hashlib import sha256
-import json
-import time as monotonic_time
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -73,13 +73,14 @@ def _covered_symbols(bars: pd.DataFrame, session: date) -> set[str]:
     if bars.empty or not isinstance(bars.index, pd.MultiIndex):
         return set()
     covered: set[str] = set()
+    required = {previous_trading_day(session), session}
     for ticker, frame in bars.groupby(level="ticker"):
         dates = {
             value.date()
             for value in frame.index.get_level_values("ts")
             if value.date() <= session
         }
-        if len(dates) >= 2 and session in dates:
+        if required.issubset(dates):
             covered.add(str(ticker))
     return covered
 
@@ -88,6 +89,7 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     cfg = engine.settings.extreme_movers
     if not cfg.enabled:
         return False
+    deadline = monotonic_time.monotonic() + cfg.deadline_seconds
     lister = getattr(engine.source, "list_active_symbols", None)
     if lister is None:
         log.warning("extreme_movers.skip", reason="asset_list_unavailable")
@@ -96,7 +98,6 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     if not symbols:
         return False
     session = _session_for_close(now)
-    deadline = monotonic_time.monotonic() + cfg.deadline_seconds
     universe_hash = sha256("\n".join(symbols).encode("utf-8")).hexdigest()
     config_hash = sha256(
         json.dumps(cfg.model_dump(mode="json"), sort_keys=True).encode("utf-8")
@@ -122,10 +123,32 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
         )
         return False
 
+    def deadline_failed(
+        *,
+        covered_count: int = 0,
+        screened_count: int = 0,
+        confirmed_count: int = 0,
+    ) -> bool:
+        if monotonic_time.monotonic() < deadline:
+            return False
+        log.warning("extreme_movers.deadline_exceeded", phase="run_close")
+        fail(
+            "DEADLINE_EXCEEDED",
+            covered_count=covered_count,
+            screened_count=screened_count,
+            confirmed_count=confirmed_count,
+        )
+        return True
+
+    if deadline_failed():
+        return False
+
     short_bars = _fetch_chunks(
         engine.source, symbols, session - timedelta(days=10), session + timedelta(days=1),
         cfg.chunk_size, cfg.feed, deadline,
     )
+    if deadline_failed():
+        return False
     covered = _covered_symbols(short_bars, session)
     if len(covered) / len(symbols) < cfg.min_coverage:
         log.warning(
@@ -138,6 +161,10 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
         short_bars, session, threshold=screen_threshold
     )
     screened_symbols = [event.ticker for event in screened]
+    if deadline_failed(
+        covered_count=len(covered), screened_count=len(screened_symbols)
+    ):
+        return False
     confirmation_source = engine.source
     confirmation_feed = "sip"
     confirmation_chunk_size = cfg.chunk_size
@@ -159,6 +186,10 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
         session + timedelta(days=1), confirmation_chunk_size, confirmation_feed,
         deadline,
     ) if screened_symbols else pd.DataFrame()
+    if deadline_failed(
+        covered_count=len(covered), screened_count=len(screened_symbols)
+    ):
+        return False
     confirmed_coverage = _covered_symbols(long_bars, session)
     if screened_symbols and (
         len(confirmed_coverage) / len(screened_symbols)
@@ -179,11 +210,23 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
         long_bars, session, threshold=cfg.threshold
     ) if screened_symbols else ()
     detected_symbols = [event.ticker for event in detected]
+    if deadline_failed(
+        covered_count=len(covered),
+        screened_count=len(screened_symbols),
+        confirmed_count=len(confirmed_coverage),
+    ):
+        return False
     profile_source = engine.fundamentals_source
     profiles = (
         profile_source.profiles(detected_symbols)
         if profile_source is not None and detected_symbols else {}
     )
+    if deadline_failed(
+        covered_count=len(covered),
+        screened_count=len(screened_symbols),
+        confirmed_count=len(confirmed_coverage),
+    ):
+        return False
     qualified: list[ExtremeMoverEvent] = []
     for event in detected:
         source_label = (
@@ -196,7 +239,7 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
             frame = cast(pd.DataFrame, long_bars.xs(event.ticker, level="ticker"))
             adv = average_dollar_volume(frame, sessions=20)
         except (KeyError, ValueError):
-            adv = Decimal("0")
+            adv = Decimal(0)
         qualified.append(
             qualify_event(
                 event, profiles.get(event.ticker),
@@ -214,11 +257,17 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
                     source="alpaca_iex_screen+confirmation_unavailable",
                 ),
                 None,
-                avg_dollar_volume_20d=Decimal("0"),
+                avg_dollar_volume_20d=Decimal(0),
                 min_price=cfg.min_price,
                 min_dollar_volume=cfg.min_dollar_volume,
             )
         )
+    if deadline_failed(
+        covered_count=len(covered),
+        screened_count=len(screened_symbols),
+        confirmed_count=len(confirmed_coverage),
+    ):
+        return False
     engine.ledger.replace_extreme_mover_run(
         ExtremeMoverRun(
             session, "COMPLETE", len(symbols), len(covered), now,

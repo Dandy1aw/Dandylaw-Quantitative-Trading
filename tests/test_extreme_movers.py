@@ -18,7 +18,6 @@ from quant_signal.extreme_movers import (
     window_total_return,
 )
 
-
 SESSION = date(2026, 8, 7)
 
 
@@ -133,30 +132,30 @@ def test_qualification_requires_equity_price_and_liquidity() -> None:
     assert qualify_event(
         source_events["GOOD"],
         _profile("GOOD"),
-        avg_dollar_volume_20d=Decimal("20000000"),
-        min_price=Decimal("5"),
-        min_dollar_volume=Decimal("20000000"),
+        avg_dollar_volume_20d=Decimal(20000000),
+        min_price=Decimal(5),
+        min_dollar_volume=Decimal(20000000),
     ).eligibility is Eligibility.ELIGIBLE
     assert qualify_event(
         source_events["ETF"],
         _profile("ETF", quote_type="ETF"),
-        avg_dollar_volume_20d=Decimal("30000000"),
-        min_price=Decimal("5"),
-        min_dollar_volume=Decimal("20000000"),
+        avg_dollar_volume_20d=Decimal(30000000),
+        min_price=Decimal(5),
+        min_dollar_volume=Decimal(20000000),
     ).eligibility is Eligibility.NON_EQUITY
     assert qualify_event(
         source_events["LOW"],
         _profile("LOW"),
-        avg_dollar_volume_20d=Decimal("30000000"),
-        min_price=Decimal("5"),
-        min_dollar_volume=Decimal("20000000"),
+        avg_dollar_volume_20d=Decimal(30000000),
+        min_price=Decimal(5),
+        min_dollar_volume=Decimal(20000000),
     ).eligibility is Eligibility.LOW_PRICE
     assert qualify_event(
         source_events["THIN"],
         _profile("THIN"),
-        avg_dollar_volume_20d=Decimal("19999999"),
-        min_price=Decimal("5"),
-        min_dollar_volume=Decimal("20000000"),
+        avg_dollar_volume_20d=Decimal(19999999),
+        min_price=Decimal(5),
+        min_dollar_volume=Decimal(20000000),
     ).eligibility is Eligibility.LOW_LIQUIDITY
 
 
@@ -170,7 +169,7 @@ def test_average_dollar_volume_uses_last_twenty_complete_rows() -> None:
         index=dates,
     )
 
-    assert average_dollar_volume(frame, sessions=20) == Decimal("20000000")
+    assert average_dollar_volume(frame, sessions=20) == Decimal(20000000)
 
 
 def test_average_dollar_volume_requires_full_window() -> None:
@@ -179,7 +178,19 @@ def test_average_dollar_volume_requires_full_window() -> None:
         index=pd.date_range("2026-07-01", periods=19, freq="B", tz="UTC"),
     )
 
-    assert average_dollar_volume(frame, sessions=20) == Decimal("0")
+    assert average_dollar_volume(frame, sessions=20) == Decimal(0)
+
+
+def test_average_dollar_volume_rejects_non_finite_rows() -> None:
+    frame = pd.DataFrame(
+        {
+            "close": [10.0] * 19 + [float("inf")],
+            "volume": [3_000_000] * 20,
+        },
+        index=pd.date_range("2026-07-01", periods=20, freq="B", tz="UTC"),
+    )
+
+    assert average_dollar_volume(frame, sessions=20) == Decimal(0)
 
 
 def _eligible(
@@ -198,8 +209,8 @@ def _eligible(
             else MoverDirection.DOWN
         ),
         daily_return=Decimal(daily_return),
-        close=Decimal("20"),
-        avg_dollar_volume_20d=Decimal("30000000"),
+        close=Decimal(20),
+        avg_dollar_volume_20d=Decimal(30000000),
         sector=sector,
         industry="Software",
         quote_type="EQUITY",
@@ -264,5 +275,5 @@ def test_rank_sectors_keeps_eligible_unknown_sector_as_uncategorized() -> None:
 
 
 def test_window_total_return_uses_first_and_last_close() -> None:
-    assert window_total_return([Decimal("100"), Decimal("80"), Decimal("120")]) == Decimal("0.2")
+    assert window_total_return([Decimal(100), Decimal(80), Decimal(120)]) == Decimal("0.2")
     assert window_total_return([]) is None
