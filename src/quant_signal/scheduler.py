@@ -361,6 +361,20 @@ def build_scheduler(
             return
         engine.run_negative_overreaction(datetime.now(timezone.utc))
 
+    def extreme_movers_close() -> object:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="extreme_movers_close")
+            return None
+        return engine.run_extreme_movers_close(datetime.now(timezone.utc))
+
+    def extreme_movers_premarket() -> object:
+        now_et = _now_et()
+        if not is_trading_day(now_et.date()):
+            log.info("skip.non_trading_day", job="extreme_movers_premarket")
+            return None
+        return engine.run_extreme_movers_premarket(datetime.now(timezone.utc))
+
     def rotation_push() -> object:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
@@ -489,6 +503,9 @@ def build_scheduler(
     us_briefing_enabled = (
         bool(settings.us_briefing.enabled) if settings is not None else False
     )
+    extreme_movers_enabled = bool(
+        getattr(getattr(settings, "extreme_movers", None), "enabled", False)
+    )
 
     health = JobHealth()
     sched.add_listener(
@@ -521,6 +538,34 @@ def build_scheduler(
         id="negative_overreaction",
         misfire_grace_time=3600,
     )
+    if extreme_movers_enabled:
+        mover_settings = settings.extreme_movers
+        sched.add_job(
+            runtime.wrap("extreme_movers_close", extreme_movers_close),
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=mover_settings.close_hour_et,
+                minute=mover_settings.close_minute_et,
+                timezone=ET,
+            ),
+            id="extreme_movers_close",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+        sched.add_job(
+            runtime.wrap("extreme_movers_premarket", extreme_movers_premarket),
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=mover_settings.premarket_hour_et,
+                minute=mover_settings.premarket_minute_et,
+                timezone=ET,
+            ),
+            id="extreme_movers_premarket",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
     sched.add_job(
         runtime.wrap("maintenance", maintenance),
         CronTrigger(hour=3, minute=0, timezone=ET), id="maintenance"

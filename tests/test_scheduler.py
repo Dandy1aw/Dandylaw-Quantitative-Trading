@@ -58,6 +58,49 @@ class _OptionFlowEngine:
         self.drains += 1
 
 
+class _ExtremeMoverEngine:
+    def __init__(self) -> None:
+        from conftest import make_test_settings
+        from quant_signal.config import ExecutionPlanSettings, ExtremeMoverSettings
+
+        self.settings = make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            extreme_movers=ExtremeMoverSettings(enabled=True),
+        )
+        self.calls: list[str] = []
+
+    def run_extreme_movers_close(self, now: datetime) -> bool:
+        self.calls.append("close")
+        return True
+
+    def run_extreme_movers_premarket(self, now: datetime) -> bool:
+        self.calls.append("premarket")
+        return True
+
+
+def test_scheduler_registers_both_mover_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "quant_signal.scheduler._now_et",
+        lambda: datetime(2026, 8, 7, 16, 30, tzinfo=ZoneInfo("America/New_York")),
+    )
+    engine = _ExtremeMoverEngine()
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    assert "extreme_movers_close" in jobs
+    assert "extreme_movers_premarket" in jobs
+    assert "hour='16'" in str(jobs["extreme_movers_close"].trigger)
+    assert "minute='30'" in str(jobs["extreme_movers_close"].trigger)
+    assert "hour='8'" in str(jobs["extreme_movers_premarket"].trigger)
+    jobs["extreme_movers_close"].func()
+    jobs["extreme_movers_premarket"].func()
+    assert engine.calls == ["close", "premarket"]
+
+
 def test_scheduler_registers_all_jobs() -> None:
     """默认(生产)配置: 执行建议任务上线, 旧价格偏离任务下线。"""
     sched = build_scheduler(engine=None, ledger=None, store=None, notifier=FakeNotifier())
