@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from typing import Protocol
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -27,14 +27,6 @@ from quant_signal.notifier.cards import (
 
 log = structlog.get_logger()
 ET = ZoneInfo("America/New_York")
-
-
-class _Engine(Protocol):
-    settings: object
-    source: object
-    fundamentals_source: object
-    ledger: object
-    notifier: object
 
 
 def _session_for_close(now: datetime) -> date:
@@ -82,7 +74,7 @@ def _covered_symbols(bars: pd.DataFrame, session: date) -> set[str]:
     return covered
 
 
-def run_close(engine: _Engine, now: datetime, *, notify: bool = True) -> bool:
+def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     cfg = engine.settings.extreme_movers
     if not cfg.enabled:
         return False
@@ -119,7 +111,7 @@ def run_close(engine: _Engine, now: datetime, *, notify: bool = True) -> bool:
     qualified: list[ExtremeMoverEvent] = []
     for event in detected:
         try:
-            frame = long_bars.xs(event.ticker, level="ticker")
+            frame = cast(pd.DataFrame, long_bars.xs(event.ticker, level="ticker"))
             adv = average_dollar_volume(frame, sessions=20)
         except (KeyError, ValueError):
             adv = Decimal("0")
@@ -145,7 +137,7 @@ def run_close(engine: _Engine, now: datetime, *, notify: bool = True) -> bool:
 
 
 def run_premarket(
-    engine: _Engine,
+    engine: Any,
     now: datetime,
     *,
     window_sessions: int | None = None,

@@ -539,6 +539,7 @@ def build_scheduler(
         misfire_grace_time=3600,
     )
     if extreme_movers_enabled:
+        assert settings is not None
         mover_settings = settings.extreme_movers
         sched.add_job(
             runtime.wrap("extreme_movers_close", extreme_movers_close),

@@ -26,6 +26,7 @@ from quant_signal.strategies.base import Signal, dedup_key
 
 if TYPE_CHECKING:
     from quant_signal.company_profiles import CompanyProfile
+    from quant_signal.extreme_movers import ExtremeMoverEvent
     from quant_signal.options_flow import HoldingOptionFlowSnapshot, OptionFlowSnapshot
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
@@ -559,7 +560,7 @@ class SignalLedger:
         through: date,
         *,
         window_sessions: int = 1,
-    ) -> list[object]:
+    ) -> list["ExtremeMoverEvent"]:
         from quant_signal.extreme_movers import (
             Eligibility,
             ExtremeMoverEvent,

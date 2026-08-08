@@ -29,6 +29,11 @@ if TYPE_CHECKING:
         OptionFlowSnapshot,
     )
     from quant_signal.options_intel import OptionIntel
+    from quant_signal.extreme_movers import (
+        ExtremeMoverEvent,
+        MoverRanking,
+        SectorRanking,
+    )
 
 _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
@@ -37,7 +42,7 @@ _SELL_RELIABILITY_NOTE = "⚠️ SELL 信号历史胜率偏低（回测 32–42%
 
 
 def extreme_movers_close_card(
-    events: Sequence[object], *, universe_count: int, covered_count: int
+    events: Sequence["ExtremeMoverEvent"], *, universe_count: int, covered_count: int
 ) -> Card:
     from quant_signal.extreme_movers import Eligibility, MoverDirection
 
@@ -68,8 +73,8 @@ def extreme_movers_premarket_card(
     *,
     session: date,
     window_sessions: int,
-    movers: Sequence[object],
-    sectors: Sequence[object],
+    movers: Sequence["MoverRanking"],
+    sectors: Sequence["SectorRanking"],
     backfill_warning: bool = False,
 ) -> Card:
     from quant_signal.extreme_movers import MoverDirection
@@ -89,8 +94,8 @@ def extreme_movers_premarket_card(
         )
     lines.extend(["", "**板块 Top5**"])
     for direction, marker in ((MoverDirection.UP, "涨"), (MoverDirection.DOWN, "跌")):
-        rows = [row for row in sectors if row.direction is direction][:5]
-        for index, row in enumerate(rows, start=1):
+        sector_rows = [row for row in sectors if row.direction is direction][:5]
+        for index, row in enumerate(sector_rows, start=1):
             lines.append(
                 f"{marker}{index}. **{row.sector}**｜累计入榜 {row.event_days} 天｜"
                 f"{row.unique_movers} 股｜重复强度 {row.repeat_intensity:.2%}"
