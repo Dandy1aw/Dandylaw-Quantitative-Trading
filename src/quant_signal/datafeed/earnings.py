@@ -7,11 +7,13 @@ yfinance 的 Ticker.calendar 提供下次财报日期；尽力而为，取不到
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from datetime import date
-from typing import Callable, Protocol
+from typing import Protocol
 
 import structlog
-import yfinance as yf
+
+from quant_signal.datafeed.yfinance_compat import yf
 
 log = structlog.get_logger()
 

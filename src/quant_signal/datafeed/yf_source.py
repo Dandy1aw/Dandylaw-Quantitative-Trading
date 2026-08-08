@@ -4,7 +4,8 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
+
+from quant_signal.datafeed.yfinance_compat import yf
 
 
 def _normalize(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:

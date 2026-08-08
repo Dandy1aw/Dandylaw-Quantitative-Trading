@@ -12,9 +12,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 import structlog
-import yfinance as yf
 
 from quant_signal.company_profiles import CompanyProfile
+from quant_signal.datafeed.yfinance_compat import yf
 
 log = structlog.get_logger()
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import structlog
-import yfinance as yf
+
+from quant_signal.datafeed.yfinance_compat import yf
 
 log = structlog.get_logger()
 
