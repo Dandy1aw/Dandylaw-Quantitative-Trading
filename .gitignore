@@ -12,5 +12,6 @@ research/e2e/**/*.log
 research/e2e/**/*.pid
 research/e2e/**/*pid*.txt
 research/e2e/latest-*.txt
+data/extreme-movers-backfill*.json
 research/reports/**/bars_*.csv
 research/reports/**/current_profiles.json
