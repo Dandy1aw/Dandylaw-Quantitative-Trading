@@ -20,6 +20,7 @@ from quant_signal.calendar import (
     session_close_utc,
 )
 from quant_signal.logging_setup import redact_text
+from quant_signal.pipelines.fear_dca import DeliveryRetryResult
 from quant_signal.pipelines.us_briefing import BriefingMode
 
 log = structlog.get_logger()
@@ -378,8 +379,9 @@ def build_scheduler(
     def fear_dca() -> object:
         return engine.run_fear_dca(datetime.now(UTC))
 
-    def fear_dca_retry() -> None:
-        engine.retry_fear_dca_delivery(datetime.now(UTC))
+    def fear_dca_retry() -> bool:
+        result = engine.retry_fear_dca_delivery(datetime.now(UTC))
+        return result is not DeliveryRetryResult.FAILED
 
     def rotation_push() -> object:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股

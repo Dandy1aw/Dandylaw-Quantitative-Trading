@@ -56,6 +56,14 @@ class _DailySource(Protocol):
     ) -> pd.DataFrame: ...
 
 
+class DeliveryRetryResult(str, Enum):
+    """Outcome of inspecting and optionally retrying the COMPLETE outbox."""
+
+    NO_WORK = "NO_WORK"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+
 def _error_text(error: BaseException) -> str:
     return str(error).strip() or type(error).__name__
 
@@ -506,25 +514,26 @@ def run(
     )
 
 
-def retry_delivery(engine: Engine, now: datetime) -> bool:
+def retry_delivery(engine: Engine, now: datetime) -> DeliveryRetryResult:
     """Retry the latest unsent COMPLETE card without refetching market data."""
     if now.tzinfo is None:
         raise ValueError("fear DCA retry time must be timezone-aware")
     run_record = engine.ledger.latest_unsent_complete_fear_dca_run()
     if run_record is None:
         log.info("fear_dca.retry_skip", reason="no_unsent_complete_card")
-        return False
+        return DeliveryRetryResult.NO_WORK
     card = run_record.get("card")
     if not isinstance(card, Card):
         log.warning("fear_dca.retry_blocked", reason="persisted card is missing")
-        return False
-    return _claim_and_send(
+        return DeliveryRetryResult.FAILED
+    delivered = _claim_and_send(
         engine,
         date.fromisoformat(str(run_record["session_date"])),
         card,
         expected_status="COMPLETE",
         now=now,
     )
+    return DeliveryRetryResult.SENT if delivered else DeliveryRetryResult.FAILED
 
 
 def replay(engine: Engine) -> bool:

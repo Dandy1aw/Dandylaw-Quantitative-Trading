@@ -5,10 +5,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from quant_signal.pipelines.fear_dca import DeliveryRetryResult
 from quant_signal.scheduler import (
     HEARTBEAT_FAIL_THRESHOLD,
     Heartbeat,
     JobHealth,
+    JobRuntime,
     build_scheduler,
 )
 
@@ -79,7 +81,12 @@ class _ExtremeMoverEngine:
 
 
 class _FearDcaEngine:
-    def __init__(self, *, enabled: bool) -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        retry_result: DeliveryRetryResult = DeliveryRetryResult.NO_WORK,
+    ) -> None:
         from conftest import make_test_settings
 
         from quant_signal.config import ExecutionPlanSettings, FearDcaSettings
@@ -90,22 +97,28 @@ class _FearDcaEngine:
         )
         self.calls: list[datetime] = []
         self.retry_calls: list[datetime] = []
+        self.retry_result = retry_result
 
     def run_fear_dca(self, now: datetime) -> bool:
         self.calls.append(now)
         return True
 
-    def retry_fear_dca_delivery(self, now: datetime) -> bool:
+    def retry_fear_dca_delivery(self, now: datetime) -> DeliveryRetryResult:
         self.retry_calls.append(now)
-        return True
+        return self.retry_result
 
 
 def test_scheduler_registers_configured_fear_dca_job() -> None:
     engine = _FearDcaEngine(enabled=True)
+    runtime = JobRuntime()
     jobs = {
         job.id: job
         for job in build_scheduler(
-            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+            engine=engine,
+            ledger=None,
+            store=None,
+            notifier=FakeNotifier(),
+            runtime=runtime,
         ).get_jobs()
     }
 
@@ -127,9 +140,53 @@ def test_scheduler_registers_configured_fear_dca_job() -> None:
     assert retry_job.trigger.interval == timedelta(minutes=5)
     assert retry_job.max_instances == 1
     assert retry_job.coalesce is True
-    assert retry_job.func() is None
+    assert retry_job.func() is True
     assert len(engine.retry_calls) == 1
     assert engine.retry_calls[0].tzinfo is UTC
+    retry_health = runtime.snapshot()["fear_dca_retry"]
+    assert retry_health["last_success"] is not None
+    assert retry_health["consecutive_failures"] == 0
+
+
+def test_fear_dca_retry_scheduler_reports_delivery_failure() -> None:
+    from quant_signal.scheduler import JobReportedFailure
+
+    engine = _FearDcaEngine(
+        enabled=True,
+        retry_result=DeliveryRetryResult.FAILED,
+    )
+    runtime = JobRuntime()
+    job = build_scheduler(
+        engine=engine,
+        ledger=None,
+        store=None,
+        notifier=FakeNotifier(),
+        runtime=runtime,
+    ).get_job("fear_dca_retry")
+
+    with pytest.raises(JobReportedFailure):
+        job.func()
+    retry_health = runtime.snapshot()["fear_dca_retry"]
+    assert retry_health["last_success"] is None
+    assert retry_health["consecutive_failures"] == 1
+
+
+def test_fear_dca_retry_scheduler_records_sent_as_success() -> None:
+    engine = _FearDcaEngine(
+        enabled=True,
+        retry_result=DeliveryRetryResult.SENT,
+    )
+    runtime = JobRuntime()
+    job = build_scheduler(
+        engine=engine,
+        ledger=None,
+        store=None,
+        notifier=FakeNotifier(),
+        runtime=runtime,
+    ).get_job("fear_dca_retry")
+
+    assert job.func() is True
+    assert runtime.last_success("fear_dca_retry") is not None
 
 
 def test_scheduler_omits_disabled_fear_dca_job() -> None:

@@ -28,6 +28,7 @@ from quant_signal.pipelines.extreme_movers import (
     run_premarket as run_extreme_movers_premarket_pipeline,
 )
 from quant_signal.pipelines.fear_dca import (
+    DeliveryRetryResult,
     replay as replay_fear_dca_pipeline,
     retry_delivery as retry_fear_dca_delivery_pipeline,
     run as run_fear_dca_pipeline,
@@ -385,7 +386,7 @@ class Engine:
     def run_fear_dca(self, now: datetime) -> bool:
         return run_fear_dca_pipeline(self, now)
 
-    def retry_fear_dca_delivery(self, now: datetime) -> bool:
+    def retry_fear_dca_delivery(self, now: datetime) -> DeliveryRetryResult:
         return retry_fear_dca_delivery_pipeline(self, now)
 
     def resend_latest_fear_dca(self) -> bool:

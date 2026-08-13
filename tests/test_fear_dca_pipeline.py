@@ -18,7 +18,12 @@ from quant_signal.engine import Engine
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind
 from quant_signal.pipelines import fear_dca as pipeline
-from quant_signal.pipelines.fear_dca import replay, retry_delivery, run
+from quant_signal.pipelines.fear_dca import (
+    DeliveryRetryResult,
+    replay,
+    retry_delivery,
+    run,
+)
 
 SYMBOLS = ["^VIX", "^VXN", "SPY", "QQQM"]
 ASIA = ZoneInfo("Asia/Shanghai")
@@ -762,7 +767,10 @@ def test_complete_pending_after_persistence_retries_without_fetch_and_reuses_uui
         "YFinanceSource",
         lambda: (_ for _ in ()).throw(AssertionError("retry must not fetch data")),
     )
-    assert retry_delivery(engine, now + timedelta(minutes=5))
+    assert (
+        retry_delivery(engine, now + timedelta(minutes=5))
+        is DeliveryRetryResult.SENT
+    )
 
     stored = engine.ledger.fear_dca_run(TARGET)
     assert stored is not None
@@ -789,9 +797,17 @@ def test_definitive_complete_delivery_failure_retries_then_becomes_sent(
     failed_card = failed["card"]
     assert isinstance(failed_card, Card)
 
+    assert (
+        retry_delivery(engine, now + timedelta(minutes=5))
+        is DeliveryRetryResult.FAILED
+    )
     notifier.succeeds = True
-    assert retry_delivery(engine, now + timedelta(minutes=5))
+    assert (
+        retry_delivery(engine, now + timedelta(minutes=6))
+        is DeliveryRetryResult.SENT
+    )
     assert [card.message_uuid for card in notifier.cards] == [
+        failed_card.message_uuid,
         failed_card.message_uuid,
         failed_card.message_uuid,
     ]
@@ -804,7 +820,10 @@ def test_sent_complete_delivery_is_terminal_for_retry(tmp_path: Path) -> None:
     now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
     assert run(engine, now, source=FakeSource(_bars()))
 
-    assert not retry_delivery(engine, now + timedelta(minutes=5))
+    assert (
+        retry_delivery(engine, now + timedelta(minutes=5))
+        is DeliveryRetryResult.NO_WORK
+    )
     assert len(notifier.cards) == 1
 
 
@@ -828,7 +847,10 @@ def test_non_idempotent_complete_ambiguous_delivery_is_not_reclaimed(
             source=FakeSource(_bars()),
         )
 
-    assert not retry_delivery(engine, delivery_start + timedelta(minutes=11))
+    assert (
+        retry_delivery(engine, delivery_start + timedelta(minutes=11))
+        is DeliveryRetryResult.FAILED
+    )
     assert len(notifier.cards) == 1
     assert engine.ledger.fear_dca_run(TARGET)["send_status"] == "IN_FLIGHT"  # type: ignore[index]
 
@@ -857,7 +879,10 @@ def test_idempotent_complete_ambiguous_delivery_reclaims_with_same_uuid(
             source=FakeSource(_bars()),
         )
 
-    assert retry_delivery(engine, delivery_start + timedelta(minutes=11))
+    assert (
+        retry_delivery(engine, delivery_start + timedelta(minutes=11))
+        is DeliveryRetryResult.SENT
+    )
     assert len(notifier.cards) == 2
     assert notifier.cards[0].message_uuid == notifier.cards[1].message_uuid
     assert engine.ledger.fear_dca_run(TARGET)["send_status"] == "SENT"  # type: ignore[index]
@@ -1022,11 +1047,12 @@ def test_engine_exposes_run_and_replay_facades(monkeypatch: pytest.MonkeyPatch) 
     )
     monkeypatch.setattr(
         "quant_signal.engine.retry_fear_dca_delivery_pipeline",
-        lambda actual, at: calls.append(("retry", (actual, at))) or True,
+        lambda actual, at: calls.append(("retry", (actual, at)))
+        or DeliveryRetryResult.SENT,
     )
 
     assert engine.run_fear_dca(now)
-    assert engine.retry_fear_dca_delivery(now)
+    assert engine.retry_fear_dca_delivery(now) is DeliveryRetryResult.SENT
     assert engine.resend_latest_fear_dca()
     assert calls == [
         ("run", (engine, now)),
