@@ -56,6 +56,8 @@ def _validated_window(
     closes: pd.Series[float], *, sessions: int, label: str
 ) -> pd.Series[float]:
     """Return the required trailing close window or raise a clear validation error."""
+    if not closes.index.is_unique or not closes.index.is_monotonic_increasing:
+        raise ValueError(f"{label} index must be unique and monotonically increasing")
     if len(closes) < sessions:
         raise ValueError(
             f"{label} requires at least {sessions} sessions; got {len(closes)}"
@@ -88,6 +90,50 @@ def interpret_fear_mas(close: float, ma20: float, ma60: float) -> FearInterpreta
     if close < ma20 and close < ma60:
         return FearInterpretation.FEAR_FALLING
     return FearInterpretation.DIVERGENT
+
+
+def validate_fear_metrics(metrics: FearMetrics) -> None:
+    """Reject malformed or internally inconsistent fear metrics."""
+    _validate_positive_values(
+        "fear metrics close and moving averages",
+        metrics.close,
+        metrics.ma20,
+        metrics.ma60,
+    )
+    _validate_finite_values(
+        "fear metrics returns and deviations",
+        metrics.one_session_return,
+        metrics.deviation_from_ma20,
+        metrics.deviation_from_ma60,
+    )
+
+    expected_ma20_deviation = metrics.close / metrics.ma20 - 1.0
+    if not math.isclose(
+        metrics.deviation_from_ma20,
+        expected_ma20_deviation,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("fear metrics deviation_from_ma20 is inconsistent")
+
+    expected_ma60_deviation = metrics.close / metrics.ma60 - 1.0
+    if not math.isclose(
+        metrics.deviation_from_ma60,
+        expected_ma60_deviation,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError("fear metrics deviation_from_ma60 is inconsistent")
+
+    if not isinstance(metrics.interpretation, FearInterpretation):
+        raise TypeError("fear metrics interpretation must be a FearInterpretation")
+    expected_interpretation = interpret_fear_mas(
+        metrics.close, metrics.ma20, metrics.ma60
+    )
+    if metrics.interpretation is not expected_interpretation:
+        raise ValueError(
+            "fear metrics interpretation is inconsistent with moving averages"
+        )
 
 
 def calculate_fear_metrics(closes: pd.Series[float]) -> FearMetrics:
@@ -137,13 +183,14 @@ def _tier(value: float, thresholds: tuple[float, float, float, float]) -> float:
 def _recommend(
     *,
     fear_name: str,
-    fear_close: float,
+    fear_metrics: FearMetrics,
     etf_name: str,
     etf_metrics: ETFMetrics,
     thresholds: tuple[float, float, float, float],
     five_session_threshold: float,
     twenty_session_threshold: float,
 ) -> RecommendationDecision:
+    validate_fear_metrics(fear_metrics)
     _validate_finite_values(
         f"{etf_name} returns",
         etf_metrics.one_session_return,
@@ -151,6 +198,7 @@ def _recommend(
         etf_metrics.twenty_session_return,
     )
     _validate_positive_values(f"{etf_name} close", etf_metrics.close)
+    fear_close = fear_metrics.close
     base = _tier(fear_close, thresholds)
     if base == 0.0:
         return RecommendationDecision(
@@ -194,7 +242,7 @@ def recommend_spy(
     """Recommend the SPY fear-buy multiplier from VIX and SPY metrics."""
     return _recommend(
         fear_name="VIX",
-        fear_close=fear_metrics.close,
+        fear_metrics=fear_metrics,
         etf_name="SPY",
         etf_metrics=etf_metrics,
         thresholds=(25.0, 30.0, 40.0, 50.0),
@@ -209,7 +257,7 @@ def recommend_qqqm(
     """Recommend the QQQM fear-buy multiplier from VXN and QQQM metrics."""
     return _recommend(
         fear_name="VXN",
-        fear_close=fear_metrics.close,
+        fear_metrics=fear_metrics,
         etf_name="QQQM",
         etf_metrics=etf_metrics,
         thresholds=(35.0, 40.0, 50.0, 60.0),
