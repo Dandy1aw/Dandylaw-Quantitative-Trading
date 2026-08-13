@@ -23,6 +23,7 @@ def _signal(
     severity: object = 1,
     strength: object = 1.0,
     window: str = "1m",
+    ts: datetime = NOW,
 ) -> Signal:
     return Signal(
         ticker=ticker,
@@ -30,7 +31,7 @@ def _signal(
         price=100.0,
         reason="price move",
         strategy_id="holding_price_alert",
-        ts=NOW,
+        ts=ts,
         extra={
             "severity": severity,
             "strength_score": strength,
@@ -313,6 +314,71 @@ def test_successful_decision_converts_to_immutable_prior_for_next_selection() ->
         pushed_at=NOW,
         alert_kind=AlertDisposition.FIRST,
     )
+
+
+def test_simulated_latest_direction_follows_selection_not_candidate_timestamp() -> None:
+    prior = PriorHoldingAlert(
+        ticker="AAA",
+        direction=Direction.BUY,
+        severity=1,
+        strength_score=1.0,
+        pushed_at=datetime(2026, 8, 14, 14, 5, tzinfo=UTC),
+        alert_kind=AlertDisposition.FIRST,
+    )
+    backdated = datetime(2026, 8, 14, 14, 0, tzinfo=UTC)
+
+    decisions = select_holding_alerts(
+        [
+            _signal("AAA", direction=Direction.BUY, ts=backdated),
+            _signal("AAA", direction=Direction.SELL, ts=backdated),
+        ],
+        [prior],
+        regular_slots=5,
+        daily_cap=5,
+        per_ticker_cap=3,
+    )
+
+    assert [decision.signal.direction for decision in decisions] == [
+        Direction.SELL,
+        Direction.BUY,
+    ]
+    assert [decision.disposition for decision in decisions] == [
+        AlertDisposition.REVERSAL,
+        AlertDisposition.REVERSAL,
+    ]
+    assert all(decision.should_send for decision in decisions)
+
+
+def test_decision_history_uses_normalized_snapshot_not_mutated_signal_extra() -> None:
+    decision = select_holding_alerts([_signal("AAA", severity=1, strength=1)], [])[0]
+    assert decision.severity == 1
+    assert decision.strength_score == 1.0
+    assert decision.signal.extra is not None
+
+    decision.signal.extra["severity"] = 3
+    decision.signal.extra["strength_score"] = float("nan")
+
+    prior = decision.as_prior(NOW)
+    assert prior.severity == 1
+    assert prior.strength_score == 1.0
+
+
+def test_naive_candidate_timestamp_fails_closed_without_interrupting_batch() -> None:
+    decisions = select_holding_alerts(
+        [
+            _signal("BAD", ts=NOW.replace(tzinfo=None)),
+            _signal("GOOD", ts=NOW),
+        ],
+        [],
+    )
+    by_ticker = _by_ticker(decisions)
+
+    assert by_ticker["BAD"].should_send is False
+    assert (
+        by_ticker["BAD"].suppression_reason
+        is SuppressionReason.INVALID_CANDIDATE
+    )
+    assert by_ticker["GOOD"].should_send is True
 
 
 @pytest.mark.parametrize("strength", [float("nan"), float("inf"), -1.0, 0.0, True])

@@ -52,8 +52,13 @@ def _is_valid_strength(value: object) -> bool:
     )
 
 
-def _is_aware(value: datetime) -> bool:
-    return value.tzinfo is not None and value.utcoffset() is not None
+def _is_aware(value: object) -> bool:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return False
+    try:
+        return value.utcoffset() is not None
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -95,14 +100,27 @@ class HoldingAlertDecision:
     should_send: bool
     suppression_reason: SuppressionReason | None
     ticker_alert_number: int
+    severity: int | None
+    strength_score: float | None
 
     def __post_init__(self) -> None:
         if self.ticker_alert_number < 1:
             raise ValueError("ticker_alert_number must be positive")
+        has_valid_snapshot = _is_valid_severity(self.severity) and _is_valid_strength(
+            self.strength_score
+        )
+        if (self.severity is None) != (self.strength_score is None):
+            raise ValueError("severity and strength_score snapshots must be paired")
+        if self.severity is not None and not has_valid_snapshot:
+            raise ValueError("decision contains an invalid candidate snapshot")
         if self.should_send:
-            if self.disposition is None or self.suppression_reason is not None:
+            if (
+                self.disposition is None
+                or self.suppression_reason is not None
+                or not has_valid_snapshot
+            ):
                 raise ValueError(
-                    "sendable decisions require a disposition and no suppression"
+                    "sendable decisions require a disposition, snapshot, and no suppression"
                 )
         elif self.suppression_reason is None:
             raise ValueError("suppressed decisions require a suppression reason")
@@ -113,15 +131,13 @@ class HoldingAlertDecision:
             raise ValueError(
                 "only a successfully delivered sendable decision can become history"
             )
-        fields = _candidate_fields(self.signal)
-        if fields is None:
-            raise ValueError("decision contains an invalid candidate")
-        severity, strength = fields
+        if self.severity is None or self.strength_score is None:
+            raise ValueError("decision does not contain a valid candidate snapshot")
         return PriorHoldingAlert(
             ticker=self.signal.ticker,
             direction=self.signal.direction,
-            severity=severity,
-            strength_score=strength,
+            severity=self.severity,
+            strength_score=self.strength_score,
             pushed_at=pushed_at,
             alert_kind=self.disposition,
         )
@@ -132,6 +148,7 @@ def _candidate_fields(signal: Signal) -> tuple[int, float] | None:
         not isinstance(signal.ticker, str)
         or not signal.ticker.strip()
         or signal.direction not in (Direction.BUY, Direction.SELL)
+        or not _is_aware(signal.ts)
         or not isinstance(signal.extra, dict)
     ):
         return None
@@ -164,10 +181,7 @@ def _classify(
             return AlertDisposition.FIRST, None, alert_number, strength
         return None, SuppressionReason.NO_MEANINGFUL_UPGRADE, alert_number, strength
 
-    latest = max(
-        enumerate(ticker_history),
-        key=lambda indexed: (indexed[1].pushed_at, indexed[0]),
-    )[1]
+    latest = ticker_history[-1]
     if signal.direction != latest.direction:
         if strength >= _MIN_TRIGGER_STRENGTH:
             return AlertDisposition.REVERSAL, None, alert_number, strength
@@ -198,6 +212,26 @@ def _validate_quotas(regular_slots: int, daily_cap: int, per_ticker_cap: int) ->
         raise ValueError("regular_slots cannot exceed daily_cap")
 
 
+def _decision(
+    signal: Signal,
+    disposition: AlertDisposition | None,
+    should_send: bool,
+    suppression_reason: SuppressionReason | None,
+    ticker_alert_number: int,
+) -> HoldingAlertDecision:
+    fields = _candidate_fields(signal)
+    severity, strength = fields if fields is not None else (None, None)
+    return HoldingAlertDecision(
+        signal=signal,
+        disposition=disposition,
+        should_send=should_send,
+        suppression_reason=suppression_reason,
+        ticker_alert_number=ticker_alert_number,
+        severity=severity,
+        strength_score=strength,
+    )
+
+
 def select_holding_alerts(
     candidates: Sequence[Signal],
     prior_alerts: Sequence[PriorHoldingAlert],
@@ -220,7 +254,7 @@ def select_holding_alerts(
     if any(not isinstance(signal, Signal) for signal in candidates):
         raise ValueError("candidates must contain Signal values")
 
-    simulated_history = list(prior_alerts)
+    simulated_history = sorted(prior_alerts, key=lambda alert: alert.pushed_at)
     remaining = list(enumerate(candidates))
     decisions: list[HoldingAlertDecision] = []
 
@@ -256,9 +290,9 @@ def select_holding_alerts(
         remaining = [item for item in remaining if item[0] != index]
 
         if reason is SuppressionReason.INVALID_CANDIDATE:
-            decision = HoldingAlertDecision(signal, None, False, reason, alert_number)
+            decision = _decision(signal, None, False, reason, alert_number)
         elif len(simulated_history) >= daily_cap:
-            decision = HoldingAlertDecision(
+            decision = _decision(
                 signal,
                 None,
                 False,
@@ -266,7 +300,7 @@ def select_holding_alerts(
                 alert_number,
             )
         elif alert_number > per_ticker_cap:
-            decision = HoldingAlertDecision(
+            decision = _decision(
                 signal,
                 None,
                 False,
@@ -274,7 +308,7 @@ def select_holding_alerts(
                 alert_number,
             )
         elif disposition is None:
-            decision = HoldingAlertDecision(
+            decision = _decision(
                 signal,
                 None,
                 False,
@@ -285,7 +319,7 @@ def select_holding_alerts(
             len(simulated_history) >= regular_slots
             and disposition is AlertDisposition.FIRST
         ):
-            decision = HoldingAlertDecision(
+            decision = _decision(
                 signal,
                 None,
                 False,
@@ -293,7 +327,7 @@ def select_holding_alerts(
                 alert_number,
             )
         else:
-            decision = HoldingAlertDecision(
+            decision = _decision(
                 signal,
                 disposition,
                 True,
