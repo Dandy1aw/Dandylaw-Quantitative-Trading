@@ -5,17 +5,18 @@ lark-oapi 只允许出现在生产 Transport/WS 封装内；路由与服务逻�
 
 from __future__ import annotations
 
+import json
+import queue
+import re
+import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
-import json
 from pathlib import Path
-import re
-import queue
-import threading
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Literal, Protocol
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -45,6 +46,8 @@ _HELP_TEXT = (
     "信号 / signals — 今日各策略信号\n"
     "扫描 / scan — 最新指数池 Top20 观察榜\n"
     "健康 / health — 定时任务运行状态\n"
+    "定投 — 重发最新已完成的恐慌指数定投观察（不重新抓取）\n"
+    "定投规则 — 查看恐慌指数定投规则\n"
     "发送券商账户原图 — 需含总资产/持仓市值/现金/购买力及完整持仓\n"
     "确认导入 — 应用最近一次校验不完整(PARTIAL)的导入"
 )
@@ -80,6 +83,8 @@ class BotIntent(str, Enum):
     SIGNALS = "signals"
     SCAN = "scan"
     HEALTH = "health"
+    FEAR_DCA = "fear_dca"
+    FEAR_DCA_RULES = "fear_dca_rules"
     MOVERS = "movers"
     MOVER_SECTORS = "mover_sectors"
     MOVER_TICKER = "mover_ticker"
@@ -110,6 +115,8 @@ _TEXT_COMMANDS = {
     "scan": BotIntent.SCAN,
     "健康": BotIntent.HEALTH,
     "health": BotIntent.HEALTH,
+    "定投": BotIntent.FEAR_DCA,
+    "定投规则": BotIntent.FEAR_DCA_RULES,
     "确认导入": BotIntent.CONFIRM_IMPORT,
     "异动榜": BotIntent.MOVERS,
     "异动板块": BotIntent.MOVER_SECTORS,
@@ -328,6 +335,12 @@ class FeishuBotService:
             self._transport.send_text(message.chat_id, self._scan_text())
         elif intent is BotIntent.HEALTH:
             self._transport.send_text(message.chat_id, self._health_text(now))
+        elif intent is BotIntent.FEAR_DCA:
+            self._reply_fear_dca(message.chat_id)
+        elif intent is BotIntent.FEAR_DCA_RULES:
+            from quant_signal.notifier.cards import fear_dca_rules_card
+
+            self._transport.send_card(message.chat_id, fear_dca_rules_card())
         elif intent in (BotIntent.MOVERS, BotIntent.MOVER_SECTORS):
             self._reply_movers(
                 message.chat_id,
@@ -362,6 +375,16 @@ class FeishuBotService:
             )
 
     # ---- 查询指令 ----
+
+    def _reply_fear_dca(self, chat_id: str) -> None:
+        card = self._ledger.latest_complete_fear_dca_card()
+        if card is None:
+            self._transport.send_text(chat_id, "暂无已完成的恐慌指数定投报告。")
+            return
+        self._transport.send_card(
+            chat_id,
+            replace(card, message_uuid=str(uuid4())),
+        )
 
     def _status_text(self, now: datetime) -> str:
         session = now.astimezone(_ET).date()

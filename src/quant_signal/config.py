@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Self
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from dotenv import load_dotenv
@@ -578,6 +579,51 @@ class FeishuBotSettings(BaseModel):
         return self
 
 
+class FearDcaSettings(BaseModel):
+    """Operational settings for the fear-index DCA reminder."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    timezone: str = "Asia/Shanghai"
+    hour: int = Field(default=9, ge=0, le=23)
+    minute: int = Field(default=30, ge=0, le=59)
+    vix_symbol: str = "^VIX"
+    vxn_symbol: str = "^VXN"
+    spy_symbol: str = "SPY"
+    qqqm_symbol: str = "QQQM"
+    lookback_calendar_days: int = Field(default=220, ge=180)
+    chart_sessions: Literal[60] = 60
+    source_label: str = "Yahoo Finance"
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        timezone_name = value.strip()
+        try:
+            ZoneInfo(timezone_name)
+        except (ValueError, ZoneInfoNotFoundError) as error:
+            raise ValueError(f"unknown timezone: {timezone_name}") from error
+        return timezone_name
+
+    @model_validator(mode="after")
+    def normalize_data_contract(self) -> Self:
+        symbol_fields = ("vix_symbol", "vxn_symbol", "spy_symbol", "qqqm_symbol")
+        symbols: list[str] = []
+        for field_name in symbol_fields:
+            symbol = str(getattr(self, field_name)).strip().upper()
+            if not symbol:
+                raise ValueError(f"fear_dca.{field_name} must not be empty")
+            setattr(self, field_name, symbol)
+            symbols.append(symbol)
+        if len(set(symbols)) != len(symbols):
+            raise ValueError("fear_dca symbols must be unique")
+        self.source_label = self.source_label.strip()
+        if not self.source_label:
+            raise ValueError("fear_dca.source_label must not be empty")
+        return self
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -605,6 +651,7 @@ class Settings(BaseModel):
     option_intel: OptionIntelSettings = OptionIntelSettings()
     holding_price_alert: HoldingPriceAlertSettings = HoldingPriceAlertSettings()
     extreme_movers: ExtremeMoverSettings = ExtremeMoverSettings()
+    fear_dca: FearDcaSettings = FearDcaSettings()
     legacy_price_deviation: LegacyPriceDeviationSettings = LegacyPriceDeviationSettings()
     feishu_bot: FeishuBotSettings = FeishuBotSettings()
     backup: BackupSettings = BackupSettings()

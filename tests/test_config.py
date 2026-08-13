@@ -8,6 +8,7 @@ from quant_signal.config import (
     EnrichmentSettings,
     ExecutionPlanSettings,
     ExtremeMoverSettings,
+    FearDcaSettings,
     ForwardEvaluationSettings,
     IndexUniverseSettings,
     NotifySettings,
@@ -50,6 +51,9 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.option_flow.retention_days == 120
     assert s.holding_price_alert.enabled is True
     assert s.extreme_movers.enabled is True
+    assert s.fear_dca.enabled is True
+    assert s.fear_dca.timezone == "Asia/Shanghai"
+    assert (s.fear_dca.hour, s.fear_dca.minute) == (9, 30)
     assert s.holding_price_alert.stock_1m_pct == 0.015
     assert s.holding_price_alert.etf_1m_pct == 0.010
     assert s.holding_price_alert.cooldown_minutes == 30
@@ -60,6 +64,51 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.holding_price_alert.cause_search.timeout_seconds == 60
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
+
+
+def test_fear_dca_defaults_define_operational_data_contract() -> None:
+    settings = FearDcaSettings()
+
+    assert settings.enabled is False
+    assert settings.timezone == "Asia/Shanghai"
+    assert (settings.hour, settings.minute) == (9, 30)
+    assert settings.vix_symbol == "^VIX"
+    assert settings.vxn_symbol == "^VXN"
+    assert settings.spy_symbol == "SPY"
+    assert settings.qqqm_symbol == "QQQM"
+    assert settings.lookback_calendar_days == 220
+    assert settings.chart_sessions == 60
+    assert settings.source_label == "Yahoo Finance"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("timezone", "Mars/Olympus"),
+        ("hour", -1),
+        ("hour", 24),
+        ("minute", -1),
+        ("minute", 60),
+        ("lookback_calendar_days", 179),
+        ("chart_sessions", 59),
+        ("source_label", "   "),
+        ("vix_symbol", ""),
+    ],
+)
+def test_fear_dca_rejects_invalid_operational_config(
+    field: str, value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        FearDcaSettings(**{field: value})
+
+
+def test_fear_dca_symbols_are_normalized_and_unique() -> None:
+    settings = FearDcaSettings(vix_symbol=" ^vix ", qqqm_symbol=" qqqm ")
+    assert settings.vix_symbol == "^VIX"
+    assert settings.qqqm_symbol == "QQQM"
+
+    with pytest.raises(ValidationError, match="unique"):
+        FearDcaSettings(vix_symbol="SPY")
 
 
 def test_extreme_mover_defaults_are_bounded() -> None:

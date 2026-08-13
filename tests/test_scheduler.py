@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta, timezone
 import threading
 import time
+from datetime import UTC, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -76,6 +76,56 @@ class _ExtremeMoverEngine:
     def run_extreme_movers_premarket(self, now: datetime) -> bool:
         self.calls.append("premarket")
         return True
+
+
+class _FearDcaEngine:
+    def __init__(self, *, enabled: bool) -> None:
+        from conftest import make_test_settings
+
+        from quant_signal.config import ExecutionPlanSettings, FearDcaSettings
+
+        self.settings = make_test_settings(
+            execution_plan=ExecutionPlanSettings(enabled=False),
+            fear_dca=FearDcaSettings(enabled=enabled),
+        )
+        self.calls: list[datetime] = []
+
+    def run_fear_dca(self, now: datetime) -> bool:
+        self.calls.append(now)
+        return True
+
+
+def test_scheduler_registers_configured_fear_dca_job() -> None:
+    engine = _FearDcaEngine(enabled=True)
+    jobs = {
+        job.id: job
+        for job in build_scheduler(
+            engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+        ).get_jobs()
+    }
+
+    job = jobs["fear_dca"]
+    trigger = str(job.trigger)
+    assert "day_of_week='mon-fri'" in trigger
+    assert "hour='9'" in trigger
+    assert "minute='30'" in trigger
+    assert str(job.trigger.timezone) == "Asia/Shanghai"
+    assert job.max_instances == 1
+    assert job.coalesce is True
+    assert job.misfire_grace_time == 3600
+
+    assert job.func()
+    assert len(engine.calls) == 1
+    assert engine.calls[0].tzinfo is UTC
+
+
+def test_scheduler_omits_disabled_fear_dca_job() -> None:
+    engine = _FearDcaEngine(enabled=False)
+    jobs = build_scheduler(
+        engine=engine, ledger=None, store=None, notifier=FakeNotifier()
+    ).get_jobs()
+
+    assert "fear_dca" not in {job.id for job in jobs}
 
 
 def test_scheduler_registers_both_mover_jobs(monkeypatch: pytest.MonkeyPatch) -> None:

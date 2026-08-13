@@ -105,6 +105,7 @@ def fear_dca_card(
     spy_decision: RecommendationDecision,
     qqqm_decision: RecommendationDecision,
     image_key: str | None = None,
+    source_label: str = "Yahoo Finance",
 ) -> Card:
     """Build the complete fear-index DCA text card with optional chart image."""
     if generated_at.utcoffset() is None:
@@ -113,7 +114,7 @@ def fear_dca_card(
     lines = [
         f"数据日：{target_session.isoformat()}",
         f"生成时间：{generated_cn:%Y-%m-%d %H:%M} CST",
-        "数据源：Yahoo Finance，复权日线，最近已完成美股交易日",
+        f"数据源：{source_label}，复权日线，最近已完成美股交易日",
         "",
         *_fear_dca_section(
             etf_name="SPY",

@@ -366,6 +366,18 @@ def test_new_commands_route(text: str, intent: BotIntent) -> None:
     assert route(msg(content={"text": text}), ALLOWED) is intent
 
 
+@pytest.mark.parametrize(
+    ("text", "intent"),
+    [
+        ("定投", BotIntent.FEAR_DCA),
+        ("定投规则", BotIntent.FEAR_DCA_RULES),
+    ],
+)
+def test_fear_dca_commands_route_exactly(text: str, intent: BotIntent) -> None:
+    assert route(msg(content={"text": text}), ALLOWED) is intent
+    assert route(msg(content={"text": f"{text} now"}), ALLOWED) is BotIntent.UNKNOWN
+
+
 def test_invalid_mover_window_and_ticker_do_not_route() -> None:
     assert route(msg(content={"text": "异动榜 30"}), ALLOWED) is BotIntent.UNKNOWN
     assert route(msg(content={"text": "监控 BRK.B"}), ALLOWED) is BotIntent.UNKNOWN
@@ -436,6 +448,68 @@ def test_service_replies_help_and_dedupes_repeated_delivery(tmp_path: Path) -> N
     service.handle(message)  # at-least-once 重复投递
     assert len(out.texts) == 1
     assert "指令" in out.texts[0][1] and "持仓" in out.texts[0][1]
+    assert "定投" in out.texts[0][1] and "定投规则" in out.texts[0][1]
+
+
+def test_fear_dca_rules_command_sends_static_card_to_requesting_group(
+    tmp_path: Path,
+) -> None:
+    service, out, _ = make_service(tmp_path)
+    service.handle(
+        msg(
+            message_id="rules",
+            chat_type="group",
+            mentioned=True,
+            content={"text": "@_user_1 定投规则"},
+        )
+    )
+
+    assert len(out.cards) == 1
+    chat_id, card = out.cards[0]
+    assert chat_id == "oc_chat"
+    assert card.title == "恐慌指数定投规则"
+    assert "VIX" in card.body_md and "VXN" in card.body_md
+    assert "3×" in card.body_md and "0×" in card.body_md
+
+
+def test_fear_dca_command_replays_latest_complete_to_requesting_chat_with_fresh_uuid(
+    tmp_path: Path,
+) -> None:
+    service, out, ledger = make_service(tmp_path)
+    stored = Card(
+        CardKind.REPORT,
+        "已存恐慌指数定投观察",
+        "stored body",
+        message_uuid="scheduled-uuid",
+    )
+    assert ledger.save_complete_fear_dca_run(
+        date(2026, 8, 12),
+        source="Yahoo Finance",
+        metrics={"vix": 30.0},
+        decisions={"spy": 1.5},
+        card=stored,
+        chart_status="DEGRADED",
+        send_status="SENT",
+        now=NOW,
+    )
+
+    service.handle(msg(message_id="dca-1", content={"text": "定投"}))
+    service.handle(msg(message_id="dca-2", content={"text": "定投"}))
+
+    assert [chat_id for chat_id, _ in out.cards] == ["oc_chat", "oc_chat"]
+    first, second = (card for _, card in out.cards)
+    assert first.title == stored.title
+    assert first.body_md == stored.body_md
+    assert first.message_uuid not in (None, "scheduled-uuid")
+    assert second.message_uuid not in (None, "scheduled-uuid", first.message_uuid)
+
+
+def test_fear_dca_command_reports_when_no_complete_card_exists(tmp_path: Path) -> None:
+    service, out, _ = make_service(tmp_path)
+    service.handle(msg(message_id="dca-empty", content={"text": "定投"}))
+
+    assert out.cards == []
+    assert "暂无" in out.texts[0][1] and "定投" in out.texts[0][1]
 
 
 def test_service_echoes_open_id_for_stranger(tmp_path: Path) -> None:

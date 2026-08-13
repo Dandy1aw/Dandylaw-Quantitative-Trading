@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -375,6 +375,9 @@ def build_scheduler(
             return None
         return engine.run_extreme_movers_premarket(datetime.now(timezone.utc))
 
+    def fear_dca() -> object:
+        return engine.run_fear_dca(datetime.now(UTC))
+
     def rotation_push() -> object:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
@@ -506,6 +509,9 @@ def build_scheduler(
     extreme_movers_enabled = bool(
         getattr(getattr(settings, "extreme_movers", None), "enabled", False)
     )
+    fear_dca_enabled = bool(
+        getattr(getattr(settings, "fear_dca", None), "enabled", False)
+    )
 
     health = JobHealth()
     sched.add_listener(
@@ -563,6 +569,22 @@ def build_scheduler(
                 timezone=ET,
             ),
             id="extreme_movers_premarket",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+        )
+    if fear_dca_enabled:
+        assert settings is not None
+        fear_dca_settings = settings.fear_dca
+        sched.add_job(
+            runtime.wrap("fear_dca", fear_dca),
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=fear_dca_settings.hour,
+                minute=fear_dca_settings.minute,
+                timezone=ZoneInfo(fear_dca_settings.timezone),
+            ),
+            id="fear_dca",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,

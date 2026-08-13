@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 
 
 log = structlog.get_logger()
-SYMBOLS = ["^VIX", "^VXN", "SPY", "QQQM"]
 _MESSAGE_NAMESPACE = UUID("d107b11c-2cce-4f0e-aed9-f156e98cf4aa")
 
 
@@ -94,12 +93,17 @@ def _send_and_record(
 
 
 def _fail_closed(
-    engine: Engine, target_session: date, now: datetime, error: BaseException
+    engine: Engine,
+    target_session: date,
+    now: datetime,
+    error: BaseException,
+    *,
+    source_label: str,
 ) -> bool:
     error_text = _error_text(error)
     engine.ledger.save_failed_fear_dca_run(
         target_session,
-        source="yfinance",
+        source=source_label,
         error=error_text,
         chart_status="PENDING",
         send_status="PENDING",
@@ -189,6 +193,13 @@ def run(
     if now.tzinfo is None:
         raise ValueError("fear DCA run time must be timezone-aware")
     target_session = last_completed_us_session(now)
+    settings = engine.settings.fear_dca
+    symbols = [
+        settings.vix_symbol,
+        settings.vxn_symbol,
+        settings.spy_symbol,
+        settings.qqqm_symbol,
+    ]
     existing = engine.ledger.fear_dca_run(target_session)
     if existing is not None and existing["status"] == "COMPLETE":
         log.info("fear_dca.complete_skip", session=target_session.isoformat())
@@ -234,18 +245,18 @@ def run(
     daily_source = source if source is not None else YFinanceSource()
     try:
         bars = daily_source.fetch_daily_bars(
-            SYMBOLS,
-            target_session - timedelta(days=220),
+            symbols,
+            target_session - timedelta(days=settings.lookback_calendar_days),
             target_session + timedelta(days=1),
         )
         closes = {
             symbol: _closes_for_symbol(bars, symbol, target_session)
-            for symbol in SYMBOLS
+            for symbol in symbols
         }
-        vix_metrics = calculate_fear_metrics(closes["^VIX"])
-        vxn_metrics = calculate_fear_metrics(closes["^VXN"])
-        spy_metrics = calculate_etf_metrics(closes["SPY"])
-        qqqm_metrics = calculate_etf_metrics(closes["QQQM"])
+        vix_metrics = calculate_fear_metrics(closes[settings.vix_symbol])
+        vxn_metrics = calculate_fear_metrics(closes[settings.vxn_symbol])
+        spy_metrics = calculate_etf_metrics(closes[settings.spy_symbol])
+        qqqm_metrics = calculate_etf_metrics(closes[settings.qqqm_symbol])
         spy_decision = recommend_spy(vix_metrics, spy_metrics)
         qqqm_decision = recommend_qqqm(vxn_metrics, qqqm_metrics)
     except Exception as error:  # noqa: BLE001 - all input failures fail closed
@@ -254,15 +265,21 @@ def run(
             session=target_session.isoformat(),
             error=_error_text(error),
         )
-        return _fail_closed(engine, target_session, now, error)
+        return _fail_closed(
+            engine,
+            target_session,
+            now,
+            error,
+            source_label=settings.source_label,
+        )
 
     image_key: str | None = None
     chart_status = "DEGRADED"
     chart_error: str | None = None
     try:
         image_bytes = render_fear_dca_chart(
-            vix_closes=closes["^VIX"],
-            vxn_closes=closes["^VXN"],
+            vix_closes=closes[settings.vix_symbol],
+            vxn_closes=closes[settings.vxn_symbol],
             vix_metrics=vix_metrics,
             vxn_metrics=vxn_metrics,
             spy_decision=spy_decision,
@@ -289,6 +306,7 @@ def run(
         spy_decision=spy_decision,
         qqqm_decision=qqqm_decision,
         image_key=image_key,
+        source_label=settings.source_label,
     )
     card = dataclasses.replace(
         card,
@@ -296,7 +314,7 @@ def run(
     )
     created = engine.ledger.save_complete_fear_dca_run(
         target_session,
-        source="yfinance",
+        source=settings.source_label,
         metrics=_plain_mapping(
             vix=vix_metrics,
             vxn=vxn_metrics,

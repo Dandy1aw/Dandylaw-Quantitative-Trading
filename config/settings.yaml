@@ -291,6 +291,19 @@ extreme_movers:                   # 全市场个股单日 ±10% 异动榜
   premarket_hour_et: 8
   premarket_minute_et: 0
 
+fear_dca:                         # 恐慌指数定投提醒（只给出倍数，不自动下单）
+  enabled: true                   # 生产启用；按交易日幂等，避免重复推送
+  timezone: Asia/Shanghai         # 固定北京时间，不随美股夏令时漂移
+  hour: 9
+  minute: 30
+  vix_symbol: ^VIX
+  vxn_symbol: ^VXN
+  spy_symbol: SPY
+  qqqm_symbol: QQQM
+  lookback_calendar_days: 220     # 覆盖图表所需的至少 119 个交易日
+  chart_sessions: 60              # 首版图表固定展示 60 个交易日
+  source_label: Yahoo Finance     # 卡片与审计记录展示的数据源名称
+
 feishu_bot:                       # 自建应用机器人交互(需 FEISHU_APP_ID/SECRET)
   enabled: true
   allowed_open_ids: [ou_3953033b90bfd9b808b9309c668bb77c]

@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import pytest
+from conftest import make_test_settings
 
+from quant_signal.config import FearDcaSettings
 from quant_signal.engine import Engine
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind
@@ -60,12 +62,22 @@ class FakeImageNotifier(FakeNotifier):
         return self.image_key
 
 
-def _bars(*, periods: int = 119, target: date = TARGET) -> pd.DataFrame:
+def _bars(
+    *,
+    periods: int = 119,
+    target: date = TARGET,
+    starts: dict[str, float] | None = None,
+) -> pd.DataFrame:
     sessions = pd.bdate_range(end=target, periods=periods, tz="UTC")
     frames: list[pd.DataFrame] = []
-    starts = {"^VIX": 20.0, "^VXN": 30.0, "SPY": 500.0, "QQQM": 200.0}
-    for symbol in SYMBOLS:
-        closes = np.linspace(starts[symbol], starts[symbol] * 1.2, periods)
+    symbol_starts = starts or {
+        "^VIX": 20.0,
+        "^VXN": 30.0,
+        "SPY": 500.0,
+        "QQQM": 200.0,
+    }
+    for symbol, starting_close in symbol_starts.items():
+        closes = np.linspace(starting_close, starting_close * 1.2, periods)
         frame = pd.DataFrame(
             {
                 "open": closes,
@@ -105,10 +117,16 @@ def _set_close(
     return changed
 
 
-def _engine(tmp_path: Path, notifier: FakeNotifier) -> SimpleNamespace:
+def _engine(
+    tmp_path: Path,
+    notifier: FakeNotifier,
+    *,
+    fear_dca: FearDcaSettings | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         ledger=SignalLedger(tmp_path / "signals.db"),
         notifier=notifier,
+        settings=make_test_settings(fear_dca=fear_dca or FearDcaSettings()),
         source=SimpleNamespace(
             fetch_daily_bars=lambda *_args: (_ for _ in ()).throw(
                 AssertionError("engine.source must not be used")
@@ -134,6 +152,43 @@ def test_monday_asia_run_uses_prior_friday_and_220_day_fetch_window(
     assert stored is not None
     assert stored["status"] == "COMPLETE"
     assert len(notifier.cards) == 1
+
+
+def test_pipeline_uses_configured_symbols_lookback_and_source_label(
+    tmp_path: Path,
+) -> None:
+    configured_starts = {
+        "VIX-CFG": 20.0,
+        "VXN-CFG": 30.0,
+        "SPY-CFG": 500.0,
+        "QQQM-CFG": 200.0,
+    }
+    source = FakeSource(_bars(starts=configured_starts))
+    notifier = FakeNotifier()
+    config = FearDcaSettings(
+        vix_symbol="VIX-CFG",
+        vxn_symbol="VXN-CFG",
+        spy_symbol="SPY-CFG",
+        qqqm_symbol="QQQM-CFG",
+        lookback_calendar_days=180,
+        source_label="Configured daily source",
+    )
+    engine = _engine(tmp_path, notifier, fear_dca=config)
+    now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+
+    assert run(engine, now, source=source)
+
+    assert source.calls == [
+        (
+            ["VIX-CFG", "VXN-CFG", "SPY-CFG", "QQQM-CFG"],
+            TARGET - timedelta(days=180),
+            TARGET + timedelta(days=1),
+        )
+    ]
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["source"] == "Configured daily source"
+    assert "Configured daily source" in notifier.cards[0].body_md
 
 
 def test_asia_run_after_us_holiday_uses_prior_open_session(tmp_path: Path) -> None:
@@ -276,6 +331,7 @@ def test_late_failed_alert_delivery_cannot_corrupt_recovered_complete_run(
     engine = SimpleNamespace(
         ledger=SignalLedger(tmp_path / "signals.db"),
         notifier=notifier,
+        settings=make_test_settings(fear_dca=FearDcaSettings()),
         source=SimpleNamespace(),
     )
     notifier.engine = engine
@@ -511,6 +567,7 @@ def test_send_exception_is_recorded_after_complete_persistence(
     engine = SimpleNamespace(
         ledger=ledger,
         notifier=InspectingNotifier(),
+        settings=make_test_settings(fear_dca=FearDcaSettings()),
         source=SimpleNamespace(),
     )
 
