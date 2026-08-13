@@ -65,6 +65,10 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.holding_price_alert.volume_spike_multiple == 4.0
     assert s.holding_price_alert.min_volume_spike_move_pct == 0.010
     assert s.holding_price_alert.cooldown_minutes == 30
+    assert s.holding_price_alert.max_alerts_per_day == 5
+    assert s.holding_price_alert.regular_alert_slots == 4
+    assert s.holding_price_alert.max_alerts_per_ticker_per_day == 2
+    assert s.holding_price_alert.meaningful_upgrade_score == 1.5
     assert s.holding_price_alert.cause_search.enabled is True
     assert s.holding_price_alert.cause_search.command == "codex"
     assert s.holding_price_alert.cause_search.model == "gpt-5.6-terra"
@@ -87,6 +91,11 @@ def test_holding_price_alert_defaults_match_production_thresholds() -> None:
     assert settings.etf_session_pct == 0.060
     assert settings.volume_spike_multiple == 4.0
     assert settings.min_volume_spike_move_pct == 0.010
+
+
+def test_holding_price_alert_regular_slots_cannot_exceed_daily_cap() -> None:
+    with pytest.raises(ValueError, match="regular_alert_slots"):
+        HoldingPriceAlertSettings(max_alerts_per_day=3, regular_alert_slots=4)
 
 
 def test_fear_dca_defaults_define_operational_data_contract() -> None:

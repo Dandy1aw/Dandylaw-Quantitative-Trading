@@ -257,7 +257,10 @@ holding_price_alert:              # 真实持仓分钟级股价异动
   volume_spike_multiple: 4.0
   min_volume_spike_move_pct: 0.010
   cooldown_minutes: 30
-  max_alerts_per_day: 12
+  max_alerts_per_day: 5
+  regular_alert_slots: 4
+  max_alerts_per_ticker_per_day: 2
+  meaningful_upgrade_score: 1.5
   max_tickers: 20
   cause_search:
     enabled: true

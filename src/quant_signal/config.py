@@ -409,9 +409,21 @@ class HoldingPriceAlertSettings(BaseModel):
     volume_spike_multiple: float = Field(default=4.0, gt=1, le=50)
     min_volume_spike_move_pct: float = Field(default=0.010, gt=0, le=0.10)
     cooldown_minutes: int = Field(default=30, ge=5, le=240)
-    max_alerts_per_day: int = Field(default=12, ge=1, le=50)
+    max_alerts_per_day: int = Field(default=5, ge=1, le=50)
+    regular_alert_slots: int = Field(default=4, ge=0, le=50)
+    max_alerts_per_ticker_per_day: int = Field(default=2, ge=1, le=10)
+    meaningful_upgrade_score: float = Field(default=1.5, ge=1.0, le=10.0)
     max_tickers: int = Field(default=20, ge=1, le=100)
     cause_search: PriceMoveCauseSearchSettings = PriceMoveCauseSearchSettings()
+
+    @model_validator(mode="after")
+    def validate_daily_quota_slots(self) -> Self:
+        if self.regular_alert_slots > self.max_alerts_per_day:
+            raise ValueError(
+                "holding_price_alert.regular_alert_slots cannot exceed "
+                "max_alerts_per_day"
+            )
+        return self
 
 
 class ExtremeMoverSettings(BaseModel):

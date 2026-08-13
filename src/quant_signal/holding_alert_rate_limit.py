@@ -169,6 +169,7 @@ def _history_for_ticker(
 def _classify(
     signal: Signal,
     history: Sequence[PriorHoldingAlert],
+    upgrade_score: float,
 ) -> tuple[AlertDisposition | None, SuppressionReason | None, int, float]:
     ticker_history = _history_for_ticker(history, signal.ticker)
     alert_number = len(ticker_history) + 1
@@ -188,7 +189,7 @@ def _classify(
         return None, SuppressionReason.NO_MEANINGFUL_UPGRADE, alert_number, strength
 
     highest_severity = max(alert.severity for alert in ticker_history)
-    if severity > highest_severity and strength >= _MIN_UPGRADE_STRENGTH:
+    if severity > highest_severity and strength >= upgrade_score:
         return AlertDisposition.UPGRADE, None, alert_number, strength
     return None, SuppressionReason.NO_MEANINGFUL_UPGRADE, alert_number, strength
 
@@ -239,6 +240,7 @@ def select_holding_alerts(
     regular_slots: int = 4,
     daily_cap: int = 5,
     per_ticker_cap: int = 2,
+    upgrade_score: float = _MIN_UPGRADE_STRENGTH,
 ) -> tuple[HoldingAlertDecision, ...]:
     """Return one deterministic decision per candidate.
 
@@ -249,6 +251,8 @@ def select_holding_alerts(
     selecting again.
     """
     _validate_quotas(regular_slots, daily_cap, per_ticker_cap)
+    if not _is_valid_strength(upgrade_score) or upgrade_score < 1.0:
+        raise ValueError("upgrade_score must be finite and at least 1.0")
     if any(not isinstance(alert, PriorHoldingAlert) for alert in prior_alerts):
         raise ValueError("prior_alerts must contain PriorHoldingAlert values")
     if any(not isinstance(signal, Signal) for signal in candidates):
@@ -273,6 +277,7 @@ def select_holding_alerts(
             disposition, reason, alert_number, strength = _classify(
                 signal,
                 simulated_history,
+                upgrade_score,
             )
             classified.append(
                 (index, signal, disposition, reason, alert_number, strength)
@@ -294,7 +299,7 @@ def select_holding_alerts(
         elif len(simulated_history) >= daily_cap:
             decision = _decision(
                 signal,
-                None,
+                disposition,
                 False,
                 SuppressionReason.GLOBAL_DAILY_CAP,
                 alert_number,
@@ -302,7 +307,7 @@ def select_holding_alerts(
         elif alert_number > per_ticker_cap:
             decision = _decision(
                 signal,
-                None,
+                disposition,
                 False,
                 SuppressionReason.TICKER_DAILY_CAP,
                 alert_number,
@@ -310,7 +315,7 @@ def select_holding_alerts(
         elif disposition is None:
             decision = _decision(
                 signal,
-                None,
+                disposition,
                 False,
                 reason or SuppressionReason.NO_MEANINGFUL_UPGRADE,
                 alert_number,
@@ -321,7 +326,7 @@ def select_holding_alerts(
         ):
             decision = _decision(
                 signal,
-                None,
+                disposition,
                 False,
                 SuppressionReason.GLOBAL_REGULAR_CAP,
                 alert_number,

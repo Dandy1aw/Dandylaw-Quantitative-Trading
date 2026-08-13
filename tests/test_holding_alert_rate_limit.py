@@ -114,6 +114,17 @@ def test_same_direction_higher_severity_at_1_5_strength_is_upgrade() -> None:
     assert decision.ticker_alert_number == 2
 
 
+def test_upgrade_strength_threshold_can_be_configured() -> None:
+    decision = select_holding_alerts(
+        [_signal("AAA", severity=2, strength=1.5)],
+        [_prior("AAA", severity=1)],
+        upgrade_score=2.0,
+    )[0]
+
+    assert decision.should_send is False
+    assert decision.suppression_reason is SuppressionReason.NO_MEANINGFUL_UPGRADE
+
+
 def test_upgrade_must_beat_highest_severity_across_all_directions() -> None:
     decision = select_holding_alerts(
         [_signal("AAA", severity=2, strength=1.5)],

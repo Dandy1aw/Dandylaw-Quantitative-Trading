@@ -15,12 +15,26 @@ from quant_signal.fear_dca import (
 from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.notifier.briefing_format import (
     BLOCK_REASON_NAMES_ZH as _BLOCK_REASON_NAMES_ZH,
+)
+from quant_signal.notifier.briefing_format import (
     briefing_float as _briefing_float,
+)
+from quant_signal.notifier.briefing_format import (
     briefing_number as _briefing_number,
+)
+from quant_signal.notifier.briefing_format import (
     briefing_percent as _briefing_percent,
+)
+from quant_signal.notifier.briefing_format import (
     industry_name_zh as _industry_name_zh,
+)
+from quant_signal.notifier.briefing_format import (
     market_cap_zh as _market_cap_zh,
+)
+from quant_signal.notifier.briefing_format import (
     sector_name_zh as _sector_name_zh,
+)
+from quant_signal.notifier.briefing_format import (
     usd_yi as _usd_yi,
 )
 from quant_signal.strategies.base import Direction, Signal
@@ -28,18 +42,17 @@ from quant_signal.strategies.base import Direction, Signal
 if TYPE_CHECKING:
     from quant_signal.account import AccountState
     from quant_signal.execution import ExecutionPlan
-    from quant_signal.options_flow import (
-        HoldingOptionFlowSnapshot,
-        OptionContractVolume,
-        OptionFlowChange,
-        OptionFlowSnapshot,
-    )
-    from quant_signal.options_intel import OptionIntel
     from quant_signal.extreme_movers import (
         ExtremeMoverEvent,
         MoverRanking,
         SectorRanking,
     )
+    from quant_signal.options_flow import (
+        HoldingOptionFlowSnapshot,
+        OptionFlowChange,
+        OptionFlowSnapshot,
+    )
+    from quant_signal.options_intel import OptionIntel
 
 _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
@@ -680,8 +693,22 @@ def holding_price_alert_card(signal: Signal) -> Card:
 
     raw_move = extra.get("move_pct", 0.0)
     move = float(raw_move) if isinstance(raw_move, (int, float)) else 0.0
+    alert_labels = {
+        "FIRST": "首次异动",
+        "UPGRADE": "重大升级",
+        "REVERSAL": "方向反转",
+    }
+    alert_kind = str(extra.get("alert_kind") or "FIRST")
+    raw_alert_number = extra.get("ticker_alert_number", 1)
+    alert_number = (
+        int(raw_alert_number)
+        if isinstance(raw_alert_number, (int, float)) and int(raw_alert_number) > 0
+        else 1
+    )
+    alert_label = alert_labels.get(alert_kind, "实时异动")
     identity = CardSection(
         "**异动摘要**\n"
+        f"{alert_label}（当日第 {alert_number} 次）\n"
         f"{signal.ticker} · {extra.get('asset_type', '个股')} · {extra.get('window', '-')}"
         f"{direction} {abs(move):.2%}\n"
         f"现价 {price(signal.price)} · 强度 {severity}/3 · "
