@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 from PIL import Image
 
+from quant_signal import fear_dca_chart as chart_module
 from quant_signal.fear_dca import (
     calculate_etf_metrics,
     calculate_fear_metrics,
@@ -52,7 +54,30 @@ def _render(vix: pd.Series[float], vxn: pd.Series[float]) -> bytes:
     )
 
 
-def test_chart_is_a_deterministic_nonempty_png_with_fixed_dimensions() -> None:
+def test_selected_chart_font_has_distinct_required_cjk_glyphs() -> None:
+    font = chart_module.load_cjk_font(20)
+
+    fingerprints = []
+    for character in "恐慌指数":
+        mask = font.getmask(character, mode="L")
+        fingerprints.append((mask.size, bytes(mask)))
+
+    assert len(set(fingerprints)) == len(fingerprints)
+    assert chart_module.font_supports_required_cjk(font)
+
+
+def test_chart_font_selection_fails_closed_when_no_cjk_font_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    missing_font = str(tmp_path) + "/missing-cjk-font.ttf"
+    monkeypatch.setattr(chart_module, "_CJK_FONT_CANDIDATES", (missing_font,))
+    vix, vxn = _inputs()
+
+    with pytest.raises(RuntimeError, match="CJK font.*missing glyphs"):
+        _render(vix, vxn)
+
+
+def test_chart_is_deterministic_in_same_font_environment_and_fixed_size() -> None:
     vix, vxn = _inputs()
 
     first = _render(vix, vxn)

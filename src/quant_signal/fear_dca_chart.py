@@ -1,4 +1,4 @@
-"""Deterministic Pillow chart for fear-index DCA reminders."""
+"""Pillow chart deterministic for the same inputs, font, and Pillow environment."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ CHART_HEIGHT = 1000
 _SESSIONS = 60
 _MIN_CHART_SESSIONS = _SESSIONS * 2 - 1
 
-_Font: TypeAlias = ImageFont.FreeTypeFont | ImageFont.ImageFont
+_Font: TypeAlias = ImageFont.FreeTypeFont
 _Point: TypeAlias = tuple[float, float]
 
 _BACKGROUND = "#F7F9FC"
@@ -35,6 +35,21 @@ _CLOSE = "#2563EB"
 _MA20 = "#F59E0B"
 _MA60 = "#7C3AED"
 _THRESHOLD = "#DC2626"
+_REQUIRED_CJK = "恐慌指数"
+_CJK_FONT_CANDIDATES = (
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/msyhbd.ttc",
+    "C:/Windows/Fonts/simhei.ttf",
+    "C:/Windows/Fonts/simsun.ttc",
+    "C:/Windows/Fonts/deng.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+)
 
 
 class FearChartSeries(NamedTuple):
@@ -45,21 +60,44 @@ class FearChartSeries(NamedTuple):
     ma60: pd.Series[float]
 
 
-def _font(size: int, *, bold: bool = False) -> _Font:
-    """Load a CJK-capable font where available and fall back safely."""
-    windows = Path("C:/Windows/Fonts")
-    candidates = (
-        windows / ("msyhbd.ttc" if bold else "msyh.ttc"),
-        windows / ("simhei.ttf" if bold else "simsun.ttc"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
-        if bold
-        else Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/System/Library/Fonts/PingFang.ttc"),
+def _glyph_fingerprint(font: _Font, character: str) -> tuple[tuple[int, int], bytes]:
+    mask = font.getmask(character, mode="L")
+    return mask.size, bytes(mask)
+
+
+def font_supports_required_cjk(font: _Font) -> bool:
+    """Return whether required card-title glyphs are distinct and non-replacement."""
+    fingerprints = [_glyph_fingerprint(font, char) for char in _REQUIRED_CJK]
+    if any(
+        width <= 0 or height <= 0 or not pixels
+        for (width, height), pixels in fingerprints
+    ):
+        return False
+    if len(set(fingerprints)) != len(fingerprints):
+        return False
+    replacement = _glyph_fingerprint(font, "\N{REPLACEMENT CHARACTER}")
+    return replacement not in fingerprints
+
+
+def load_cjk_font(size: int) -> _Font:
+    """Load and verify a known CJK font, failing closed when none is usable."""
+    for raw_candidate in _CJK_FONT_CANDIDATES:
+        candidate = Path(raw_candidate)
+        if not candidate.is_file():
+            continue
+        try:
+            font = ImageFont.truetype(str(candidate), size=size)
+        except OSError:
+            continue
+        if font_supports_required_cjk(font):
+            return font
+    raise RuntimeError(
+        "CJK font unavailable; chart rendering stopped to avoid missing glyphs"
     )
-    for candidate in candidates:
-        if candidate.is_file():
-            return ImageFont.truetype(str(candidate), size=size)
-    return ImageFont.load_default(size=size)
+
+
+def _font(size: int) -> _Font:
+    return load_cjk_font(size)
 
 
 def _validated_series(label: str, closes: pd.Series[float]) -> pd.Series[float]:
@@ -309,6 +347,8 @@ def render_fear_dca_chart(
 
     A shorter history may still produce a valid recommendation, but it cannot
     produce this chart and should use the existing text-only degradation path.
+    PNG bytes are deterministic for the same inputs, selected font, and Pillow
+    environment; cross-platform font or Pillow changes may change raster bytes.
     """
     vix = _validated_series("VIX", vix_closes)
     vxn = _validated_series("VXN", vxn_closes)
@@ -319,8 +359,8 @@ def render_fear_dca_chart(
 
     image = Image.new("RGB", (CHART_WIDTH, CHART_HEIGHT), _BACKGROUND)
     draw = ImageDraw.Draw(image)
-    title_font = _font(27, bold=True)
-    panel_title_font = _font(23, bold=True)
+    title_font = _font(27)
+    panel_title_font = _font(23)
     body_font = _font(17)
     small_font = _font(15)
     draw.text(
