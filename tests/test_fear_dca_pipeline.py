@@ -12,12 +12,13 @@ import pandas as pd
 import pytest
 from conftest import make_test_settings
 
+from quant_signal.calendar import trading_sessions_ending
 from quant_signal.config import FearDcaSettings
 from quant_signal.engine import Engine
 from quant_signal.ledger import SignalLedger
 from quant_signal.notifier.base import Card, CardKind
 from quant_signal.pipelines import fear_dca as pipeline
-from quant_signal.pipelines.fear_dca import replay, run
+from quant_signal.pipelines.fear_dca import replay, retry_delivery, run
 
 SYMBOLS = ["^VIX", "^VXN", "SPY", "QQQM"]
 ASIA = ZoneInfo("Asia/Shanghai")
@@ -103,6 +104,19 @@ def _limit_symbol(bars: pd.DataFrame, symbol: str, periods: int) -> pd.DataFrame
     return pd.concat([others, selected]).sort_index()
 
 
+def _limit_symbol_to_sessions(
+    bars: pd.DataFrame, symbol: str, sessions: tuple[date, ...]
+) -> pd.DataFrame:
+    selected = bars.xs(symbol, level="ticker")
+    wanted = pd.DatetimeIndex([pd.Timestamp(session, tz="UTC") for session in sessions])
+    selected = selected.loc[wanted]
+    selected.index = pd.MultiIndex.from_product(
+        [[symbol], selected.index], names=["ticker", "ts"]
+    )
+    others = bars.drop(index=symbol, level="ticker")
+    return pd.concat([others, selected]).sort_index()
+
+
 def _drop_session(bars: pd.DataFrame, symbol: str, session: date) -> pd.DataFrame:
     timestamp = pd.Timestamp(session, tz="UTC")
     return bars.drop(index=(symbol, timestamp))
@@ -114,6 +128,14 @@ def _set_close(
     changed = bars.copy()
     symbol_index = changed.xs(symbol, level="ticker").index
     changed.loc[(symbol, symbol_index[offset]), "close"] = value
+    return changed
+
+
+def _set_session_close(
+    bars: pd.DataFrame, symbol: str, session: date, value: float
+) -> pd.DataFrame:
+    changed = bars.copy()
+    changed.loc[(symbol, pd.Timestamp(session, tz="UTC")), "close"] = value
     return changed
 
 
@@ -274,6 +296,64 @@ def test_recommendation_windows_fail_closed(
         source=source,
     )
     assert engine.ledger.fear_dca_run(TARGET)["status"] == "FAILED"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    ("symbol", "required_sessions"),
+    [("^VIX", 60), ("^VXN", 60), ("SPY", 21), ("QQQM", 21)],
+)
+def test_missing_middle_expected_nyse_session_fails_closed(
+    tmp_path: Path, symbol: str, required_sessions: int
+) -> None:
+    missing = trading_sessions_ending(TARGET, required_sessions)[-10]
+    engine = _engine(tmp_path, FakeNotifier())
+
+    assert not run(
+        engine,
+        datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+        source=FakeSource(_drop_session(_bars(), symbol, missing)),
+    )
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "FAILED"
+    assert symbol in str(stored["error"])
+    assert missing.isoformat() in str(stored["error"])
+
+
+def test_extra_non_nyse_dates_do_not_shift_exact_etf_return_offsets(
+    tmp_path: Path,
+) -> None:
+    bars = _bars()
+    sessions = trading_sessions_ending(TARGET, 21)
+    for offset, session in enumerate(sessions):
+        bars = _set_session_close(bars, "SPY", session, 100.0 + offset)
+        bars = _set_session_close(bars, "QQQM", session, 200.0 + offset)
+    extra = date(2026, 8, 8)  # Saturday inside the return window.
+    bars = _set_session_close(
+        _add_symbol_session(bars, "SPY", extra), "SPY", extra, 9_999.0
+    )
+    bars = _set_session_close(
+        _add_symbol_session(bars, "QQQM", extra), "QQQM", extra, 8_888.0
+    )
+    engine = _engine(tmp_path, FakeNotifier())
+
+    assert run(
+        engine,
+        datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+        source=FakeSource(bars),
+    )
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    metrics = stored["metrics"]
+    assert isinstance(metrics, dict)
+    assert metrics["spy"]["one_session_return"] == pytest.approx(120 / 119 - 1)
+    assert metrics["spy"]["five_session_return"] == pytest.approx(120 / 115 - 1)
+    assert metrics["spy"]["twenty_session_return"] == pytest.approx(120 / 100 - 1)
+    assert metrics["qqqm"]["one_session_return"] == pytest.approx(220 / 219 - 1)
+    assert metrics["qqqm"]["five_session_return"] == pytest.approx(220 / 215 - 1)
+    assert metrics["qqqm"]["twenty_session_return"] == pytest.approx(220 / 200 - 1)
 
 
 @pytest.mark.parametrize("bad_value", [np.nan, np.inf, 0.0])
@@ -490,7 +570,9 @@ def test_complete_session_skips_fetch_and_duplicate_send(tmp_path: Path) -> None
 def test_60_session_recommendation_completes_with_degraded_text_chart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bars = _limit_symbol(_limit_symbol(_bars(), "^VIX", 60), "^VXN", 60)
+    expected = trading_sessions_ending(TARGET, 60)
+    bars = _limit_symbol_to_sessions(_bars(), "^VIX", expected)
+    bars = _limit_symbol_to_sessions(bars, "^VXN", expected)
     notifier = FakeImageNotifier()
     engine = _engine(tmp_path, notifier)
 
@@ -619,7 +701,7 @@ def test_chart_errors_degrade_to_complete_text_card(
     assert notifier.cards[0].image_key is None
 
 
-def test_send_exception_is_recorded_after_complete_persistence(
+def test_send_exception_remains_ambiguous_in_flight_after_complete_persistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(pipeline, "render_fear_dca_chart", lambda **_kwargs: b"png")
@@ -646,8 +728,139 @@ def test_send_exception_is_recorded_after_complete_persistence(
     stored = ledger.fear_dca_run(TARGET)
     assert stored is not None
     assert stored["status"] == "COMPLETE"
-    assert stored["send_status"] == "FAILED"
+    assert stored["send_status"] == "IN_FLIGHT"
     assert stored["send_error"] == "send broke"
+
+
+def test_complete_pending_after_persistence_retries_without_fetch_and_reuses_uuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class IdempotentNotifier(FakeNotifier):
+        supports_message_uuid = True
+
+    notifier = IdempotentNotifier()
+    engine = _engine(tmp_path, notifier)
+    original_claim = engine.ledger.claim_fear_dca_delivery
+    monkeypatch.setattr(
+        engine.ledger,
+        "claim_fear_dca_delivery",
+        lambda *_args, **_kwargs: None,
+    )
+    now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+
+    assert not run(engine, now, source=FakeSource(_bars()))
+    pending = engine.ledger.fear_dca_run(TARGET)
+    assert pending is not None
+    assert pending["send_status"] == "PENDING"
+    pending_card = pending["card"]
+    assert isinstance(pending_card, Card)
+    assert notifier.cards == []
+
+    monkeypatch.setattr(engine.ledger, "claim_fear_dca_delivery", original_claim)
+    monkeypatch.setattr(
+        pipeline,
+        "YFinanceSource",
+        lambda: (_ for _ in ()).throw(AssertionError("retry must not fetch data")),
+    )
+    assert retry_delivery(engine, now + timedelta(minutes=5))
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["send_status"] == "SENT"
+    assert [card.message_uuid for card in notifier.cards] == [
+        pending_card.message_uuid
+    ]
+
+
+def test_definitive_complete_delivery_failure_retries_then_becomes_sent(
+    tmp_path: Path,
+) -> None:
+    class IdempotentNotifier(FakeNotifier):
+        supports_message_uuid = True
+
+    notifier = IdempotentNotifier(succeeds=False)
+    engine = _engine(tmp_path, notifier)
+    now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+
+    assert not run(engine, now, source=FakeSource(_bars()))
+    failed = engine.ledger.fear_dca_run(TARGET)
+    assert failed is not None
+    assert failed["send_status"] == "FAILED"
+    failed_card = failed["card"]
+    assert isinstance(failed_card, Card)
+
+    notifier.succeeds = True
+    assert retry_delivery(engine, now + timedelta(minutes=5))
+    assert [card.message_uuid for card in notifier.cards] == [
+        failed_card.message_uuid,
+        failed_card.message_uuid,
+    ]
+    assert engine.ledger.fear_dca_run(TARGET)["send_status"] == "SENT"  # type: ignore[index]
+
+
+def test_sent_complete_delivery_is_terminal_for_retry(tmp_path: Path) -> None:
+    notifier = FakeNotifier()
+    engine = _engine(tmp_path, notifier)
+    now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    assert run(engine, now, source=FakeSource(_bars()))
+
+    assert not retry_delivery(engine, now + timedelta(minutes=5))
+    assert len(notifier.cards) == 1
+
+
+def test_non_idempotent_complete_ambiguous_delivery_is_not_reclaimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+
+    class AmbiguousNotifier(FakeNotifier):
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            raise KeyboardInterrupt("provider may have accepted")
+
+    notifier = AmbiguousNotifier()
+    engine = _engine(tmp_path, notifier)
+    monkeypatch.setattr(pipeline, "_delivery_now", lambda: delivery_start)
+    with pytest.raises(KeyboardInterrupt):
+        run(
+            engine,
+            datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+            source=FakeSource(_bars()),
+        )
+
+    assert not retry_delivery(engine, delivery_start + timedelta(minutes=11))
+    assert len(notifier.cards) == 1
+    assert engine.ledger.fear_dca_run(TARGET)["send_status"] == "IN_FLIGHT"  # type: ignore[index]
+
+
+def test_idempotent_complete_ambiguous_delivery_reclaims_with_same_uuid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+
+    class CrashOnceNotifier(FakeNotifier):
+        supports_message_uuid = True
+
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            if len(self.cards) == 1:
+                raise KeyboardInterrupt("provider may have accepted")
+            return True
+
+    notifier = CrashOnceNotifier()
+    engine = _engine(tmp_path, notifier)
+    monkeypatch.setattr(pipeline, "_delivery_now", lambda: delivery_start)
+    with pytest.raises(KeyboardInterrupt):
+        run(
+            engine,
+            datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+            source=FakeSource(_bars()),
+        )
+
+    assert retry_delivery(engine, delivery_start + timedelta(minutes=11))
+    assert len(notifier.cards) == 2
+    assert notifier.cards[0].message_uuid == notifier.cards[1].message_uuid
+    assert engine.ledger.fear_dca_run(TARGET)["send_status"] == "SENT"  # type: ignore[index]
 
 
 def test_replay_sends_latest_complete_card_without_fetching(tmp_path: Path) -> None:
@@ -807,7 +1020,16 @@ def test_engine_exposes_run_and_replay_facades(monkeypatch: pytest.MonkeyPatch) 
         "quant_signal.engine.replay_fear_dca_pipeline",
         lambda actual: calls.append(("replay", actual)) or True,
     )
+    monkeypatch.setattr(
+        "quant_signal.engine.retry_fear_dca_delivery_pipeline",
+        lambda actual, at: calls.append(("retry", (actual, at))) or True,
+    )
 
     assert engine.run_fear_dca(now)
+    assert engine.retry_fear_dca_delivery(now)
     assert engine.resend_latest_fear_dca()
-    assert calls == [("run", (engine, now)), ("replay", engine)]
+    assert calls == [
+        ("run", (engine, now)),
+        ("retry", (engine, now)),
+        ("replay", engine),
+    ]

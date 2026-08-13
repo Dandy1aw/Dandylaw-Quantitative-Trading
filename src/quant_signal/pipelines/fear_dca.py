@@ -11,6 +11,7 @@ from uuid import UUID, uuid4, uuid5
 import pandas as pd
 import structlog
 
+from quant_signal.calendar import trading_sessions_ending
 from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.fear_dca import (
     calculate_etf_metrics,
@@ -72,9 +73,22 @@ def _send_and_record(
         delivered = engine.notifier.send(card)
         send_error = None if delivered else "notifier rejected fear DCA card"
     except Exception as error:  # noqa: BLE001 - notifier boundary is persisted
-        delivered = False
         send_error = _error_text(error)
         log.warning("fear_dca.send_failed", error=send_error)
+        updated = engine.ledger.update_fear_dca_delivery(
+            session,
+            expected_status=expected_status,
+            expected_send_status=expected_send_status,
+            expected_claim_token=expected_claim_token,
+            send_error=send_error,
+        )
+        if not updated:
+            log.info(
+                "fear_dca.stale_delivery_update_skipped",
+                session=session.isoformat(),
+                expected_status=expected_status,
+            )
+        return False
     updated = engine.ledger.update_fear_dca_delivery(
         session,
         expected_status=expected_status,
@@ -92,6 +106,46 @@ def _send_and_record(
     return delivered
 
 
+def _claim_and_send(
+    engine: Engine,
+    session: date,
+    card: Card,
+    *,
+    expected_status: str,
+    now: datetime,
+    initial_owner: bool = False,
+) -> bool:
+    supports_idempotency = _supports_provider_idempotency(engine)
+    claim_token = engine.ledger.claim_fear_dca_delivery(
+        session,
+        expected_status=expected_status,
+        now=now,
+        initial_owner=initial_owner,
+        allow_retry=supports_idempotency,
+        allow_expired_reclaim=supports_idempotency,
+    )
+    if claim_token is None:
+        log.info(
+            "fear_dca.delivery_deferred",
+            session=session.isoformat(),
+            status=expected_status,
+            actionable=(
+                "configure an idempotent app notifier or recover manually"
+                if not supports_idempotency
+                else "delivery lease is active or outside provider dedupe window"
+            ),
+        )
+        return False
+    return _send_and_record(
+        engine,
+        session,
+        card,
+        expected_status=expected_status,
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=claim_token,
+    )
+
+
 def _fail_closed(
     engine: Engine,
     target_session: date,
@@ -101,7 +155,7 @@ def _fail_closed(
     source_label: str,
 ) -> bool:
     error_text = _error_text(error)
-    engine.ledger.save_failed_fear_dca_run(
+    created = engine.ledger.save_failed_fear_dca_run(
         target_session,
         source=source_label,
         error=error_text,
@@ -109,9 +163,13 @@ def _fail_closed(
         send_status="PENDING",
         now=now,
     )
+    supports_idempotency = _supports_provider_idempotency(engine)
     claim_token = engine.ledger.claim_failed_fear_dca_delivery(
         target_session,
         now=_delivery_now(),
+        initial_owner=created,
+        allow_retry=supports_idempotency,
+        allow_expired_reclaim=supports_idempotency,
     )
     if claim_token is None:
         log.info("fear_dca.incomplete_duplicate", session=target_session.isoformat())
@@ -200,6 +258,26 @@ def _aligned_chart_closes(
     )
 
 
+def _exact_session_closes(
+    closes: pd.Series[float],
+    *,
+    symbol: str,
+    target_session: date,
+    sessions: int,
+) -> pd.Series[float]:
+    """Select the required NYSE window and reject any missing expected bar."""
+    expected_dates = trading_sessions_ending(target_session, sessions)
+    expected_index = pd.DatetimeIndex(
+        [pd.Timestamp(session, tz="UTC") for session in expected_dates],
+        name=closes.index.name,
+    )
+    missing = expected_index.difference(pd.DatetimeIndex(closes.index))
+    if not missing.empty:
+        missing_dates = ", ".join(stamp.date().isoformat() for stamp in missing)
+        raise ValueError(f"{symbol} is missing expected NYSE sessions: {missing_dates}")
+    return closes.loc[expected_index]
+
+
 def run(
     engine: Engine,
     now: datetime,
@@ -218,8 +296,24 @@ def run(
     ]
     existing = engine.ledger.fear_dca_run(target_session)
     if existing is not None and existing["status"] == "COMPLETE":
-        log.info("fear_dca.complete_skip", session=target_session.isoformat())
-        return True
+        if existing["send_status"] == "SENT":
+            log.info("fear_dca.complete_skip", session=target_session.isoformat())
+            return True
+        existing_card = existing.get("card")
+        if not isinstance(existing_card, Card):
+            log.warning(
+                "fear_dca.complete_delivery_blocked",
+                session=target_session.isoformat(),
+                reason="persisted card is missing",
+            )
+            return False
+        return _claim_and_send(
+            engine,
+            target_session,
+            existing_card,
+            expected_status="COMPLETE",
+            now=_delivery_now(),
+        )
     if (
         existing is not None
         and existing["status"] == "FAILED"
@@ -228,6 +322,8 @@ def run(
         claim_token = engine.ledger.claim_failed_fear_dca_delivery(
             target_session,
             now=_delivery_now(),
+            initial_owner=False,
+            allow_retry=_supports_provider_idempotency(engine),
             allow_expired_reclaim=_supports_provider_idempotency(engine),
         )
         if claim_token is None:
@@ -269,10 +365,38 @@ def run(
             symbol: _closes_for_symbol(bars, symbol, target_session)
             for symbol in symbols
         }
-        vix_metrics = calculate_fear_metrics(closes[settings.vix_symbol])
-        vxn_metrics = calculate_fear_metrics(closes[settings.vxn_symbol])
-        spy_metrics = calculate_etf_metrics(closes[settings.spy_symbol])
-        qqqm_metrics = calculate_etf_metrics(closes[settings.qqqm_symbol])
+        vix_metrics = calculate_fear_metrics(
+            _exact_session_closes(
+                closes[settings.vix_symbol],
+                symbol=settings.vix_symbol,
+                target_session=target_session,
+                sessions=60,
+            )
+        )
+        vxn_metrics = calculate_fear_metrics(
+            _exact_session_closes(
+                closes[settings.vxn_symbol],
+                symbol=settings.vxn_symbol,
+                target_session=target_session,
+                sessions=60,
+            )
+        )
+        spy_metrics = calculate_etf_metrics(
+            _exact_session_closes(
+                closes[settings.spy_symbol],
+                symbol=settings.spy_symbol,
+                target_session=target_session,
+                sessions=21,
+            )
+        )
+        qqqm_metrics = calculate_etf_metrics(
+            _exact_session_closes(
+                closes[settings.qqqm_symbol],
+                symbol=settings.qqqm_symbol,
+                target_session=target_session,
+                sessions=21,
+            )
+        )
         spy_decision = recommend_spy(vix_metrics, spy_metrics)
         qqqm_decision = recommend_qqqm(vxn_metrics, qqqm_metrics)
     except Exception as error:  # noqa: BLE001 - all input failures fail closed
@@ -351,19 +475,55 @@ def run(
     if not created:
         current = engine.ledger.fear_dca_run(target_session)
         if current is not None and current["status"] == "COMPLETE":
-            log.info("fear_dca.complete_race_skip", session=target_session.isoformat())
-            return True
+            current_card = current.get("card")
+            if current["send_status"] == "SENT":
+                log.info(
+                    "fear_dca.complete_race_skip",
+                    session=target_session.isoformat(),
+                )
+                return True
+            if isinstance(current_card, Card):
+                return _claim_and_send(
+                    engine,
+                    target_session,
+                    current_card,
+                    expected_status="COMPLETE",
+                    now=_delivery_now(),
+                )
         log.info(
             "fear_dca.complete_deferred",
             session=target_session.isoformat(),
             reason="incomplete_notice_in_flight",
         )
         return False
-    return _send_and_record(
+    return _claim_and_send(
         engine,
         target_session,
         card,
         expected_status="COMPLETE",
+        now=_delivery_now(),
+        initial_owner=True,
+    )
+
+
+def retry_delivery(engine: Engine, now: datetime) -> bool:
+    """Retry the latest unsent COMPLETE card without refetching market data."""
+    if now.tzinfo is None:
+        raise ValueError("fear DCA retry time must be timezone-aware")
+    run_record = engine.ledger.latest_unsent_complete_fear_dca_run()
+    if run_record is None:
+        log.info("fear_dca.retry_skip", reason="no_unsent_complete_card")
+        return False
+    card = run_record.get("card")
+    if not isinstance(card, Card):
+        log.warning("fear_dca.retry_blocked", reason="persisted card is missing")
+        return False
+    return _claim_and_send(
+        engine,
+        date.fromisoformat(str(run_record["session_date"])),
+        card,
+        expected_status="COMPLETE",
+        now=now,
     )
 
 

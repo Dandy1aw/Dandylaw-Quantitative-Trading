@@ -378,6 +378,9 @@ def build_scheduler(
     def fear_dca() -> object:
         return engine.run_fear_dca(datetime.now(UTC))
 
+    def fear_dca_retry() -> None:
+        engine.retry_fear_dca_delivery(datetime.now(UTC))
+
     def rotation_push() -> object:
         """08:00/15:30 北京时间的补充推送，不用 NYSE 日历门控（服务港股/韩股
         独立于美股假期），工作日过滤已由 CronTrigger 的 day_of_week 处理。"""
@@ -588,6 +591,14 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,
+        )
+        sched.add_job(
+            runtime.wrap("fear_dca_retry", fear_dca_retry),
+            IntervalTrigger(minutes=5),
+            id="fear_dca_retry",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
         )
     sched.add_job(
         runtime.wrap("maintenance", maintenance),

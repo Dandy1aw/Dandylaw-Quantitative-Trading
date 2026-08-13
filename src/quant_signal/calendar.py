@@ -34,5 +34,21 @@ def previous_trading_day(d: date) -> date:
     return cur
 
 
+@lru_cache(maxsize=256)
+def trading_sessions_ending(target: date, count: int) -> tuple[date, ...]:
+    """Return the exact trailing NYSE sessions, including ``target``."""
+    if count < 1:
+        raise ValueError("trading session count must be positive")
+    if not is_trading_day(target):
+        raise ValueError(f"{target.isoformat()} is not an NYSE trading session")
+
+    sessions = [target]
+    current = target
+    while len(sessions) < count:
+        current = previous_trading_day(current)
+        sessions.append(current)
+    return tuple(reversed(sessions))
+
+
 def session_close_utc(d: date) -> datetime | None:
     return _session_closes_for_year(d.year).get(d)

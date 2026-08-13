@@ -630,12 +630,8 @@ class SignalLedger:
         When supplied, ``expected_status`` makes the update a compare-and-set so a
         late FAILED delivery cannot mutate a row superseded by a COMPLETE run.
         """
-        if (
-            expected_status == "FAILED"
-            and expected_send_status == "IN_FLIGHT"
-            and expected_claim_token is None
-        ):
-            raise ValueError("FAILED IN_FLIGHT delivery finalization requires token")
+        if expected_send_status == "IN_FLIGHT" and expected_claim_token is None:
+            raise ValueError("IN_FLIGHT delivery finalization requires token")
         replace_chart_error = not isinstance(chart_error, _Unset)
         chart_error_value = None if isinstance(chart_error, _Unset) else chart_error
         replace_send_error = not isinstance(send_error, _Unset)
@@ -702,14 +698,19 @@ class SignalLedger:
             self._con.commit()
         return cursor.rowcount > 0
 
-    def claim_failed_fear_dca_delivery(
+    def claim_fear_dca_delivery(
         self,
         session: date,
         *,
+        expected_status: str,
         now: datetime,
+        initial_owner: bool = True,
+        allow_retry: bool = False,
         allow_expired_reclaim: bool = False,
     ) -> str | None:
-        """Claim or steal an expired incomplete-notice lease with a fence token."""
+        """Claim a pending/failed delivery or safely steal an expired lease."""
+        if expected_status not in ("FAILED", "COMPLETE"):
+            raise ValueError("fear DCA delivery status must be FAILED or COMPLETE")
         claimed_at = now.astimezone(timezone.utc).isoformat()
         expired_before = (
             now.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
@@ -724,23 +725,53 @@ class SignalLedger:
                 "UPDATE fear_dca_runs"
                 " SET send_status='IN_FLIGHT', delivery_claimed_at=?,"
                 " delivery_claim_token=?"
-                " WHERE session_date=? AND status='FAILED'"
-                " AND (send_status='PENDING' OR (send_status='IN_FLIGHT'"
+                " WHERE session_date=? AND status=?"
+                " AND ((send_status='PENDING' AND"
+                "  (?=1 OR (?=1 AND completed_at > ?)))"
+                " OR (send_status='FAILED' AND ?=1 AND completed_at > ?)"
+                " OR (send_status='IN_FLIGHT'"
                 "  AND ?=1"
                 "  AND delivery_claimed_at IS NOT NULL"
+                "  AND completed_at > ?"
                 "  AND delivery_claimed_at > ?"
                 "  AND delivery_claimed_at <= ?))",
                 (
                     claimed_at,
                     claim_token,
                     session.isoformat(),
+                    expected_status,
+                    int(initial_owner),
+                    int(allow_retry),
+                    provider_window_started_after,
+                    int(allow_retry),
+                    provider_window_started_after,
                     int(allow_expired_reclaim),
+                    provider_window_started_after,
                     provider_window_started_after,
                     expired_before,
                 ),
             )
             self._con.commit()
         return claim_token if cursor.rowcount > 0 else None
+
+    def claim_failed_fear_dca_delivery(
+        self,
+        session: date,
+        *,
+        now: datetime,
+        initial_owner: bool = True,
+        allow_retry: bool = False,
+        allow_expired_reclaim: bool = False,
+    ) -> str | None:
+        """Backward-compatible FAILED delivery claim facade."""
+        return self.claim_fear_dca_delivery(
+            session,
+            expected_status="FAILED",
+            now=now,
+            initial_owner=initial_owner,
+            allow_retry=allow_retry,
+            allow_expired_reclaim=allow_expired_reclaim,
+        )
 
     @staticmethod
     def _fear_dca_run_from_row(row: sqlite3.Row) -> dict[str, object]:
@@ -771,6 +802,15 @@ class SignalLedger:
         with self._lock:
             row = self._con.execute(
                 "SELECT * FROM fear_dca_runs WHERE status = 'COMPLETE'"
+                " ORDER BY session_date DESC LIMIT 1"
+            ).fetchone()
+        return self._fear_dca_run_from_row(row) if row is not None else None
+
+    def latest_unsent_complete_fear_dca_run(self) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM fear_dca_runs"
+                " WHERE status = 'COMPLETE' AND send_status != 'SENT'"
                 " ORDER BY session_date DESC LIMIT 1"
             ).fetchone()
         return self._fear_dca_run_from_row(row) if row is not None else None

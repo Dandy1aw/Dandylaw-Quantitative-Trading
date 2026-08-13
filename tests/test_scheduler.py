@@ -89,9 +89,14 @@ class _FearDcaEngine:
             fear_dca=FearDcaSettings(enabled=enabled),
         )
         self.calls: list[datetime] = []
+        self.retry_calls: list[datetime] = []
 
     def run_fear_dca(self, now: datetime) -> bool:
         self.calls.append(now)
+        return True
+
+    def retry_fear_dca_delivery(self, now: datetime) -> bool:
+        self.retry_calls.append(now)
         return True
 
 
@@ -118,6 +123,14 @@ def test_scheduler_registers_configured_fear_dca_job() -> None:
     assert len(engine.calls) == 1
     assert engine.calls[0].tzinfo is UTC
 
+    retry_job = jobs["fear_dca_retry"]
+    assert retry_job.trigger.interval == timedelta(minutes=5)
+    assert retry_job.max_instances == 1
+    assert retry_job.coalesce is True
+    assert retry_job.func() is None
+    assert len(engine.retry_calls) == 1
+    assert engine.retry_calls[0].tzinfo is UTC
+
 
 def test_scheduler_omits_disabled_fear_dca_job() -> None:
     engine = _FearDcaEngine(enabled=False)
@@ -126,6 +139,7 @@ def test_scheduler_omits_disabled_fear_dca_job() -> None:
     ).get_jobs()
 
     assert "fear_dca" not in {job.id for job in jobs}
+    assert "fear_dca_retry" not in {job.id for job in jobs}
 
 
 def test_scheduler_registers_both_mover_jobs(monkeypatch: pytest.MonkeyPatch) -> None:

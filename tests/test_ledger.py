@@ -1646,3 +1646,166 @@ def test_fear_dca_claim_at_54_minutes_is_within_provider_dedupe_window(
     )
     assert replacement is not None
     assert replacement != old_token
+
+
+def test_complete_delivery_claim_is_token_fenced_and_reclaimable_in_window(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW,
+    )
+    old_token = ledger.claim_fear_dca_delivery(
+        session, expected_status="COMPLETE", now=NOW
+    )
+    assert old_token is not None
+    assert (
+        ledger.claim_fear_dca_delivery(
+            session,
+            expected_status="COMPLETE",
+            now=NOW + timedelta(minutes=1),
+        )
+        is None
+    )
+
+    new_token = ledger.claim_fear_dca_delivery(
+        session,
+        expected_status="COMPLETE",
+        now=NOW + timedelta(minutes=11),
+        allow_expired_reclaim=True,
+    )
+    assert new_token is not None and new_token != old_token
+    assert not ledger.update_fear_dca_delivery(
+        session,
+        expected_status="COMPLETE",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=old_token,
+        send_status="SENT",
+    )
+    assert ledger.update_fear_dca_delivery(
+        session,
+        expected_status="COMPLETE",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=new_token,
+        send_status="SENT",
+    )
+
+
+def test_complete_delivery_failed_state_can_be_claimed_for_retry(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        send_status="FAILED",
+        send_error="provider rejected",
+        now=NOW,
+    )
+
+    token = ledger.claim_fear_dca_delivery(
+        session,
+        expected_status="COMPLETE",
+        now=NOW + timedelta(minutes=5),
+        initial_owner=False,
+        allow_retry=True,
+    )
+
+    assert token is not None
+    claimed = ledger.fear_dca_run(session)
+    assert claimed is not None
+    assert claimed["send_status"] == "IN_FLIGHT"
+
+
+@pytest.mark.parametrize("send_status", ["PENDING", "FAILED"])
+def test_old_ambiguous_complete_delivery_is_not_automatically_claimed(
+    ledger: SignalLedger, send_status: str
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        send_status=send_status,
+        now=NOW,
+    )
+
+    assert (
+        ledger.claim_fear_dca_delivery(
+            session,
+            expected_status="COMPLETE",
+            now=NOW + timedelta(minutes=55),
+            initial_owner=False,
+            allow_retry=True,
+        )
+        is None
+    )
+
+
+def test_reclaims_cannot_extend_complete_provider_window_indefinitely(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW,
+    )
+    assert ledger.claim_fear_dca_delivery(
+        session, expected_status="COMPLETE", now=NOW
+    )
+    for minutes in (11, 22, 33, 44):
+        assert ledger.claim_fear_dca_delivery(
+            session,
+            expected_status="COMPLETE",
+            now=NOW + timedelta(minutes=minutes),
+            initial_owner=False,
+            allow_retry=True,
+            allow_expired_reclaim=True,
+        )
+    assert (
+        ledger.claim_fear_dca_delivery(
+            session,
+            expected_status="COMPLETE",
+            now=NOW + timedelta(minutes=56),
+            initial_owner=False,
+            allow_retry=True,
+            allow_expired_reclaim=True,
+        )
+        is None
+    )
+
+
+def test_latest_unsent_complete_fear_dca_run_ignores_sent_rows(
+    ledger: SignalLedger,
+) -> None:
+    older = date(2026, 8, 11)
+    latest = date(2026, 8, 12)
+    for session, send_status in ((older, "PENDING"), (latest, "SENT")):
+        assert ledger.save_complete_fear_dca_run(
+            session,
+            source="yfinance",
+            metrics={"vix": {"close": 30.0}},
+            decisions={"spy": {"final_multiplier": 1.5}},
+            card=_fear_dca_card(),
+            send_status=send_status,
+            now=NOW,
+        )
+
+    unsent = ledger.latest_unsent_complete_fear_dca_run()
+
+    assert unsent is not None
+    assert unsent["session_date"] == older.isoformat()

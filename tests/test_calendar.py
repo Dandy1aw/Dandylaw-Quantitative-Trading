@@ -1,6 +1,11 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
-from quant_signal.calendar import is_trading_day, previous_trading_day, session_close_utc
+from quant_signal.calendar import (
+    is_trading_day,
+    previous_trading_day,
+    session_close_utc,
+    trading_sessions_ending,
+)
 
 
 def test_weekday_is_trading_day() -> None:
@@ -19,15 +24,25 @@ def test_previous_trading_day_skips_holiday_weekend() -> None:
     assert previous_trading_day(date(2026, 7, 6)) == date(2026, 7, 2)
 
 
+def test_trading_sessions_ending_returns_exact_nyse_window_through_target() -> None:
+    assert trading_sessions_ending(date(2026, 9, 8), 5) == (
+        date(2026, 9, 1),
+        date(2026, 9, 2),
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+        date(2026, 9, 8),
+    )
+
+
 def test_session_close_utc_for_regular_trading_day() -> None:
     assert session_close_utc(date(2026, 7, 6)) == datetime(
-        2026, 7, 6, 20, 0, tzinfo=timezone.utc
+        2026, 7, 6, 20, 0, tzinfo=UTC
     )
 
 
 def test_session_close_utc_for_half_day() -> None:
     assert session_close_utc(date(2026, 11, 27)) == datetime(
-        2026, 11, 27, 18, 0, tzinfo=timezone.utc
+        2026, 11, 27, 18, 0, tzinfo=UTC
     )
 
 
