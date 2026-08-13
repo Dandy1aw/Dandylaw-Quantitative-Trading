@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from io import BytesIO
 from pathlib import Path
-from typing import TypeAlias
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pandas as pd
@@ -21,6 +21,7 @@ from quant_signal.fear_dca import (
 CHART_WIDTH = 1200
 CHART_HEIGHT = 1000
 _SESSIONS = 60
+_MIN_CHART_SESSIONS = _SESSIONS + 1
 
 _Font: TypeAlias = ImageFont.FreeTypeFont | ImageFont.ImageFont
 _Point: TypeAlias = tuple[float, float]
@@ -34,6 +35,14 @@ _CLOSE = "#2563EB"
 _MA20 = "#F59E0B"
 _MA60 = "#7C3AED"
 _THRESHOLD = "#DC2626"
+
+
+class FearChartSeries(NamedTuple):
+    """The exact 60-session closes and moving averages drawn in one panel."""
+
+    closes: pd.Series[float]
+    ma20: pd.Series[float]
+    ma60: pd.Series[float]
 
 
 def _font(size: int, *, bold: bool = False) -> _Font:
@@ -58,13 +67,23 @@ def _validated_series(label: str, closes: pd.Series[float]) -> pd.Series[float]:
         raise TypeError(f"{label} closes must use a DatetimeIndex")
     if not closes.index.is_unique or not closes.index.is_monotonic_increasing:
         raise ValueError(f"{label} closes index must be unique and chronological")
-    if len(closes) < _SESSIONS:
-        raise ValueError(f"{label} closes requires at least 60 sessions")
+    if len(closes) < _MIN_CHART_SESSIONS:
+        raise ValueError(f"{label} closes requires at least 61 sessions for MA60")
     numeric = pd.to_numeric(closes, errors="coerce").astype(float)
     values = numeric.to_numpy(dtype=float)
     if not bool(np.all(np.isfinite(values) & (values > 0.0))):
         raise ValueError(f"{label} closes must contain finite positive values")
     return numeric
+
+
+def prepare_fear_chart_series(closes: pd.Series[float]) -> FearChartSeries:
+    """Prepare exactly 60 display sessions with at least two MA60 points."""
+    validated = _validated_series("fear chart", closes)
+    return FearChartSeries(
+        closes=validated.tail(_SESSIONS),
+        ma20=validated.rolling(window=20, min_periods=20).mean().tail(_SESSIONS),
+        ma60=validated.rolling(window=60, min_periods=60).mean().tail(_SESSIONS),
+    )
 
 
 def _validate_annotations(
@@ -162,9 +181,10 @@ def _draw_panel(
     )
     draw.text((65, panel_top + 20), label, fill=_TEXT, font=title_font)
 
-    window = closes.tail(_SESSIONS)
-    ma20 = closes.rolling(window=20, min_periods=20).mean().tail(_SESSIONS)
-    ma60 = closes.rolling(window=60, min_periods=60).mean().tail(_SESSIONS)
+    prepared = prepare_fear_chart_series(closes)
+    window = prepared.closes
+    ma20 = prepared.ma20
+    ma60 = prepared.ma60
     finite_values = [*window.to_list(), threshold]
     finite_values.extend(float(value) for value in ma20.dropna())
     finite_values.extend(float(value) for value in ma60.dropna())

@@ -13,15 +13,29 @@ from quant_signal.fear_dca import (
     recommend_qqqm,
     recommend_spy,
 )
-from quant_signal.fear_dca_chart import render_fear_dca_chart
+from quant_signal.fear_dca_chart import (
+    prepare_fear_chart_series,
+    render_fear_dca_chart,
+)
 
 
 def _inputs() -> tuple[pd.Series[float], pd.Series[float]]:
-    sessions = pd.bdate_range("2026-05-22", periods=60)
-    steps = np.arange(60, dtype=float)
+    sessions = pd.bdate_range("2026-05-22", periods=61)
+    steps = np.arange(61, dtype=float)
     vix = pd.Series(22.0 + steps * 0.18 + np.sin(steps / 4.0), index=sessions)
     vxn = pd.Series(31.0 + steps * 0.22 + np.cos(steps / 5.0), index=sessions)
     return vix, vxn
+
+
+def test_chart_series_display_60_sessions_with_multiple_ma60_points() -> None:
+    vix, _ = _inputs()
+
+    series = prepare_fear_chart_series(vix)
+
+    assert len(series.closes) == 60
+    assert series.closes.index.equals(vix.tail(60).index)
+    assert series.ma20.notna().sum() == 42
+    assert series.ma60.notna().sum() == 2
 
 
 def _render(vix: pd.Series[float], vxn: pd.Series[float]) -> bytes:
@@ -55,7 +69,7 @@ def test_chart_is_a_deterministic_nonempty_png_with_fixed_dimensions() -> None:
 @pytest.mark.parametrize(
     ("problem", "message"),
     [
-        ("short", "at least 60 sessions"),
+        ("short", "at least 61 sessions"),
         ("misaligned", "must be aligned"),
         ("nonfinite", "finite positive values"),
     ],
@@ -70,9 +84,9 @@ def test_chart_rejects_invalid_or_unaligned_close_series(
     spy_decision = recommend_spy(vix_metrics, etf)
     qqqm_decision = recommend_qqqm(vxn_metrics, etf)
     if problem == "short":
-        vxn = vxn.tail(59)
+        vxn = vxn.tail(60)
     elif problem == "misaligned":
-        vxn.index = pd.bdate_range("2026-05-25", periods=60)
+        vxn.index = pd.bdate_range("2026-05-25", periods=61)
     else:
         vxn.iloc[-3] = np.nan
 
