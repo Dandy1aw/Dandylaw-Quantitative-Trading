@@ -35,6 +35,13 @@ def _return_at(closes: pd.Series, minutes: int) -> float | None:
     return float(closes.iloc[-1]) / reference - 1 if reference > 0 else None
 
 
+def _meets_threshold(value: float, threshold: float) -> bool:
+    magnitude = abs(value)
+    return magnitude >= threshold or math.isclose(
+        magnitude, threshold, rel_tol=1e-12, abs_tol=1e-12
+    )
+
+
 def _tier(score: float) -> int:
     if score >= 2.0:
         return 3
@@ -161,7 +168,7 @@ def evaluate_holding_price_alerts(
         candidates: list[tuple[float, str, float, float]] = []
         for window, move in moves.items():
             threshold = effective_thresholds[window]
-            if move is not None and abs(move) >= threshold:
+            if move is not None and _meets_threshold(move, threshold):
                 candidates.append((abs(move) / threshold, window, move, threshold))
 
         volume_ratio: float | None = None
@@ -175,7 +182,9 @@ def evaluate_holding_price_alerts(
             volume_ratio is not None
             and one_minute_move is not None
             and volume_ratio >= settings.volume_spike_multiple
-            and abs(one_minute_move) >= settings.min_volume_spike_move_pct
+            and _meets_threshold(
+                one_minute_move, settings.min_volume_spike_move_pct
+            )
         ):
             candidates.append(
                 (
@@ -214,6 +223,7 @@ def evaluate_holding_price_alerts(
                     "window": window,
                     "move_pct": move,
                     "threshold_pct": threshold,
+                    "strength_score": score,
                     "severity": tier,
                     "one_minute_pct": moves["1分钟"],
                     "five_minute_pct": moves["5分钟"],

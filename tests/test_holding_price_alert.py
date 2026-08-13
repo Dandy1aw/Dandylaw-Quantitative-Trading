@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_signal.config import HoldingPriceAlertSettings
 from quant_signal.holding_price_alert import (
@@ -44,6 +45,79 @@ def _position(ticker: str = "AAA") -> dict[str, object]:
     }
 
 
+def _threshold_bars(window: str, move: float, *, ticker: str) -> pd.DataFrame:
+    target = round(100.0 * (1.0 + move), 6)
+    if window == "1分钟":
+        closes = [100.0] * 30 + [target]
+    elif window == "5分钟":
+        closes = [100.0] * 26 + [target] * 5
+    elif window == "15分钟":
+        closes = [100.0] * 16 + [target] * 15
+    else:
+        closes = [100.0] + [target] * 30
+    return _bars(closes, ticker=ticker)
+
+
+def _base_threshold_settings() -> HoldingPriceAlertSettings:
+    return HoldingPriceAlertSettings(
+        volatility_sigma_multiple_1m=0.001,
+        volatility_sigma_multiple_5m=0.001,
+        volatility_sigma_multiple_15m=0.001,
+        volatility_sigma_multiple_session=0.001,
+    )
+
+
+@pytest.mark.parametrize(
+    ("ticker", "etf_symbols", "window", "threshold"),
+    [
+        ("AAA", frozenset(), "1分钟", 0.020),
+        ("AAA", frozenset(), "5分钟", 0.040),
+        ("AAA", frozenset(), "15分钟", 0.060),
+        ("AAA", frozenset(), "当日", 0.100),
+        ("SPY", frozenset({"SPY"}), "1分钟", 0.012),
+        ("SPY", frozenset({"SPY"}), "5分钟", 0.025),
+        ("SPY", frozenset({"SPY"}), "15分钟", 0.040),
+        ("SPY", frozenset({"SPY"}), "当日", 0.060),
+    ],
+)
+def test_price_thresholds_do_not_trigger_below_boundary_and_trigger_at_boundary(
+    ticker: str,
+    etf_symbols: frozenset[str],
+    window: str,
+    threshold: float,
+) -> None:
+    now = datetime(2026, 8, 4, 14, 30, tzinfo=UTC)
+    settings = _base_threshold_settings()
+
+    below = detect_holding_price_alerts(
+        _threshold_bars(window, threshold - 0.000001, ticker=ticker),
+        [_position(ticker)],
+        now,
+        settings,
+        etf_symbols,
+    )
+    at_boundary = detect_holding_price_alerts(
+        _threshold_bars(window, threshold, ticker=ticker),
+        [_position(ticker)],
+        now,
+        settings,
+        etf_symbols,
+    )
+
+    assert below == []
+    assert len(at_boundary) == 1
+    signal = at_boundary[0]
+    assert signal.direction.value == "buy"
+    assert signal.extra is not None
+    assert signal.extra["window"] == window
+    assert signal.extra["move_pct"] == pytest.approx(threshold)
+    assert signal.extra["threshold_pct"] == threshold
+    assert signal.extra["strength_score"] == (
+        abs(signal.extra["move_pct"]) / signal.extra["threshold_pct"]
+    )
+    assert signal.extra["severity"] == 1
+
+
 def test_one_minute_stock_spike_triggers_and_card_is_observational() -> None:
     closes = [100.0] * 30 + [102.0]
     bars = _bars(closes)
@@ -70,6 +144,22 @@ def test_one_minute_stock_spike_triggers_and_card_is_observational() -> None:
     assert "alpaca_sip_1m" in card.body_md
     assert "建议买入" not in card.body_md
     assert "SELL 信号" not in card.body_md
+
+
+def test_exact_boundary_triggers_for_non_round_reference_price() -> None:
+    signals = detect_holding_price_alerts(
+        _bars([1.23] * 30 + [1.2546]),
+        [_position()],
+        datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        _base_threshold_settings(),
+        frozenset(),
+    )
+
+    assert len(signals) == 1
+    assert signals[0].extra is not None
+    assert signals[0].extra["window"] == "1分钟"
+    assert signals[0].extra["move_pct"] == pytest.approx(0.020)
+    assert signals[0].extra["threshold_pct"] == 0.020
 
 
 def test_manual_symbol_signal_omits_position_context() -> None:
@@ -107,7 +197,7 @@ def test_adaptive_volatility_threshold_suppresses_a_noisy_stock() -> None:
 
 
 def test_etf_uses_lower_threshold_than_stock() -> None:
-    closes = [100.0] * 30 + [101.1]
+    closes = [100.0] * 30 + [101.2]
     now = datetime(2026, 8, 4, 14, 30, tzinfo=UTC)
     stock = detect_holding_price_alerts(
         _bars(closes), [_position()], now, HoldingPriceAlertSettings(), frozenset()
@@ -125,7 +215,7 @@ def test_etf_uses_lower_threshold_than_stock() -> None:
 
 
 def test_volume_spike_can_trigger_with_a_smaller_price_move() -> None:
-    closes = [100.0] * 30 + [100.8]
+    closes = [100.0] * 30 + [101.0]
     volumes = [10_000.0] * 30 + [60_000.0]
 
     signals = detect_holding_price_alerts(
@@ -139,6 +229,59 @@ def test_volume_spike_can_trigger_with_a_smaller_price_move() -> None:
     assert len(signals) == 1
     assert signals[0].extra is not None
     assert signals[0].extra["window"] == "放量1分钟"
+    assert signals[0].extra["threshold_pct"] == 0.010
+    assert signals[0].extra["strength_score"] == max(
+        signals[0].extra["volume_ratio"] / 4.0,
+        abs(signals[0].extra["move_pct"]) / 0.010,
+    )
+    assert signals[0].extra["severity"] == 2
+
+
+@pytest.mark.parametrize(
+    ("move", "volume_multiple"),
+    [(0.009999, 4.0), (0.010, 3.999)],
+)
+def test_volume_spike_requires_price_and_volume_boundaries(
+    move: float, volume_multiple: float
+) -> None:
+    closes = [100.0] * 30 + [100.0 * (1.0 + move)]
+    volumes = [10_000.0] * 30 + [10_000.0 * volume_multiple]
+
+    signals = detect_holding_price_alerts(
+        _bars(closes, volumes=volumes),
+        [_position()],
+        datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        _base_threshold_settings(),
+        frozenset(),
+    )
+
+    assert signals == []
+
+
+def test_volume_spike_triggers_at_exact_price_and_volume_boundaries() -> None:
+    closes = [100.0] * 30 + [101.0]
+    volumes = [10_000.0] * 30 + [40_000.0]
+
+    signals = detect_holding_price_alerts(
+        _bars(closes, volumes=volumes),
+        [_position()],
+        datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        _base_threshold_settings(),
+        frozenset(),
+    )
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.direction.value == "buy"
+    assert signal.extra is not None
+    assert signal.extra["window"] == "放量1分钟"
+    assert signal.extra["move_pct"] == pytest.approx(0.010)
+    assert signal.extra["threshold_pct"] == 0.010
+    assert signal.extra["strength_score"] == max(
+        signal.extra["volume_ratio"] / 4.0,
+        abs(signal.extra["move_pct"]) / 0.010,
+    )
+    assert signal.extra["severity"] == 1
 
 
 def test_stale_bars_do_not_alert() -> None:
