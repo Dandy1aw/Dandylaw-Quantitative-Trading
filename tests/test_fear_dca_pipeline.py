@@ -306,6 +306,99 @@ def test_late_failed_alert_delivery_cannot_corrupt_recovered_complete_run(
     assert [card.kind for card in notifier.cards] == [CardKind.ALERT, CardKind.REPORT]
 
 
+def test_failed_run_reclaims_expired_crashed_notice_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notifier = FakeNotifier()
+    engine = _engine(tmp_path, notifier)
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+    assert engine.ledger.save_failed_fear_dca_run(
+        TARGET,
+        source="yfinance",
+        error="crashed sender",
+        now=scheduled,
+    )
+    assert engine.ledger.claim_failed_fear_dca_delivery(
+        TARGET, now=delivery_start
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_delivery_now",
+        lambda: delivery_start + timedelta(minutes=3),
+    )
+    bad_source = FakeSource(_drop_session(_bars(), "QQQM", TARGET))
+    assert not run(engine, scheduled + timedelta(minutes=1), source=bad_source)
+    assert len(notifier.cards) == 1
+    assert notifier.cards[0].kind is CardKind.ALERT
+    assert not run(engine, scheduled + timedelta(minutes=2), source=bad_source)
+    assert len(notifier.cards) == 1
+
+
+def test_live_failed_delivery_lease_suppresses_second_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notifier = FakeNotifier()
+    engine = _engine(tmp_path, notifier)
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+    assert engine.ledger.save_failed_fear_dca_run(
+        TARGET,
+        source="yfinance",
+        error="crashed sender",
+        now=scheduled,
+    )
+    assert engine.ledger.claim_failed_fear_dca_delivery(
+        TARGET, now=delivery_start
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_delivery_now",
+        lambda: delivery_start + timedelta(minutes=1),
+    )
+
+    assert not run(
+        engine,
+        scheduled + timedelta(minutes=10),
+        source=FakeSource(_drop_session(_bars(), "QQQM", TARGET)),
+    )
+    assert notifier.cards == []
+
+
+def test_complete_recovery_uses_fresh_delivery_clock_not_scheduled_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    notifier = FakeNotifier()
+    engine = _engine(tmp_path, notifier)
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+    assert engine.ledger.save_failed_fear_dca_run(
+        TARGET,
+        source="yfinance",
+        error="sending now",
+        now=scheduled,
+    )
+    assert engine.ledger.claim_failed_fear_dca_delivery(
+        TARGET, now=delivery_start
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_delivery_now",
+        lambda: delivery_start + timedelta(minutes=1),
+    )
+
+    assert not run(
+        engine,
+        scheduled + timedelta(minutes=10),
+        source=FakeSource(_bars()),
+    )
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "FAILED"
+    assert notifier.cards == []
+
+
 def test_complete_session_skips_fetch_and_duplicate_send(tmp_path: Path) -> None:
     source = FakeSource(_bars())
     notifier = FakeNotifier()

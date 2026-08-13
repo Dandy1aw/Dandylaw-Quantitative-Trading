@@ -1483,7 +1483,8 @@ def test_fear_dca_live_delivery_claim_defers_recovery_until_finalized(
         error="missing target",
         now=NOW,
     )
-    assert ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+    claim_token = ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+    assert claim_token is not None
 
     assert not ledger.save_complete_fear_dca_run(
         session,
@@ -1502,6 +1503,7 @@ def test_fear_dca_live_delivery_claim_defers_recovery_until_finalized(
         session,
         expected_status="FAILED",
         expected_send_status="IN_FLIGHT",
+        expected_claim_token=claim_token,
         send_status="SENT",
         send_error=None,
     )
@@ -1539,3 +1541,42 @@ def test_fear_dca_expired_delivery_claim_allows_recovery(
     assert recovered is not None
     assert recovered["status"] == "COMPLETE"
     assert recovered["delivery_claimed_at"] is None
+
+
+def test_fear_dca_expired_claim_can_be_stolen_and_old_owner_is_fenced(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="missing target",
+        now=NOW,
+    )
+    old_token = ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+    assert old_token is not None
+    assert ledger.claim_failed_fear_dca_delivery(
+        session, now=NOW + timedelta(minutes=1)
+    ) is None
+
+    new_token = ledger.claim_failed_fear_dca_delivery(
+        session, now=NOW + timedelta(minutes=3)
+    )
+    assert new_token is not None
+    assert new_token != old_token
+    assert not ledger.update_fear_dca_delivery(
+        session,
+        expected_status="FAILED",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=old_token,
+        send_status="SENT",
+        send_error=None,
+    )
+    assert ledger.update_fear_dca_delivery(
+        session,
+        expected_status="FAILED",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=new_token,
+        send_status="SENT",
+        send_error=None,
+    )

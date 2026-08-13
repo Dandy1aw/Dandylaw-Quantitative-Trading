@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -31,6 +31,11 @@ log = structlog.get_logger()
 SYMBOLS = ["^VIX", "^VXN", "SPY", "QQQM"]
 
 
+def _delivery_now() -> datetime:
+    """Return a fresh clock reading for short-lived delivery leases."""
+    return datetime.now(UTC)
+
+
 class _DailySource(Protocol):
     def fetch_daily_bars(
         self, tickers: list[str], start: date, end: date
@@ -48,6 +53,7 @@ def _send_and_record(
     *,
     expected_status: str,
     expected_send_status: str | None = None,
+    expected_claim_token: str | None = None,
 ) -> bool:
     try:
         delivered = engine.notifier.send(card)
@@ -60,6 +66,7 @@ def _send_and_record(
         session,
         expected_status=expected_status,
         expected_send_status=expected_send_status,
+        expected_claim_token=expected_claim_token,
         send_status="SENT" if delivered else "FAILED",
         send_error=send_error,
     )
@@ -76,7 +83,7 @@ def _fail_closed(
     engine: Engine, target_session: date, now: datetime, error: BaseException
 ) -> bool:
     error_text = _error_text(error)
-    claimed = engine.ledger.save_failed_fear_dca_run(
+    engine.ledger.save_failed_fear_dca_run(
         target_session,
         source="yfinance",
         error=error_text,
@@ -84,30 +91,25 @@ def _fail_closed(
         send_status="PENDING",
         now=now,
     )
-    if claimed:
-        delivery_claimed = engine.ledger.claim_failed_fear_dca_delivery(
-            target_session,
-            now=now,
-        )
-        if not delivery_claimed:
-            log.info(
-                "fear_dca.stale_incomplete_notice_skipped",
-                session=target_session.isoformat(),
-            )
-            return False
-        card = fear_dca_incomplete_card(
-            target_session=target_session,
-            error=error_text,
-        )
-        _send_and_record(
-            engine,
-            target_session,
-            card,
-            expected_status="FAILED",
-            expected_send_status="IN_FLIGHT",
-        )
-    else:
+    claim_token = engine.ledger.claim_failed_fear_dca_delivery(
+        target_session,
+        now=_delivery_now(),
+    )
+    if claim_token is None:
         log.info("fear_dca.incomplete_duplicate", session=target_session.isoformat())
+        return False
+    card = fear_dca_incomplete_card(
+        target_session=target_session,
+        error=error_text,
+    )
+    _send_and_record(
+        engine,
+        target_session,
+        card,
+        expected_status="FAILED",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=claim_token,
+    )
     return False
 
 
@@ -246,6 +248,7 @@ def run(
         chart_status=chart_status,
         send_status="PENDING",
         chart_error=chart_error,
+        delivery_now=_delivery_now(),
         now=now,
     )
     if not created:

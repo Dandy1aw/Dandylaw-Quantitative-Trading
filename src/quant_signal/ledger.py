@@ -7,6 +7,7 @@ from hashlib import sha256
 import json
 import sqlite3
 import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 20
+_SCHEMA_VERSION = 21
 _FEAR_DCA_DELIVERY_LEASE = timedelta(minutes=2)
 
 _SCHEMA = """
@@ -430,6 +431,7 @@ CREATE TABLE IF NOT EXISTS fear_dca_runs (
     chart_error TEXT,
     send_error TEXT,
     delivery_claimed_at TEXT,
+    delivery_claim_token TEXT,
     completed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fear_dca_runs_latest_complete
@@ -569,11 +571,13 @@ class SignalLedger:
         send_status: str = "PENDING",
         chart_error: str | None = None,
         send_error: str | None = None,
+        delivery_now: datetime | None = None,
         now: datetime,
     ) -> bool:
         """Insert a complete result or supersede the session's failed attempt."""
+        lease_clock = delivery_now if delivery_now is not None else now
         lease_expired_before = (
-            now.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
+            lease_clock.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
         ).isoformat()
         with self._lock:
             cursor = self._con.execute(
@@ -589,6 +593,7 @@ class SignalLedger:
                 " chart_status=excluded.chart_status, send_status=excluded.send_status,"
                 " error=NULL, chart_error=excluded.chart_error,"
                 " send_error=excluded.send_error, delivery_claimed_at=NULL,"
+                " delivery_claim_token=NULL,"
                 " completed_at=excluded.completed_at"
                 " WHERE fear_dca_runs.status != 'COMPLETE'"
                 " AND NOT (fear_dca_runs.status = 'FAILED'"
@@ -618,6 +623,7 @@ class SignalLedger:
         *,
         expected_status: str | None = None,
         expected_send_status: str | None = None,
+        expected_claim_token: str | None = None,
         chart_status: str | None = None,
         send_status: str | None = None,
         chart_error: str | None | _Unset = _UNSET,
@@ -628,6 +634,12 @@ class SignalLedger:
         When supplied, ``expected_status`` makes the update a compare-and-set so a
         late FAILED delivery cannot mutate a row superseded by a COMPLETE run.
         """
+        if (
+            expected_status == "FAILED"
+            and expected_send_status == "IN_FLIGHT"
+            and expected_claim_token is None
+        ):
+            raise ValueError("FAILED IN_FLIGHT delivery finalization requires token")
         replace_chart_error = not isinstance(chart_error, _Unset)
         chart_error_value = None if isinstance(chart_error, _Unset) else chart_error
         replace_send_error = not isinstance(send_error, _Unset)
@@ -658,9 +670,13 @@ class SignalLedger:
                 ", delivery_claimed_at=CASE"
                 " WHEN ? IN ('SENT', 'FAILED') THEN NULL"
                 " ELSE delivery_claimed_at END"
+                ", delivery_claim_token=CASE"
+                " WHEN ? IN ('SENT', 'FAILED') THEN NULL"
+                " ELSE delivery_claim_token END"
                 " WHERE session_date = ?"
                 " AND (? IS NULL OR status = ?)"
-                " AND (? IS NULL OR send_status = ?)",
+                " AND (? IS NULL OR send_status = ?)"
+                " AND (? IS NULL OR delivery_claim_token = ?)",
                 (
                     chart_status,
                     chart_status,
@@ -677,11 +693,14 @@ class SignalLedger:
                     send_status,
                     send_error_value,
                     send_status,
+                    send_status,
                     session.isoformat(),
                     expected_status,
                     expected_status,
                     expected_send_status,
                     expected_send_status,
+                    expected_claim_token,
+                    expected_claim_token,
                 ),
             )
             self._con.commit()
@@ -692,19 +711,26 @@ class SignalLedger:
         session: date,
         *,
         now: datetime,
-    ) -> bool:
-        """Claim the incomplete notice lease before crossing the notifier boundary."""
+    ) -> str | None:
+        """Claim or steal an expired incomplete-notice lease with a fence token."""
         claimed_at = now.astimezone(timezone.utc).isoformat()
+        expired_before = (
+            now.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
+        ).isoformat()
+        claim_token = uuid.uuid4().hex
         with self._lock:
             cursor = self._con.execute(
                 "UPDATE fear_dca_runs"
-                " SET send_status='IN_FLIGHT', delivery_claimed_at=?"
+                " SET send_status='IN_FLIGHT', delivery_claimed_at=?,"
+                " delivery_claim_token=?"
                 " WHERE session_date=? AND status='FAILED'"
-                " AND send_status='PENDING'",
-                (claimed_at, session.isoformat()),
+                " AND (send_status='PENDING' OR (send_status='IN_FLIGHT'"
+                "  AND delivery_claimed_at IS NOT NULL"
+                "  AND delivery_claimed_at <= ?))",
+                (claimed_at, claim_token, session.isoformat(), expired_before),
             )
             self._con.commit()
-        return cursor.rowcount > 0
+        return claim_token if cursor.rowcount > 0 else None
 
     @staticmethod
     def _fear_dca_run_from_row(row: sqlite3.Row) -> dict[str, object]:
@@ -1049,7 +1075,12 @@ class SignalLedger:
             str(row[1])
             for row in self._con.execute("PRAGMA table_info(fear_dca_runs)").fetchall()
         }
-        for column in ("chart_error", "send_error", "delivery_claimed_at"):
+        for column in (
+            "chart_error",
+            "send_error",
+            "delivery_claimed_at",
+            "delivery_claim_token",
+        ):
             if column not in fear_dca_columns:
                 self._con.execute(
                     f"ALTER TABLE fear_dca_runs ADD COLUMN {column} TEXT"
