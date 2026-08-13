@@ -1439,3 +1439,35 @@ def test_fear_dca_delivery_terminal_states_ignore_stale_downgrades(
     assert stored["chart_error"] is None
     assert stored["send_status"] == "SENT"
     assert stored["send_error"] is None
+
+
+def test_fear_dca_delivery_update_can_compare_expected_run_status(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="missing target",
+        now=NOW,
+    )
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW + timedelta(minutes=1),
+    )
+
+    assert not ledger.update_fear_dca_delivery(
+        session,
+        expected_status="FAILED",
+        send_status="SENT",
+        send_error=None,
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["send_status"] == "PENDING"

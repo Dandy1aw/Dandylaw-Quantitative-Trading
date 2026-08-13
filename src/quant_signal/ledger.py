@@ -605,12 +605,17 @@ class SignalLedger:
         self,
         session: date,
         *,
+        expected_status: str | None = None,
         chart_status: str | None = None,
         send_status: str | None = None,
         chart_error: str | None | _Unset = _UNSET,
         send_error: str | None | _Unset = _UNSET,
     ) -> bool:
-        """Update delivery metadata without regressing terminal states."""
+        """Update delivery metadata without regressing terminal or replaced runs.
+
+        When supplied, ``expected_status`` makes the update a compare-and-set so a
+        late FAILED delivery cannot mutate a row superseded by a COMPLETE run.
+        """
         replace_chart_error = not isinstance(chart_error, _Unset)
         chart_error_value = None if isinstance(chart_error, _Unset) else chart_error
         replace_send_error = not isinstance(send_error, _Unset)
@@ -638,7 +643,8 @@ class SignalLedger:
                 " WHEN ? IS NOT NULL AND send_status = 'SENT'"
                 "  AND ? <> send_status THEN send_error"
                 " ELSE ? END"
-                " WHERE session_date = ?",
+                " WHERE session_date = ?"
+                " AND (? IS NULL OR status = ?)",
                 (
                     chart_status,
                     chart_status,
@@ -655,6 +661,8 @@ class SignalLedger:
                     send_status,
                     send_error_value,
                     session.isoformat(),
+                    expected_status,
+                    expected_status,
                 ),
             )
             self._con.commit()

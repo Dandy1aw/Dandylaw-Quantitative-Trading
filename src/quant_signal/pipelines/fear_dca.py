@@ -41,7 +41,13 @@ def _error_text(error: BaseException) -> str:
     return str(error).strip() or type(error).__name__
 
 
-def _send_and_record(engine: Engine, session: date, card: Card) -> bool:
+def _send_and_record(
+    engine: Engine,
+    session: date,
+    card: Card,
+    *,
+    expected_status: str,
+) -> bool:
     try:
         delivered = engine.notifier.send(card)
         send_error = None if delivered else "notifier rejected fear DCA card"
@@ -49,11 +55,18 @@ def _send_and_record(engine: Engine, session: date, card: Card) -> bool:
         delivered = False
         send_error = _error_text(error)
         log.warning("fear_dca.send_failed", error=send_error)
-    engine.ledger.update_fear_dca_delivery(
+    updated = engine.ledger.update_fear_dca_delivery(
         session,
+        expected_status=expected_status,
         send_status="SENT" if delivered else "FAILED",
         send_error=send_error,
     )
+    if not updated:
+        log.info(
+            "fear_dca.stale_delivery_update_skipped",
+            session=session.isoformat(),
+            expected_status=expected_status,
+        )
     return delivered
 
 
@@ -70,11 +83,23 @@ def _fail_closed(
         now=now,
     )
     if claimed:
+        current = engine.ledger.fear_dca_run(target_session)
+        if current is None or current["status"] != "FAILED":
+            log.info(
+                "fear_dca.stale_incomplete_notice_skipped",
+                session=target_session.isoformat(),
+            )
+            return False
         card = fear_dca_incomplete_card(
             target_session=target_session,
             error=error_text,
         )
-        _send_and_record(engine, target_session, card)
+        _send_and_record(
+            engine,
+            target_session,
+            card,
+            expected_status="FAILED",
+        )
     else:
         log.info("fear_dca.incomplete_duplicate", session=target_session.isoformat())
     return False
@@ -220,7 +245,12 @@ def run(
     if not created:
         log.info("fear_dca.complete_race_skip", session=target_session.isoformat())
         return True
-    return _send_and_record(engine, target_session, card)
+    return _send_and_record(
+        engine,
+        target_session,
+        card,
+        expected_status="COMPLETE",
+    )
 
 
 def replay(engine: Engine) -> bool:

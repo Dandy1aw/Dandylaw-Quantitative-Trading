@@ -244,6 +244,56 @@ def test_fixed_data_supersedes_failed_run_and_sends_recommendation(
     assert notifier.cards[-1].kind is CardKind.REPORT
 
 
+def test_late_failed_alert_delivery_cannot_corrupt_recovered_complete_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(pipeline, "render_fear_dca_chart", lambda **_kwargs: b"png")
+    now = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    valid_source = FakeSource(_bars())
+
+    class InterleavingNotifier:
+        def __init__(self) -> None:
+            self.engine: SimpleNamespace | None = None
+            self.cards: list[Card] = []
+            self.recovered = False
+
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            if card.kind is CardKind.ALERT and not self.recovered:
+                self.recovered = True
+                assert self.engine is not None
+                assert not run(
+                    self.engine,
+                    now + timedelta(minutes=1),
+                    source=valid_source,
+                )
+                return True
+            return False
+
+    notifier = InterleavingNotifier()
+    engine = SimpleNamespace(
+        ledger=SignalLedger(tmp_path / "signals.db"),
+        notifier=notifier,
+        source=SimpleNamespace(),
+    )
+    notifier.engine = engine
+
+    assert not run(
+        engine,
+        now,
+        source=FakeSource(_drop_session(_bars(), "QQQM", TARGET)),
+    )
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["send_status"] == "FAILED"
+    assert stored["send_error"] == "notifier rejected fear DCA card"
+    assert isinstance(stored["card"], Card)
+    assert stored["card"].kind is CardKind.REPORT
+    assert [card.kind for card in notifier.cards] == [CardKind.ALERT, CardKind.REPORT]
+
+
 def test_complete_session_skips_fetch_and_duplicate_send(tmp_path: Path) -> None:
     source = FakeSource(_bars())
     notifier = FakeNotifier()
