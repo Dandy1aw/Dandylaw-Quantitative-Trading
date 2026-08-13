@@ -28,8 +28,8 @@ if src_path not in sys.path:
     sys.path.insert(0, src_path)
 
 from quant_signal.config import Settings, load_settings
-from quant_signal.datafeed.base import get_source
 from quant_signal.datafeed.store import BarStore
+from quant_signal.datafeed.yf_source import YFinanceSource
 from quant_signal.engine import Engine
 from quant_signal.feishu_bot import LarkTransport
 from quant_signal.ledger import SignalLedger
@@ -314,7 +314,7 @@ def execute(options: CliOptions, *, now: datetime | None = None) -> int:
         engine = Engine(
             settings,
             runtime.store,
-            get_source(settings),
+            YFinanceSource(),
             runtime.ledger,
             runtime.notifier,
         )

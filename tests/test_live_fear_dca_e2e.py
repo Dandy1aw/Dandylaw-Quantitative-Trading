@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -145,6 +146,78 @@ def test_live_runtime_uses_production_ledger_and_get_notifier(
     assert captured_paths == [tmp_path / "signals.db"]
     assert runtime.notifier is real_notifier
     assert runtime.ledger_path == tmp_path / "signals.db"
+
+
+def test_default_execute_uses_yahoo_source_without_alpaca_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts import live_fear_dca_e2e as script
+
+    target = date(2026, 8, 12)
+    captured_sources: list[object] = []
+
+    class FakeStore:
+        def close(self) -> None:
+            pass
+
+    class FakeLedger:
+        def fear_dca_run(self, _session: date) -> dict[str, object]:
+            return {
+                "status": "COMPLETE",
+                "chart_status": "UPLOADED",
+                "send_status": "SENT",
+                "error": None,
+                "chart_error": None,
+                "send_error": None,
+                "card": Card(CardKind.REPORT, "report", "body"),
+            }
+
+    class FakeYahooSource:
+        pass
+
+    class FakeEngine:
+        def __init__(
+            self,
+            _settings: object,
+            _store: object,
+            source: object,
+            _ledger: object,
+            _notifier: object,
+        ) -> None:
+            captured_sources.append(source)
+
+        def run_fear_dca(self, _now: datetime) -> bool:
+            return True
+
+    settings = SimpleNamespace(
+        data_source="alpaca",
+        alpaca_key="",
+        alpaca_secret="",
+        db_path=tmp_path,
+        fear_dca=SimpleNamespace(timezone="Asia/Shanghai"),
+    )
+    runtime = SimpleNamespace(
+        store=FakeStore(),
+        ledger=FakeLedger(),
+        notifier=script.RecordingNotifier(),
+        ledger_path=Path(":memory:"),
+        store_path=None,
+    )
+    monkeypatch.setattr(script, "setup_logging", lambda: None)
+    monkeypatch.setattr(script, "load_settings", lambda: settings)
+    monkeypatch.setattr(script, "build_runtime", lambda *_args: runtime)
+    monkeypatch.setattr(script, "last_completed_us_session", lambda _now: target)
+    monkeypatch.setattr(script, "Engine", FakeEngine)
+    monkeypatch.setattr(script, "YFinanceSource", FakeYahooSource, raising=False)
+
+    result = script.execute(
+        script.CliOptions(),
+        now=datetime(2026, 8, 13, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    assert result == 0
+    assert len(captured_sources) == 1
+    assert isinstance(captured_sources[0], FakeYahooSource)
 
 
 def test_run_report_includes_delivery_and_card_identity() -> None:
