@@ -631,6 +631,40 @@ def test_non_idempotent_notifier_does_not_steal_expired_failed_delivery(
     assert stored["send_status"] == "IN_FLIGHT"
 
 
+def test_idempotent_notifier_does_not_reclaim_after_provider_dedupe_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+
+    class AmbiguousIdempotentNotifier(FakeNotifier):
+        supports_message_uuid = True
+
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            raise KeyboardInterrupt("provider may have accepted")
+
+    notifier = AmbiguousIdempotentNotifier()
+    engine = _engine(tmp_path, notifier)
+    monkeypatch.setattr(pipeline, "_delivery_now", lambda: delivery_start)
+    with pytest.raises(KeyboardInterrupt):
+        run(
+            engine,
+            scheduled,
+            source=FakeSource(_drop_session(_bars(), "QQQM", TARGET)),
+        )
+
+    monkeypatch.setattr(
+        pipeline, "_delivery_now", lambda: delivery_start + timedelta(minutes=61)
+    )
+    assert not run(engine, scheduled + timedelta(minutes=1), source=FakeSource(_bars()))
+    assert len(notifier.cards) == 1
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "FAILED"
+    assert stored["send_status"] == "IN_FLIGHT"
+
+
 def test_replay_returns_false_when_no_complete_card(tmp_path: Path) -> None:
     notifier = FakeNotifier()
     assert not replay(_engine(tmp_path, notifier))

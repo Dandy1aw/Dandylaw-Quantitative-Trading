@@ -1604,3 +1604,45 @@ def test_fear_dca_expired_claim_can_be_stolen_and_old_owner_is_fenced(
         send_status="SENT",
         send_error=None,
     )
+
+
+@pytest.mark.parametrize("age_minutes", [55, 61])
+def test_fear_dca_claim_older_than_provider_dedupe_window_is_not_stolen(
+    ledger: SignalLedger, age_minutes: int
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="ambiguous delivery",
+        now=NOW,
+    )
+    assert ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+
+    assert ledger.claim_failed_fear_dca_delivery(
+        session,
+        now=NOW + timedelta(minutes=age_minutes),
+        allow_expired_reclaim=True,
+    ) is None
+
+
+def test_fear_dca_claim_at_54_minutes_is_within_provider_dedupe_window(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="ambiguous delivery",
+        now=NOW,
+    )
+    old_token = ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+    assert old_token is not None
+
+    replacement = ledger.claim_failed_fear_dca_delivery(
+        session,
+        now=NOW + timedelta(minutes=54),
+        allow_expired_reclaim=True,
+    )
+    assert replacement is not None
+    assert replacement != old_token

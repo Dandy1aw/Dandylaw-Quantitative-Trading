@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
 _SCHEMA_VERSION = 21
+# Lark de-duplicates message UUIDs for one hour. Reclaim only after the normal
+# notifier retry/request window, with a five-minute safety margin before the
+# provider guarantee expires. Older ambiguous sends require manual recovery.
 _FEAR_DCA_DELIVERY_LEASE = timedelta(minutes=10)
+_FEAR_DCA_PROVIDER_DEDUPE_RECLAIM_LIMIT = timedelta(minutes=55)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -710,6 +714,10 @@ class SignalLedger:
         expired_before = (
             now.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
         ).isoformat()
+        provider_window_started_after = (
+            now.astimezone(timezone.utc)
+            - _FEAR_DCA_PROVIDER_DEDUPE_RECLAIM_LIMIT
+        ).isoformat()
         claim_token = uuid.uuid4().hex
         with self._lock:
             cursor = self._con.execute(
@@ -720,12 +728,14 @@ class SignalLedger:
                 " AND (send_status='PENDING' OR (send_status='IN_FLIGHT'"
                 "  AND ?=1"
                 "  AND delivery_claimed_at IS NOT NULL"
+                "  AND delivery_claimed_at > ?"
                 "  AND delivery_claimed_at <= ?))",
                 (
                     claimed_at,
                     claim_token,
                     session.isoformat(),
                     int(allow_expired_reclaim),
+                    provider_window_started_after,
                     expired_before,
                 ),
             )
