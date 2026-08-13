@@ -91,7 +91,7 @@ def _finite_absolute(value: object) -> float | None:
 def _prior_alerts_from_rows(
     rows: Sequence[Mapping[str, object]],
     fallback_time: datetime,
-) -> tuple[list[PriorHoldingAlert], set[str], list[str]]:
+) -> tuple[list[PriorHoldingAlert], set[str], bool, list[str]]:
     """Conservatively rebuild successful daily quota history.
 
     Every returned ledger row consumes a global slot.  Fields that are not
@@ -104,11 +104,13 @@ def _prior_alerts_from_rows(
 
     alerts: list[PriorHoldingAlert] = []
     blocked_tickers: set[str] = set()
+    history_uncertain = False
     issues: list[str] = []
     for index, row in enumerate(rows):
         raw_ticker = row.get("ticker")
-        ticker = str(raw_ticker).strip().upper() if raw_ticker is not None else ""
+        ticker = raw_ticker.strip().upper() if isinstance(raw_ticker, str) else ""
         if not ticker:
+            history_uncertain = True
             ticker = f"__INVALID_HISTORY_{index:04d}"
             issues.append(f"row[{index}]:invalid_ticker")
 
@@ -202,7 +204,7 @@ def _prior_alerts_from_rows(
         )
 
     alerts.sort(key=lambda alert: alert.pushed_at)
-    return alerts, blocked_tickers, issues
+    return alerts, blocked_tickers, history_uncertain, issues
 
 
 def _with_decision_audit(
@@ -318,9 +320,11 @@ def run(engine: Engine, now: datetime) -> None:
         STRATEGY_ID,
         day_start,
     )
-    history, blocked_tickers, history_issues = _prior_alerts_from_rows(
-        history_rows,
-        day_start,
+    history, blocked_tickers, history_uncertain, history_issues = (
+        _prior_alerts_from_rows(
+            history_rows,
+            day_start,
+        )
     )
     pushed = 0
     send_failed = 0
@@ -332,6 +336,25 @@ def run(engine: Engine, now: datetime) -> None:
     remaining: list[Signal] = []
     history_count_by_ticker = Counter(alert.ticker for alert in history)
     for signal in signals:
+        if history_uncertain:
+            severity, strength = _candidate_snapshot(signal)
+            decision = HoldingAlertDecision(
+                signal=signal,
+                disposition=None,
+                should_send=False,
+                suppression_reason=SuppressionReason.HISTORY_UNCERTAIN,
+                ticker_alert_number=history_count_by_ticker[signal.ticker] + 1,
+                severity=severity,
+                strength_score=strength,
+            )
+            audited = _with_decision_audit(
+                decision,
+                suppression_reason=SuppressionReason.HISTORY_UNCERTAIN,
+                history_issue="unrecoverable_history_ticker",
+            )
+            engine.ledger.insert(audited, pushed=False, now=now)
+            suppression_counts[SuppressionReason.HISTORY_UNCERTAIN.value] += 1
+            continue
         if signal.ticker not in blocked_tickers:
             remaining.append(signal)
             continue
@@ -353,6 +376,7 @@ def run(engine: Engine, now: datetime) -> None:
         engine.ledger.insert(audited, pushed=False, now=now)
         suppression_counts[SuppressionReason.TICKER_DAILY_CAP.value] += 1
 
+    delivery_attempts = 0
     while remaining:
         decisions = select_holding_alerts(
             remaining,
@@ -362,11 +386,24 @@ def run(engine: Engine, now: datetime) -> None:
             per_ticker_cap=settings.max_alerts_per_ticker_per_day,
             upgrade_score=settings.meaningful_upgrade_score,
         )
+        if delivery_attempts >= settings.max_alerts_per_day:
+            for capped_decision in decisions:
+                audited = _with_decision_audit(
+                    capped_decision,
+                    suppression_reason=SuppressionReason.DELIVERY_ATTEMPT_CAP,
+                )
+                engine.ledger.insert(audited, pushed=False, now=now)
+                suppression_counts[
+                    SuppressionReason.DELIVERY_ATTEMPT_CAP.value
+                ] += 1
+            remaining.clear()
+            break
+        attempt_budget = settings.max_alerts_per_day - delivery_attempts
         newly_approved = [
             item.signal
             for item in decisions
             if item.should_send and id(item.signal) not in researched_signal_ids
-        ]
+        ][:attempt_budget]
         if newly_approved:
             researched_signal_ids.update(id(signal) for signal in newly_approved)
             seed_news = _recent_news(
@@ -407,6 +444,7 @@ def run(engine: Engine, now: datetime) -> None:
             audited = replace(audited, extra=extra)
 
         send_error: str | None = None
+        delivery_attempts += 1
         try:
             delivered = engine.notifier.send(holding_price_alert_card(audited))
             if not delivered:
@@ -454,6 +492,7 @@ def run(engine: Engine, now: datetime) -> None:
         suppressed=sum(suppression_counts.values()),
         suppression_reasons=dict(suppression_counts),
         send_failed=send_failed,
+        delivery_attempts=delivery_attempts,
         history_reconstruction_issues=history_issues,
         feed=str(bars.attrs.get("feed", "unknown")),
     )

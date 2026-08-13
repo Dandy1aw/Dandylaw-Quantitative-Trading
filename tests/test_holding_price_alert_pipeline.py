@@ -467,7 +467,7 @@ def test_history_parser_fails_closed_for_malformed_direction_and_extra() -> None
         }
     ]
 
-    history, blocked_tickers, issues = _prior_alerts_from_rows(
+    history, blocked_tickers, history_uncertain, issues = _prior_alerts_from_rows(
         rows, datetime(2026, 8, 4, 4, tzinfo=UTC)
     )
 
@@ -475,6 +475,7 @@ def test_history_parser_fails_closed_for_malformed_direction_and_extra() -> None
     assert history[0].severity == 3
     assert history[0].strength_score >= 1.5
     assert blocked_tickers == {"AAA"}
+    assert history_uncertain is False
     assert issues
 
 
@@ -502,7 +503,7 @@ def test_history_parser_fails_closed_for_malformed_direction_and_extra() -> None
 def test_history_parser_conservatively_accepts_extreme_json_numbers(
     extra: dict[str, object],
 ) -> None:
-    history, blocked_tickers, issues = _prior_alerts_from_rows(
+    history, blocked_tickers, history_uncertain, issues = _prior_alerts_from_rows(
         [
             {
                 "ticker": "AAA",
@@ -518,6 +519,7 @@ def test_history_parser_conservatively_accepts_extreme_json_numbers(
     assert len(history) == 1
     assert history[0].strength_score == 1.5
     assert blocked_tickers == set()
+    assert history_uncertain is False
     assert any("conservative_strength" in issue for issue in issues)
 
 
@@ -534,3 +536,95 @@ def test_pipeline_does_not_crash_on_extreme_valid_history_number(
 
     assert engine.ledger.inserted[-1][1] is True
     assert engine.ledger.inserted[-1][0].extra["ticker_alert_number"] == 1
+
+
+@pytest.mark.parametrize("ticker", ["", None, 123])
+def test_unrecoverable_history_ticker_marks_global_history_uncertain(
+    ticker: object,
+) -> None:
+    history, blocked_tickers, history_uncertain, issues = _prior_alerts_from_rows(
+        [
+            {
+                "ticker": ticker,
+                "direction": "buy",
+                "pushed_at": "2026-08-04T14:00:00+00:00",
+                "extra": {"severity": 1, "strength_score": 1.0},
+                "extra_valid": True,
+            }
+        ],
+        datetime(2026, 8, 4, 4, tzinfo=UTC),
+    )
+
+    assert len(history) == 1
+    assert blocked_tickers == set()
+    assert history_uncertain is True
+    assert any("invalid_ticker" in issue for issue in issues)
+
+
+def test_pipeline_fails_closed_for_all_candidates_when_history_ticker_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _Engine(_bars(102.0), [_position()], cause_search=True)
+    engine.ledger.history = [
+        {
+            "ticker": "",
+            "direction": "buy",
+            "pushed_at": "2026-08-04T14:00:00+00:00",
+            "extra": {"severity": 1, "strength_score": 1.0},
+            "extra_valid": True,
+        }
+    ]
+    _patch_candidates(monkeypatch, [_candidate("A"), _candidate("B")])
+    research_calls: list[list[str]] = []
+
+    def fake_research(signals, settings, *, now, seed_news):  # type: ignore[no-untyped-def]
+        research_calls.append([signal.ticker for signal in signals])
+        return {}
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.holding_price_alert.research_price_move_causes",
+        fake_research,
+    )
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert engine.notifier.cards == []
+    assert research_calls == []
+    assert len(engine.ledger.inserted) == 2
+    assert all(not pushed for _, pushed in engine.ledger.inserted)
+    assert all(
+        signal.extra["suppression_reason"] == "HISTORY_UNCERTAIN"
+        and "history_reconstruction_reason" in signal.extra
+        for signal, _ in engine.ledger.inserted
+    )
+
+
+def test_pipeline_caps_failed_delivery_attempts_and_audits_every_candidate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _Engine(_bars(102.0), [_position()], cause_search=True)
+    engine.notifier = _Notifier([False] * 20)
+    candidates = [_candidate(f"T{i:02d}", strength=2.0 - i / 100) for i in range(20)]
+    _patch_candidates(monkeypatch, candidates)
+    research_calls: list[list[str]] = []
+
+    def fake_research(signals, settings, *, now, seed_news):  # type: ignore[no-untyped-def]
+        research_calls.append([signal.ticker for signal in signals])
+        return {}
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.holding_price_alert.research_price_move_causes",
+        fake_research,
+    )
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert len(engine.notifier.cards) == 5
+    assert len(research_calls) <= 5
+    assert len(engine.ledger.inserted) == 20
+    assert len({signal.ticker for signal, _ in engine.ledger.inserted}) == 20
+    assert all(not pushed for _, pushed in engine.ledger.inserted)
+    capped = [
+        signal
+        for signal, _ in engine.ledger.inserted
+        if signal.extra.get("suppression_reason") == "DELIVERY_ATTEMPT_CAP"
+    ]
+    assert len(capped) == 15
