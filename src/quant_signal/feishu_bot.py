@@ -1096,6 +1096,39 @@ class LarkTransport:
             receive_id_type=receive_id_type,
         )
 
+    def upload_image(self, image_bytes: bytes) -> str:
+        from io import BytesIO
+
+        from lark_oapi.api.im.v1 import (
+            CreateImageRequest,
+            CreateImageRequestBody,
+        )
+
+        request = (
+            CreateImageRequest.builder()
+            .request_body(
+                CreateImageRequestBody.builder()
+                .image_type("message")
+                .image(BytesIO(image_bytes))
+                .build()
+            )
+            .build()
+        )
+        try:
+            response = self._client.im.v1.image.create(request)
+        except Exception as error:
+            raise RuntimeError(f"Feishu image upload failed: {error}") from error
+        if not response.success():
+            raise RuntimeError(
+                f"Feishu image upload failed: {response.code} {response.msg}"
+            )
+        image_key = response.data.image_key if response.data is not None else None
+        if not image_key:
+            raise RuntimeError(
+                "Feishu image upload succeeded but no image_key was returned"
+            )
+        return str(image_key)
+
     def download_image(self, message_id: str, image_key: str) -> bytes:
         from lark_oapi.api.im.v1 import GetMessageResourceRequest
 

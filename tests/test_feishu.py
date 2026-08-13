@@ -1,12 +1,16 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
-
 from conftest import make_test_settings
+
 from quant_signal.notifier.base import Card, CardKind, CardSection, ConsoleNotifier
 from quant_signal.notifier.cards import alert_card, signal_card
-from quant_signal.notifier.feishu import FeishuNotifier, _to_feishu_payload, get_notifier
+from quant_signal.notifier.feishu import (
+    FeishuNotifier,
+    _to_feishu_payload,
+    get_notifier,
+)
 from quant_signal.strategies.base import Direction, Signal
 
 
@@ -17,7 +21,7 @@ def make_signal() -> Signal:
         price=102.0,
         reason="突破20日高点",
         strategy_id="breakout_20d",
-        ts=datetime(2026, 7, 6, 14, 30, tzinfo=timezone.utc),
+        ts=datetime(2026, 7, 6, 14, 30, tzinfo=UTC),
         suggested_weight=0.33,
     )
 
@@ -79,6 +83,24 @@ class FakeCardSender:
         return self.results.pop(0) if self.results else True
 
 
+class FakeImageCardSender(FakeCardSender):
+    def __init__(
+        self,
+        image_key: str = "img_v2_chart",
+        error: RuntimeError | None = None,
+    ) -> None:
+        super().__init__()
+        self.image_key = image_key
+        self.error = error
+        self.uploads: list[bytes] = []
+
+    def upload_image(self, image_bytes: bytes) -> str:
+        self.uploads.append(image_bytes)
+        if self.error is not None:
+            raise self.error
+        return self.image_key
+
+
 def test_app_notifier_sends_to_open_id_with_prefix_detection() -> None:
     from quant_signal.notifier.feishu import FeishuAppNotifier
 
@@ -91,6 +113,30 @@ def test_app_notifier_sends_to_open_id_with_prefix_detection() -> None:
     group_sender = FakeCardSender()
     FeishuAppNotifier(group_sender, "oc_group456").send(alert_card("t", "b"))
     assert group_sender.sent[0][1] == "chat_id"
+
+
+def test_app_notifier_upload_image_passes_bytes_through_without_sending() -> None:
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    sender = FakeImageCardSender()
+    notifier = FeishuAppNotifier(sender, "ou_owner123")
+
+    assert notifier.upload_image(b"\x89PNG chart") == "img_v2_chart"
+    assert sender.uploads == [b"\x89PNG chart"]
+    assert sender.sent == []
+
+
+def test_app_notifier_upload_error_does_not_send_a_card() -> None:
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    sender = FakeImageCardSender(error=RuntimeError("upload denied"))
+    notifier = FeishuAppNotifier(sender, "ou_owner123")
+
+    with pytest.raises(RuntimeError, match="upload denied"):
+        notifier.upload_image(b"chart")
+
+    assert sender.uploads == [b"chart"]
+    assert sender.sent == []
 
 
 def test_app_notifier_retries_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -141,6 +187,50 @@ def test_feishu_renders_structured_sections_as_separate_divs() -> None:
         sections=(CardSection("账户"), CardSection("计划")),
     )
     payload = _to_feishu_payload(card)
-    elements = payload["card"]["elements"]  # type: ignore[index]
-    divs = [element for element in elements if element["tag"] == "div"]  # type: ignore[index]
-    assert [div["text"]["content"] for div in divs] == ["账户", "计划"]  # type: ignore[index]
+    elements = payload["card"]["elements"]
+    divs = [element for element in elements if element["tag"] == "div"]
+    assert [div["text"]["content"] for div in divs] == ["账户", "计划"]
+
+
+def test_feishu_card_includes_image_after_first_text_when_key_exists() -> None:
+    card = Card(
+        kind=CardKind.REPORT,
+        title="Fear DCA",
+        body_md="identity\nrecommendation",
+        sections=(CardSection("identity"), CardSection("recommendation")),
+        image_key="img_v2_fear_chart",
+    )
+
+    elements = _to_feishu_payload(card)["card"]["elements"]
+
+    assert [element["tag"] for element in elements] == [
+        "div",
+        "img",
+        "hr",
+        "div",
+    ]
+    assert elements[1] == {
+        "tag": "img",
+        "img_key": "img_v2_fear_chart",
+        "alt": {"tag": "plain_text", "content": "Fear index chart"},
+    }
+
+
+def test_feishu_card_without_image_key_keeps_existing_elements() -> None:
+    card = Card(
+        kind=CardKind.REPORT,
+        title="Text only",
+        body_md="identity\nrecommendation",
+        sections=(CardSection("identity"), CardSection("recommendation")),
+    )
+
+    elements = _to_feishu_payload(card)["card"]["elements"]
+
+    assert elements == [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "identity"}},
+        {"tag": "hr"},
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": "recommendation"},
+        },
+    ]

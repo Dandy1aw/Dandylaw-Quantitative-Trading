@@ -13,6 +13,7 @@ from quant_signal.feishu_bot import (
     BotIntent,
     BotMessage,
     FeishuBotService,
+    LarkTransport,
     parse_image_key,
     parse_text,
     route,
@@ -144,6 +145,109 @@ def test_feishu_proxy_is_scoped_to_sdk_http_and_websocket(
     assert lark_ws._ws_connect_kwargs() == {
         "proxy": "http://127.0.0.1:7890"
     }
+
+
+def test_lark_transport_uploads_message_image_bytes_once() -> None:
+    from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageResponse
+
+    class FakeImageApi:
+        def __init__(self) -> None:
+            self.requests: list[CreateImageRequest] = []
+            self.uploaded = b""
+
+        def create(self, request: CreateImageRequest) -> CreateImageResponse:
+            self.requests.append(request)
+            body = request.request_body
+            assert body is not None
+            assert body.image_type == "message"
+            assert body.image is not None
+            self.uploaded = body.image.read()
+            return CreateImageResponse(
+                {"code": 0, "msg": "ok", "data": {"image_key": "img_v2_chart"}}
+            )
+
+    image_api = FakeImageApi()
+    transport = LarkTransport.__new__(LarkTransport)
+    transport._client = type(
+        "FakeClient",
+        (),
+        {
+            "im": type(
+                "FakeIm", (), {"v1": type("FakeV1", (), {"image": image_api})()}
+            )()
+        },
+    )()
+
+    assert transport.upload_image(b"\x89PNG chart bytes") == "img_v2_chart"
+    assert image_api.uploaded == b"\x89PNG chart bytes"
+    assert len(image_api.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("response_payload", "error"),
+    [
+        ({"code": 403, "msg": "denied"}, "403 denied"),
+        ({"code": 0, "msg": "ok", "data": {}}, "image_key"),
+    ],
+)
+def test_lark_transport_upload_image_raises_clear_error(
+    response_payload: dict[str, object], error: str
+) -> None:
+    from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageResponse
+
+    class FakeImageApi:
+        calls = 0
+
+        def create(self, request: CreateImageRequest) -> CreateImageResponse:
+            self.calls += 1
+            return CreateImageResponse(response_payload)
+
+    image_api = FakeImageApi()
+    transport = LarkTransport.__new__(LarkTransport)
+    transport._client = type(
+        "FakeClient",
+        (),
+        {
+            "im": type(
+                "FakeIm", (), {"v1": type("FakeV1", (), {"image": image_api})()}
+            )()
+        },
+    )()
+
+    with pytest.raises(RuntimeError, match=error):
+        transport.upload_image(b"chart")
+
+    assert image_api.calls == 1
+
+
+def test_lark_transport_wraps_sdk_upload_exception_once() -> None:
+    from lark_oapi.api.im.v1 import CreateImageRequest
+
+    class FakeImageApi:
+        calls = 0
+
+        def create(self, request: CreateImageRequest) -> None:
+            self.calls += 1
+            raise OSError("connection reset")
+
+    image_api = FakeImageApi()
+    transport = LarkTransport.__new__(LarkTransport)
+    transport._client = type(
+        "FakeClient",
+        (),
+        {
+            "im": type(
+                "FakeIm", (), {"v1": type("FakeV1", (), {"image": image_api})()}
+            )()
+        },
+    )()
+
+    with pytest.raises(
+        RuntimeError, match="Feishu image upload failed: connection reset"
+    ):
+        transport.upload_image(b"chart")
+
+    assert image_api.calls == 1
 
 
 def test_group_mention_routes_readonly_commands_for_allowed_sender() -> None:

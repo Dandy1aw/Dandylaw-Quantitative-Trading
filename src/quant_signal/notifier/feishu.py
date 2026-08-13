@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Protocol
+from datetime import UTC
+from typing import Protocol, runtime_checkable
 
 import httpx
 import structlog
@@ -25,6 +26,17 @@ def _to_feishu_payload(card: Card) -> dict[str, object]:
         elements.append(
             {"tag": "div", "text": {"tag": "lark_md", "content": content}}
         )
+        if index == 0 and card.image_key:
+            elements.append(
+                {
+                    "tag": "img",
+                    "img_key": card.image_key,
+                    "alt": {
+                        "tag": "plain_text",
+                        "content": "Fear index chart",
+                    },
+                }
+            )
         if index < len(contents) - 1:
             elements.append({"tag": "hr"})
     if card.url:
@@ -80,6 +92,11 @@ class _CardSender(Protocol):
     ) -> bool: ...
 
 
+@runtime_checkable
+class ImageUploader(Protocol):
+    def upload_image(self, image_bytes: bytes) -> str: ...
+
+
 class FeishuAppNotifier:
     """自建应用推送通道：ou_ 前缀推单聊，oc_ 前缀推群。替代 webhook 主通道。"""
 
@@ -103,6 +120,11 @@ class FeishuAppNotifier:
             time.sleep(backoff)
         log.error("feishu_app.giveup", title=card.title)
         return False
+
+    def upload_image(self, image_bytes: bytes) -> str:
+        if not isinstance(self._transport, ImageUploader):
+            raise TypeError("Feishu app transport does not support image upload")
+        return self._transport.upload_image(image_bytes)
 
 
 def get_notifier(settings: Settings) -> Notifier:
@@ -131,7 +153,7 @@ def get_notifier(settings: Settings) -> Notifier:
 def main() -> None:
     """M1 验收：发三种测试卡片。无 webhook 时输出到 Console。"""
     import argparse
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from quant_signal.logging_setup import setup_logging
     from quant_signal.notifier.cards import alert_card, report_card, signal_card
@@ -149,7 +171,7 @@ def main() -> None:
         price=520.5,
         reason="测试信号：60日动量 +12.3%，排名第1",
         strategy_id="momentum_rotation",
-        ts=datetime.now(timezone.utc),
+        ts=datetime.now(UTC),
         suggested_weight=0.33,
     )
     results = [
