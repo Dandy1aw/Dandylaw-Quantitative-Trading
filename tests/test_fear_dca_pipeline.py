@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -310,7 +311,10 @@ def test_late_failed_alert_delivery_cannot_corrupt_recovered_complete_run(
 def test_failed_run_reclaims_expired_crashed_notice_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    notifier = FakeNotifier()
+    class IdempotentFakeNotifier(FakeNotifier):
+        supports_message_uuid = True
+
+    notifier = IdempotentFakeNotifier()
     engine = _engine(tmp_path, notifier)
     scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
     delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
@@ -532,8 +536,13 @@ def test_replay_sends_latest_complete_card_without_fetching(tmp_path: Path) -> N
     notifier.cards.clear()
 
     assert replay(engine)
+    assert replay(engine)
 
-    assert notifier.cards == [expected]
+    assert len(notifier.cards) == 2
+    assert notifier.cards[0].message_uuid != expected.message_uuid
+    assert notifier.cards[1].message_uuid != notifier.cards[0].message_uuid
+    for replayed in notifier.cards:
+        assert dataclasses.replace(replayed, message_uuid=expected.message_uuid) == expected
     assert expected.message_uuid is not None
     assert len(source.calls) == 1
 
@@ -545,6 +554,8 @@ def test_expired_failed_reclaimer_reuses_uuid_before_complete_and_replay(
     delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
 
     class CrashOnceNotifier(FakeNotifier):
+        supports_message_uuid = True
+
         def __init__(self) -> None:
             super().__init__()
             self.crash = True
@@ -581,7 +592,43 @@ def test_expired_failed_reclaimer_reuses_uuid_before_complete_and_replay(
 
     notifier.cards.clear()
     assert replay(engine)
-    assert notifier.cards[0].message_uuid == complete_uuid
+    assert notifier.cards[0].message_uuid != complete_uuid
+    assert dataclasses.replace(
+        notifier.cards[0], message_uuid=complete_uuid
+    ) == engine.ledger.latest_complete_fear_dca_card()
+
+
+def test_non_idempotent_notifier_does_not_steal_expired_failed_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+
+    class AmbiguousNotifier(FakeNotifier):
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            raise KeyboardInterrupt("provider may have accepted")
+
+    notifier = AmbiguousNotifier()
+    engine = _engine(tmp_path, notifier)
+    monkeypatch.setattr(pipeline, "_delivery_now", lambda: delivery_start)
+    with pytest.raises(KeyboardInterrupt):
+        run(
+            engine,
+            scheduled,
+            source=FakeSource(_drop_session(_bars(), "QQQM", TARGET)),
+        )
+    assert len(notifier.cards) == 1
+
+    monkeypatch.setattr(
+        pipeline, "_delivery_now", lambda: delivery_start + timedelta(minutes=11)
+    )
+    assert not run(engine, scheduled + timedelta(minutes=1), source=FakeSource(_bars()))
+    assert len(notifier.cards) == 1
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "FAILED"
+    assert stored["send_status"] == "IN_FLIGHT"
 
 
 def test_replay_returns_false_when_no_complete_card(tmp_path: Path) -> None:

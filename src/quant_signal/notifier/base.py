@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -36,6 +36,14 @@ class Card:
 
 class Notifier(Protocol):
     def send(self, card: Card) -> bool: ...
+
+
+@runtime_checkable
+class IdempotentCardNotifier(Protocol):
+    """Notifier whose provider deduplicates repeated sends by Card.message_uuid."""
+
+    @property
+    def supports_message_uuid(self) -> bool: ...
 
 
 def card_to_dict(card: Card) -> dict[str, object]:

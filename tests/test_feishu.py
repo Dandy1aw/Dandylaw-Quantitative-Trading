@@ -5,6 +5,7 @@ import pytest
 from conftest import make_test_settings
 
 from quant_signal.notifier.base import Card, CardKind, CardSection, ConsoleNotifier
+from quant_signal.notifier.base import IdempotentCardNotifier
 from quant_signal.notifier.cards import alert_card, signal_card
 from quant_signal.notifier.feishu import (
     FeishuNotifier,
@@ -115,6 +116,16 @@ def test_app_notifier_sends_to_open_id_with_prefix_detection() -> None:
     assert group_sender.sent[0][1] == "chat_id"
 
 
+def test_only_app_notifier_advertises_provider_message_uuid_idempotency() -> None:
+    from quant_signal.notifier.feishu import FeishuAppNotifier
+
+    app = FeishuAppNotifier(FakeCardSender(), "ou_owner123")
+    assert isinstance(app, IdempotentCardNotifier)
+    assert app.supports_message_uuid is True
+    assert not isinstance(FeishuNotifier("https://example.test/hook"), IdempotentCardNotifier)
+    assert not isinstance(ConsoleNotifier(), IdempotentCardNotifier)
+
+
 def test_app_notifier_upload_image_passes_bytes_through_without_sending() -> None:
     from quant_signal.notifier.feishu import FeishuAppNotifier
 
@@ -150,7 +161,17 @@ def test_app_notifier_retries_then_gives_up(monkeypatch: pytest.MonkeyPatch) -> 
 
     recovering = FakeCardSender(results=[False, True])
     monkeypatch.setattr("quant_signal.notifier.feishu._BACKOFF", [0, 0, 0])
-    assert FeishuAppNotifier(recovering, "ou_owner123").send(alert_card("t", "b")) is True
+    card = Card(
+        CardKind.ALERT,
+        "t",
+        "b",
+        message_uuid="4b932caa-1cdb-5d53-b73d-b055706f56d8",
+    )
+    assert FeishuAppNotifier(recovering, "ou_owner123").send(card) is True
+    assert [sent.message_uuid for _, _, sent in recovering.sent] == [
+        card.message_uuid,
+        card.message_uuid,
+    ]
 
 
 def test_get_notifier_prefers_app_bot_when_fully_configured() -> None:

@@ -703,6 +703,7 @@ class SignalLedger:
         session: date,
         *,
         now: datetime,
+        allow_expired_reclaim: bool = False,
     ) -> str | None:
         """Claim or steal an expired incomplete-notice lease with a fence token."""
         claimed_at = now.astimezone(timezone.utc).isoformat()
@@ -717,9 +718,16 @@ class SignalLedger:
                 " delivery_claim_token=?"
                 " WHERE session_date=? AND status='FAILED'"
                 " AND (send_status='PENDING' OR (send_status='IN_FLIGHT'"
+                "  AND ?=1"
                 "  AND delivery_claimed_at IS NOT NULL"
                 "  AND delivery_claimed_at <= ?))",
-                (claimed_at, claim_token, session.isoformat(), expired_before),
+                (
+                    claimed_at,
+                    claim_token,
+                    session.isoformat(),
+                    int(allow_expired_reclaim),
+                    expired_before,
+                ),
             )
             self._con.commit()
         return claim_token if cursor.rowcount > 0 else None

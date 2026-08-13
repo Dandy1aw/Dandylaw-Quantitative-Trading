@@ -1538,7 +1538,9 @@ def test_fear_dca_expired_delivery_claim_must_finalize_before_recovery(
         now=NOW + timedelta(minutes=11),
     )
     new_token = ledger.claim_failed_fear_dca_delivery(
-        session, now=NOW + timedelta(minutes=11)
+        session,
+        now=NOW + timedelta(minutes=11),
+        allow_expired_reclaim=True,
     )
     assert new_token is not None
     assert ledger.update_fear_dca_delivery(
@@ -1580,7 +1582,9 @@ def test_fear_dca_expired_claim_can_be_stolen_and_old_owner_is_fenced(
     ) is None
 
     new_token = ledger.claim_failed_fear_dca_delivery(
-        session, now=NOW + timedelta(minutes=11)
+        session,
+        now=NOW + timedelta(minutes=11),
+        allow_expired_reclaim=True,
     )
     assert new_token is not None
     assert new_token != old_token

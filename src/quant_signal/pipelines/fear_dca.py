@@ -6,7 +6,7 @@ import dataclasses
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, cast
-from uuid import UUID, uuid5
+from uuid import UUID, uuid4, uuid5
 
 import pandas as pd
 import structlog
@@ -19,7 +19,7 @@ from quant_signal.fear_dca import (
     recommend_spy,
 )
 from quant_signal.fear_dca_chart import render_fear_dca_chart
-from quant_signal.notifier.base import Card
+from quant_signal.notifier.base import Card, IdempotentCardNotifier
 from quant_signal.notifier.cards import fear_dca_card, fear_dca_incomplete_card
 from quant_signal.notifier.feishu import ImageUploader
 from quant_signal.pipelines.us_briefing import last_completed_us_session
@@ -40,6 +40,14 @@ def _delivery_now() -> datetime:
 
 def _message_uuid(session: date, status: str) -> str:
     return str(uuid5(_MESSAGE_NAMESPACE, f"fear_dca:{session.isoformat()}:{status}"))
+
+
+def _supports_provider_idempotency(engine: Engine) -> bool:
+    notifier = engine.notifier
+    return (
+        isinstance(notifier, IdempotentCardNotifier)
+        and notifier.supports_message_uuid
+    )
 
 
 class _DailySource(Protocol):
@@ -193,11 +201,17 @@ def run(
         claim_token = engine.ledger.claim_failed_fear_dca_delivery(
             target_session,
             now=_delivery_now(),
+            allow_expired_reclaim=_supports_provider_idempotency(engine),
         )
         if claim_token is None:
             log.info(
                 "fear_dca.failed_delivery_deferred",
                 session=target_session.isoformat(),
+                actionable=(
+                    "configure an idempotent app notifier to recover expired delivery"
+                    if not _supports_provider_idempotency(engine)
+                    else "delivery lease is still active"
+                ),
             )
             return False
         alert = fear_dca_incomplete_card(
@@ -321,8 +335,9 @@ def replay(engine: Engine) -> bool:
     if card is None:
         log.info("fear_dca.replay_skip", reason="no_complete_card")
         return False
+    replay_card = dataclasses.replace(card, message_uuid=str(uuid4()))
     try:
-        return engine.notifier.send(card)
+        return engine.notifier.send(replay_card)
     except Exception as error:  # noqa: BLE001 - replay reports delivery failure
         log.warning("fear_dca.replay_failed", error=_error_text(error))
         return False

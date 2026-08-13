@@ -121,6 +121,11 @@ class FeishuAppNotifier:
         log.error("feishu_app.giveup", title=card.title)
         return False
 
+    @property
+    def supports_message_uuid(self) -> bool:
+        """The Lark message API deduplicates requests by body UUID."""
+        return True
+
     def upload_image(self, image_bytes: bytes) -> str:
         if not isinstance(self._transport, ImageUploader):
             raise TypeError("Feishu app transport does not support image upload")
