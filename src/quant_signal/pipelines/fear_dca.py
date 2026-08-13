@@ -184,6 +184,22 @@ def _closes_for_symbol(
     return cast("pd.Series[float]", normalized)
 
 
+def _aligned_chart_closes(
+    vix_closes: pd.Series[float],
+    vxn_closes: pd.Series[float],
+) -> tuple[pd.Series[float], pd.Series[float]]:
+    """Align chart-only histories without changing recommendation inputs."""
+    aligned = pd.concat(
+        {"vix": vix_closes, "vxn": vxn_closes},
+        axis=1,
+        join="inner",
+    ).sort_index()
+    return (
+        cast("pd.Series[float]", aligned["vix"]),
+        cast("pd.Series[float]", aligned["vxn"]),
+    )
+
+
 def run(
     engine: Engine,
     now: datetime,
@@ -277,9 +293,13 @@ def run(
     chart_status = "DEGRADED"
     chart_error: str | None = None
     try:
+        chart_vix_closes, chart_vxn_closes = _aligned_chart_closes(
+            closes[settings.vix_symbol],
+            closes[settings.vxn_symbol],
+        )
         image_bytes = render_fear_dca_chart(
-            vix_closes=closes[settings.vix_symbol],
-            vxn_closes=closes[settings.vxn_symbol],
+            vix_closes=chart_vix_closes,
+            vxn_closes=chart_vxn_closes,
             vix_metrics=vix_metrics,
             vxn_metrics=vxn_metrics,
             spy_decision=spy_decision,

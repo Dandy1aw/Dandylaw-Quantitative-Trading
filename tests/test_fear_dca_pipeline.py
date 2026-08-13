@@ -117,6 +117,20 @@ def _set_close(
     return changed
 
 
+def _add_symbol_session(
+    bars: pd.DataFrame,
+    symbol: str,
+    session: date,
+) -> pd.DataFrame:
+    symbol_bars = bars.xs(symbol, level="ticker")
+    row = symbol_bars.iloc[[-1]].copy()
+    row.index = pd.MultiIndex.from_tuples(
+        [(symbol, pd.Timestamp(session, tz="UTC"))],
+        names=["ticker", "ts"],
+    )
+    return pd.concat([bars, row]).sort_index()
+
+
 def _engine(
     tmp_path: Path,
     notifier: FakeNotifier,
@@ -491,6 +505,59 @@ def test_60_session_recommendation_completes_with_degraded_text_chart(
     assert stored["status"] == "COMPLETE"
     assert stored["chart_status"] == "DEGRADED"
     assert "119 sessions" in str(stored["chart_error"])
+    assert notifier.cards[0].image_key is None
+
+
+def test_chart_aligns_vix_vxn_on_common_sessions_before_render(
+    tmp_path: Path,
+) -> None:
+    bars = _bars(periods=120)
+    bars = _add_symbol_session(bars, "^VIX", date(2026, 8, 8))
+    bars = _add_symbol_session(bars, "^VXN", date(2026, 8, 9))
+    notifier = FakeImageNotifier()
+    engine = _engine(tmp_path, notifier)
+
+    assert run(
+        engine,
+        datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+        source=FakeSource(bars),
+    )
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["chart_status"] == "UPLOADED"
+    assert stored["chart_error"] is None
+    assert len(notifier.uploaded) == 1
+    assert notifier.cards[0].image_key == "img_v2_fear"
+
+
+def test_chart_degrades_when_vix_vxn_have_fewer_than_119_common_sessions(
+    tmp_path: Path,
+) -> None:
+    bars = _bars(periods=119)
+    first_vxn_session = bars.xs("^VXN", level="ticker").index[0]
+    bars = bars.drop(index=("^VXN", first_vxn_session))
+    bars = _add_symbol_session(
+        bars,
+        "^VXN",
+        first_vxn_session.date() - timedelta(days=1),
+    )
+    notifier = FakeImageNotifier()
+    engine = _engine(tmp_path, notifier)
+
+    assert run(
+        engine,
+        datetime(2026, 8, 17, 9, 30, tzinfo=ASIA),
+        source=FakeSource(bars),
+    )
+
+    stored = engine.ledger.fear_dca_run(TARGET)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["chart_status"] == "DEGRADED"
+    assert "119 sessions" in str(stored["chart_error"])
+    assert notifier.uploaded == []
     assert notifier.cards[0].image_key is None
 
 

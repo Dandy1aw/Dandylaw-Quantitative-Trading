@@ -14,7 +14,6 @@ from PIL import Image, ImageDraw, ImageFont
 from quant_signal.fear_dca import (
     FearMetrics,
     RecommendationDecision,
-    calculate_fear_metrics,
     validate_fear_metrics,
 )
 
@@ -138,12 +137,14 @@ def _validate_annotations(
     decision: RecommendationDecision,
 ) -> None:
     validate_fear_metrics(metrics)
-    calculated = calculate_fear_metrics(closes)
-    for field in ("close", "ma20", "ma60"):
-        actual = float(getattr(metrics, field))
-        expected = float(getattr(calculated, field))
-        if not math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-12):
-            raise ValueError(f"{label} metrics do not match the close series")
+    latest_close = float(closes.iloc[-1])
+    if not math.isclose(
+        metrics.close,
+        latest_close,
+        rel_tol=1e-9,
+        abs_tol=1e-12,
+    ):
+        raise ValueError(f"{label} metrics do not match the latest close")
     multipliers = (
         decision.base_multiplier,
         decision.drawdown_bonus,
