@@ -173,12 +173,8 @@ def _classify(
             return AlertDisposition.REVERSAL, None, alert_number, strength
         return None, SuppressionReason.NO_MEANINGFUL_UPGRADE, alert_number, strength
 
-    highest_same_direction = max(
-        alert.severity
-        for alert in ticker_history
-        if alert.direction == signal.direction
-    )
-    if severity > highest_same_direction and strength >= _MIN_UPGRADE_STRENGTH:
+    highest_severity = max(alert.severity for alert in ticker_history)
+    if severity > highest_severity and strength >= _MIN_UPGRADE_STRENGTH:
         return AlertDisposition.UPGRADE, None, alert_number, strength
     return None, SuppressionReason.NO_MEANINGFUL_UPGRADE, alert_number, strength
 

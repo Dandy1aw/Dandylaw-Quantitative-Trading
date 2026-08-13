@@ -113,9 +113,9 @@ def test_same_direction_higher_severity_at_1_5_strength_is_upgrade() -> None:
     assert decision.ticker_alert_number == 2
 
 
-def test_upgrade_must_beat_highest_severity_in_same_direction() -> None:
+def test_upgrade_must_beat_highest_severity_across_all_directions() -> None:
     decision = select_holding_alerts(
-        [_signal("AAA", severity=2, strength=2.5)],
+        [_signal("AAA", severity=2, strength=1.5)],
         [
             _prior(
                 "AAA",
@@ -124,7 +124,7 @@ def test_upgrade_must_beat_highest_severity_in_same_direction() -> None:
                 minutes_ago=2,
                 kind=AlertDisposition.REVERSAL,
             ),
-            _prior("AAA", severity=2, minutes_ago=1),
+            _prior("AAA", severity=1, minutes_ago=1),
         ],
         per_ticker_cap=3,
     )[0]
