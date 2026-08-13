@@ -284,6 +284,18 @@ def test_late_failed_alert_delivery_cannot_corrupt_recovered_complete_run(
         source=FakeSource(_drop_session(_bars(), "QQQM", TARGET)),
     )
 
+    in_flight_recovery = engine.ledger.fear_dca_run(TARGET)
+    assert in_flight_recovery is not None
+    assert in_flight_recovery["status"] == "FAILED"
+    assert in_flight_recovery["send_status"] == "SENT"
+    assert [card.kind for card in notifier.cards] == [CardKind.ALERT]
+
+    assert not run(
+        engine,
+        now + timedelta(minutes=1, seconds=1),
+        source=valid_source,
+    )
+
     stored = engine.ledger.fear_dca_run(TARGET)
     assert stored is not None
     assert stored["status"] == "COMPLETE"

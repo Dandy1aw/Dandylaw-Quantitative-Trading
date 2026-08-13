@@ -1471,3 +1471,71 @@ def test_fear_dca_delivery_update_can_compare_expected_run_status(
     assert stored is not None
     assert stored["status"] == "COMPLETE"
     assert stored["send_status"] == "PENDING"
+
+
+def test_fear_dca_live_delivery_claim_defers_recovery_until_finalized(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="missing target",
+        now=NOW,
+    )
+    assert ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+
+    assert not ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW + timedelta(minutes=1),
+    )
+    claimed = ledger.fear_dca_run(session)
+    assert claimed is not None
+    assert claimed["status"] == "FAILED"
+    assert claimed["send_status"] == "IN_FLIGHT"
+
+    assert ledger.update_fear_dca_delivery(
+        session,
+        expected_status="FAILED",
+        expected_send_status="IN_FLIGHT",
+        send_status="SENT",
+        send_error=None,
+    )
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW + timedelta(minutes=1, seconds=1),
+    )
+
+
+def test_fear_dca_expired_delivery_claim_allows_recovery(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="missing target",
+        now=NOW,
+    )
+    assert ledger.claim_failed_fear_dca_delivery(session, now=NOW)
+
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW + timedelta(minutes=3),
+    )
+    recovered = ledger.fear_dca_run(session)
+    assert recovered is not None
+    assert recovered["status"] == "COMPLETE"
+    assert recovered["delivery_claimed_at"] is None

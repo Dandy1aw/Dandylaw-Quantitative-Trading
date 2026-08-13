@@ -47,6 +47,7 @@ def _send_and_record(
     card: Card,
     *,
     expected_status: str,
+    expected_send_status: str | None = None,
 ) -> bool:
     try:
         delivered = engine.notifier.send(card)
@@ -58,6 +59,7 @@ def _send_and_record(
     updated = engine.ledger.update_fear_dca_delivery(
         session,
         expected_status=expected_status,
+        expected_send_status=expected_send_status,
         send_status="SENT" if delivered else "FAILED",
         send_error=send_error,
     )
@@ -83,8 +85,11 @@ def _fail_closed(
         now=now,
     )
     if claimed:
-        current = engine.ledger.fear_dca_run(target_session)
-        if current is None or current["status"] != "FAILED":
+        delivery_claimed = engine.ledger.claim_failed_fear_dca_delivery(
+            target_session,
+            now=now,
+        )
+        if not delivery_claimed:
             log.info(
                 "fear_dca.stale_incomplete_notice_skipped",
                 session=target_session.isoformat(),
@@ -99,6 +104,7 @@ def _fail_closed(
             target_session,
             card,
             expected_status="FAILED",
+            expected_send_status="IN_FLIGHT",
         )
     else:
         log.info("fear_dca.incomplete_duplicate", session=target_session.isoformat())
@@ -243,8 +249,16 @@ def run(
         now=now,
     )
     if not created:
-        log.info("fear_dca.complete_race_skip", session=target_session.isoformat())
-        return True
+        current = engine.ledger.fear_dca_run(target_session)
+        if current is not None and current["status"] == "COMPLETE":
+            log.info("fear_dca.complete_race_skip", session=target_session.isoformat())
+            return True
+        log.info(
+            "fear_dca.complete_deferred",
+            session=target_session.isoformat(),
+            reason="incomplete_notice_in_flight",
+        )
+        return False
     return _send_and_record(
         engine,
         target_session,

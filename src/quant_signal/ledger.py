@@ -31,7 +31,8 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 19
+_SCHEMA_VERSION = 20
+_FEAR_DCA_DELIVERY_LEASE = timedelta(minutes=2)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -428,6 +429,7 @@ CREATE TABLE IF NOT EXISTS fear_dca_runs (
     error TEXT,
     chart_error TEXT,
     send_error TEXT,
+    delivery_claimed_at TEXT,
     completed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fear_dca_runs_latest_complete
@@ -570,6 +572,9 @@ class SignalLedger:
         now: datetime,
     ) -> bool:
         """Insert a complete result or supersede the session's failed attempt."""
+        lease_expired_before = (
+            now.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
+        ).isoformat()
         with self._lock:
             cursor = self._con.execute(
                 "INSERT INTO fear_dca_runs"
@@ -583,8 +588,13 @@ class SignalLedger:
                 " decisions_json=excluded.decisions_json, card_json=excluded.card_json,"
                 " chart_status=excluded.chart_status, send_status=excluded.send_status,"
                 " error=NULL, chart_error=excluded.chart_error,"
-                " send_error=excluded.send_error, completed_at=excluded.completed_at"
-                " WHERE fear_dca_runs.status != 'COMPLETE'",
+                " send_error=excluded.send_error, delivery_claimed_at=NULL,"
+                " completed_at=excluded.completed_at"
+                " WHERE fear_dca_runs.status != 'COMPLETE'"
+                " AND NOT (fear_dca_runs.status = 'FAILED'"
+                "  AND fear_dca_runs.send_status = 'IN_FLIGHT'"
+                "  AND fear_dca_runs.delivery_claimed_at IS NOT NULL"
+                "  AND fear_dca_runs.delivery_claimed_at > ?)",
                 (
                     session.isoformat(),
                     source,
@@ -596,6 +606,7 @@ class SignalLedger:
                     chart_error,
                     send_error,
                     now.astimezone(timezone.utc).isoformat(),
+                    lease_expired_before,
                 ),
             )
             self._con.commit()
@@ -606,6 +617,7 @@ class SignalLedger:
         session: date,
         *,
         expected_status: str | None = None,
+        expected_send_status: str | None = None,
         chart_status: str | None = None,
         send_status: str | None = None,
         chart_error: str | None | _Unset = _UNSET,
@@ -643,8 +655,12 @@ class SignalLedger:
                 " WHEN ? IS NOT NULL AND send_status = 'SENT'"
                 "  AND ? <> send_status THEN send_error"
                 " ELSE ? END"
+                ", delivery_claimed_at=CASE"
+                " WHEN ? IN ('SENT', 'FAILED') THEN NULL"
+                " ELSE delivery_claimed_at END"
                 " WHERE session_date = ?"
-                " AND (? IS NULL OR status = ?)",
+                " AND (? IS NULL OR status = ?)"
+                " AND (? IS NULL OR send_status = ?)",
                 (
                     chart_status,
                     chart_status,
@@ -660,10 +676,32 @@ class SignalLedger:
                     send_status,
                     send_status,
                     send_error_value,
+                    send_status,
                     session.isoformat(),
                     expected_status,
                     expected_status,
+                    expected_send_status,
+                    expected_send_status,
                 ),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    def claim_failed_fear_dca_delivery(
+        self,
+        session: date,
+        *,
+        now: datetime,
+    ) -> bool:
+        """Claim the incomplete notice lease before crossing the notifier boundary."""
+        claimed_at = now.astimezone(timezone.utc).isoformat()
+        with self._lock:
+            cursor = self._con.execute(
+                "UPDATE fear_dca_runs"
+                " SET send_status='IN_FLIGHT', delivery_claimed_at=?"
+                " WHERE session_date=? AND status='FAILED'"
+                " AND send_status='PENDING'",
+                (claimed_at, session.isoformat()),
             )
             self._con.commit()
         return cursor.rowcount > 0
@@ -1011,7 +1049,7 @@ class SignalLedger:
             str(row[1])
             for row in self._con.execute("PRAGMA table_info(fear_dca_runs)").fetchall()
         }
-        for column in ("chart_error", "send_error"):
+        for column in ("chart_error", "send_error", "delivery_claimed_at"):
             if column not in fear_dca_columns:
                 self._con.execute(
                     f"ALTER TABLE fear_dca_runs ADD COLUMN {column} TEXT"
