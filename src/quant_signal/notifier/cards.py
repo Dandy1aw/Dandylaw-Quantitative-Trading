@@ -6,6 +6,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
+from quant_signal.fear_dca import (
+    ETFMetrics,
+    FearInterpretation,
+    FearMetrics,
+    RecommendationDecision,
+)
 from quant_signal.notifier.base import Card, CardKind, CardSection
 from quant_signal.notifier.briefing_format import (
     BLOCK_REASON_NAMES_ZH as _BLOCK_REASON_NAMES_ZH,
@@ -39,6 +45,129 @@ _SGT = ZoneInfo("Asia/Singapore")
 _ET = ZoneInfo("America/New_York")
 _DIRECTION_EMOJI = {"buy": "📈", "sell": "📉", "reduce": "⚖️"}
 _SELL_RELIABILITY_NOTE = "⚠️ SELL 信号历史胜率偏低（回测 32–42%，牛市窗口），仅供参考"
+
+_FEAR_DCA_RULE_LINES = (
+    "VIX基础：<25 0×；25–<30 1×；30–<40 1.5×；40–<50 2×；≥50 3×。",
+    "VXN基础：<35 0×；35–<40 1×；40–<50 1.5×；50–<60 2×；≥60 3×。",
+    "回撤加成：基础>0时，SPY 5日≤-3%或20日≤-5%；QQQM 5日≤-4%或20日≤-7%，各加0.5×一次；最终封顶3×。",
+    "0×=不额外恐慌加仓，不影响原定投。",
+)
+_FEAR_INTERPRETATION_ZH = {
+    FearInterpretation.SHORT_TERM_WARMING: "短期恐慌升温",
+    FearInterpretation.TREND_CONFIRMED: "恐慌趋势确认",
+    FearInterpretation.FEAR_FALLING: "恐慌回落",
+    FearInterpretation.DIVERGENT: "恐慌环境分化",
+}
+
+
+def _fear_dca_multiplier(value: float) -> str:
+    return f"{value:g}×"
+
+
+def _fear_dca_section(
+    *,
+    etf_name: str,
+    fear_name: str,
+    fear: FearMetrics,
+    etf: ETFMetrics,
+    decision: RecommendationDecision,
+) -> list[str]:
+    reason = " ".join(decision.reason.split())
+    return [
+        f"**{etf_name} / {fear_name}**",
+        f"{fear_name} {fear.close:.2f}｜1日 {fear.one_session_return:+.2%}",
+        (
+            f"MA20 {fear.ma20:.2f}（偏离 {fear.deviation_from_ma20:+.2%}）｜"
+            f"MA60 {fear.ma60:.2f}（偏离 {fear.deviation_from_ma60:+.2%}）"
+        ),
+        f"解读：{_FEAR_INTERPRETATION_ZH[fear.interpretation]}",
+        (
+            f"{etf_name} {etf.close:.2f}｜1日 {etf.one_session_return:+.2%}｜"
+            f"5日 {etf.five_session_return:+.2%}｜20日 {etf.twenty_session_return:+.2%}"
+        ),
+        (
+            f"基础 {_fear_dca_multiplier(decision.base_multiplier)}｜"
+            f"回撤加成 {_fear_dca_multiplier(decision.drawdown_bonus)}｜"
+            f"最终 {_fear_dca_multiplier(decision.final_multiplier)}"
+        ),
+        f"原因：{reason}",
+    ]
+
+
+def fear_dca_card(
+    *,
+    target_session: date,
+    generated_at: datetime,
+    vix_metrics: FearMetrics,
+    vxn_metrics: FearMetrics,
+    spy_metrics: ETFMetrics,
+    qqqm_metrics: ETFMetrics,
+    spy_decision: RecommendationDecision,
+    qqqm_decision: RecommendationDecision,
+    image_key: str | None = None,
+) -> Card:
+    """Build the complete fear-index DCA text card with optional chart image."""
+    if generated_at.utcoffset() is None:
+        raise ValueError("generated_at must be timezone-aware")
+    generated_cn = generated_at.astimezone(ZoneInfo("Asia/Shanghai"))
+    lines = [
+        f"数据日：{target_session.isoformat()}",
+        f"生成时间：{generated_cn:%Y-%m-%d %H:%M} CST",
+        "数据源：Yahoo Finance，复权日线，最近已完成美股交易日",
+        "",
+        *_fear_dca_section(
+            etf_name="SPY",
+            fear_name="VIX",
+            fear=vix_metrics,
+            etf=spy_metrics,
+            decision=spy_decision,
+        ),
+        "",
+        *_fear_dca_section(
+            etf_name="QQQM",
+            fear_name="VXN",
+            fear=vxn_metrics,
+            etf=qqqm_metrics,
+            decision=qqqm_decision,
+        ),
+        "",
+        "**规则速览**",
+        *_FEAR_DCA_RULE_LINES,
+        "",
+        "> 仅为纪律化定投提醒，不自动下单；不提供具体金额、订单或投资建议。",
+    ]
+    return Card(
+        kind=CardKind.REPORT,
+        title=f"恐慌指数定投观察｜{target_session:%m/%d} 收盘",
+        body_md="\n".join(lines),
+        image_key=image_key,
+    )
+
+
+def fear_dca_incomplete_card(*, target_session: date, error: str) -> Card:
+    """Build a fail-closed alert without carrying forward an old recommendation."""
+    concise_error = " ".join(error.split())[:240] or "未知数据错误"
+    body = "\n".join(
+        (
+            "**数据不完整，今日推荐暂停**",
+            f"目标交易日：{target_session.isoformat()}",
+            f"错误：{concise_error}",
+            "建议已暂停，未沿用历史结果。",
+        )
+    )
+    return Card(CardKind.ALERT, "恐慌指数定投提醒｜数据不完整", body)
+
+
+def fear_dca_rules_card() -> Card:
+    """Return the stable public rules card used by the bot rules command."""
+    body = "\n".join(
+        (
+            *_FEAR_DCA_RULE_LINES,
+            "",
+            "> 仅为纪律化定投提醒，不自动下单；不提供具体金额、订单或投资建议。",
+        )
+    )
+    return Card(CardKind.REPORT, "恐慌指数定投规则", body)
 
 
 def extreme_movers_close_card(

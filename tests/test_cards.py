@@ -1,10 +1,20 @@
-from datetime import datetime, timezone
+from datetime import UTC, date, datetime, timezone
+
+from quant_signal.fear_dca import (
+    ETFMetrics,
+    FearInterpretation,
+    FearMetrics,
+    RecommendationDecision,
+)
 
 from quant_signal.notifier import cards as cards_module
 from quant_signal.notifier.cards import (
     extreme_movers_close_card,
     extreme_movers_premarket_card,
     extreme_mover_sectors_card,
+    fear_dca_card,
+    fear_dca_incomplete_card,
+    fear_dca_rules_card,
     premarket_cards,
     report_card,
     signal_card,
@@ -790,3 +800,94 @@ def test_us_briefing_card_keeps_unconfirmed_profit_action_visible() -> None:
 
     assert "止盈仍待执行（累计应减 25%）" in card.body_md
     assert "继续持有/观察" not in card.body_md
+
+
+def _fear_metrics(
+    close: float,
+    one_day: float,
+    ma20: float,
+    ma60: float,
+    interpretation: FearInterpretation,
+) -> FearMetrics:
+    return FearMetrics(
+        close=close,
+        one_session_return=one_day,
+        ma20=ma20,
+        ma60=ma60,
+        deviation_from_ma20=close / ma20 - 1.0,
+        deviation_from_ma60=close / ma60 - 1.0,
+        interpretation=interpretation,
+    )
+
+
+def test_fear_dca_card_contains_full_decision_context_and_rules() -> None:
+    card = fear_dca_card(
+        target_session=date(2026, 8, 12),
+        generated_at=datetime(2026, 8, 13, 9, 30, tzinfo=UTC),
+        vix_metrics=_fear_metrics(
+            35.0, 0.10, 30.0, 28.0, FearInterpretation.TREND_CONFIRMED
+        ),
+        vxn_metrics=_fear_metrics(
+            42.0, -0.05, 40.0, 38.0, FearInterpretation.TREND_CONFIRMED
+        ),
+        spy_metrics=ETFMetrics(500.0, -0.01, -0.03, -0.05),
+        qqqm_metrics=ETFMetrics(220.0, 0.005, -0.02, -0.07),
+        spy_decision=RecommendationDecision(
+            1.5, 0.5, 2.0, "VIX tier and SPY drawdown triggered."
+        ),
+        qqqm_decision=RecommendationDecision(
+            1.5, 0.5, 2.0, "VXN tier and QQQM drawdown triggered."
+        ),
+        image_key="img_v2_test",
+    )
+
+    assert card.title == "恐慌指数定投观察｜08/12 收盘"
+    assert card.image_key == "img_v2_test"
+    assert "数据日：2026-08-12" in card.body_md
+    assert "生成时间：2026-08-13 17:30 CST" in card.body_md
+    assert "Yahoo Finance，复权日线，最近已完成美股交易日" in card.body_md
+    assert "VIX 35.00｜1日 +10.00%" in card.body_md
+    assert "MA20 30.00（偏离 +16.67%）｜MA60 28.00（偏离 +25.00%）" in card.body_md
+    assert "解读：恐慌趋势确认" in card.body_md
+    assert "SPY 500.00｜1日 -1.00%｜5日 -3.00%｜20日 -5.00%" in card.body_md
+    assert "VXN 42.00｜1日 -5.00%" in card.body_md
+    assert "QQQM 220.00｜1日 +0.50%｜5日 -2.00%｜20日 -7.00%" in card.body_md
+    assert card.body_md.count("基础 1.5×｜回撤加成 0.5×｜最终 2×") == 2
+    assert "原因：VIX tier and SPY drawdown triggered." in card.body_md
+    assert "原因：VXN tier and QQQM drawdown triggered." in card.body_md
+    assert "VIX基础：<25 0×；25–<30 1×；30–<40 1.5×；40–<50 2×；≥50 3×" in card.body_md
+    assert "VXN基础：<35 0×；35–<40 1×；40–<50 1.5×；50–<60 2×；≥60 3×" in card.body_md
+    assert "SPY 5日≤-3%或20日≤-5%" in card.body_md
+    assert "QQQM 5日≤-4%或20日≤-7%" in card.body_md
+    assert "最终封顶3×" in card.body_md
+    assert "0×=不额外恐慌加仓，不影响原定投" in card.body_md
+    assert "不提供具体金额、订单或投资建议" in card.body_md
+
+
+def test_fear_dca_incomplete_card_pauses_without_stale_multipliers() -> None:
+    card = fear_dca_incomplete_card(
+        target_session=date(2026, 8, 12),
+        error="^VXN 缺少目标交易日收盘价\nplease retry later",
+    )
+
+    assert card.title == "恐慌指数定投提醒｜数据不完整"
+    assert "数据不完整，今日推荐暂停" in card.body_md
+    assert "目标交易日：2026-08-12" in card.body_md
+    assert "^VXN 缺少目标交易日收盘价 please retry later" in card.body_md
+    assert "×" not in card.body_md
+    assert "基础" not in card.body_md
+    assert "最终" not in card.body_md
+
+
+def test_fear_dca_rules_card_is_static_and_complete() -> None:
+    first = fear_dca_rules_card()
+    second = fear_dca_rules_card()
+
+    assert first == second
+    assert first.title == "恐慌指数定投规则"
+    assert "VIX基础：<25 0×；25–<30 1×；30–<40 1.5×；40–<50 2×；≥50 3×" in first.body_md
+    assert "VXN基础：<35 0×；35–<40 1×；40–<50 1.5×；50–<60 2×；≥60 3×" in first.body_md
+    assert "SPY 5日≤-3%或20日≤-5%" in first.body_md
+    assert "QQQM 5日≤-4%或20日≤-7%" in first.body_md
+    assert "最终封顶3×" in first.body_md
+    assert "0×=不额外恐慌加仓，不影响原定投" in first.body_md
