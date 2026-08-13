@@ -340,6 +340,19 @@ consolidated volume；解释边界写明 Call 成交 ≠ 看涨、Put 成交 ≠
 `期权 <代码>`（如 `期权 MU`）现场拉取单标的情报。数据源为 Alpaca Indicative
 feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示 `-`），不编造数据。
 
+## 恐慌指数定投提醒
+
+`fear_dca.enabled` 打开后，系统在北京时间周一至周五 09:30 使用 Yahoo Finance
+的 `^VIX`、`^VXN`、`SPY`、`QQQM` adjusted 日线，对齐最近一个已完成的美股
+交易日，生成 60 交易日图表和 SPY/QQQM 定投倍数卡片。同一美股交易日只正式
+生成一次；`0×` 仅表示本次不额外加仓，不会取消原有定投，也不会自动下单。
+
+SPY 的 VIX 基础档位为 `<25: 0×`、`25/30/40/50: 1/1.5/2/3×`；QQQM 的
+VXN 基础档位为 `<35: 0×`、`35/40/50/60: 1/1.5/2/3×`。达到首档后，SPY
+近 5/20 日跌幅达到 `-3%/-5%`、或 QQQM 达到 `-4%/-7%`，只加一次 `0.5×`，
+最终封顶 `3×`。机器人指令 `定投` 只重发最新 COMPLETE 卡片、不重新抓行情；
+`定投规则` 返回上述静态规则。
+
 ## 飞书机器人交互（可选）
 
 `feishu_bot.enabled` 打开后，系统通过**企业自建应用**机器人的长连接（WebSocket，
@@ -357,7 +370,8 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 - 文本指令：`状态`（系统概况）/ `持仓`（截图账户+持仓）/ `计划`（活跃执行
   计划）/ `期权`（最新期权榜，读台账不新抓）/ `期权 <代码>`（单标的期权
   情报，现场拉取，如 `期权 MU`）/ `异动榜 [20|60|252]` / `异动板块 [板块]` /
-  `异动 <代码>` / `监控 [代码]` / `取消监控 <代码>` / `重推` /
+  `异动 <代码>` / `定投`（重发最新报告）/ `定投规则` / `监控 [代码]` /
+  `取消监控 <代码>` / `重推` /
   `重推 异动榜` / `帮助`。持仓强制纳入实时价格监控，无法取消；手动监控标的
   没有持仓成本时不会显示伪造盈亏
 - **接管全部推送**：`push_receive_id` 填 `ou_xxx`（单聊）或 `oc_xxx`（群，需
@@ -392,6 +406,7 @@ feed（约 15 分钟延迟），单标的拉取失败只影响该标的（显示
 | `execution_brief` | 08:15 ET | NYSE 交易日历 | 聚合指数候选+核心信号 → 只读账户风控 → PAPER 执行计划卡 |
 | `rotation_asia_open` | 08:00 北京时间 (00:00 UTC) | 工作日 | 早报逻辑，服务亚洲盘前（不依赖 NYSE 日历） |
 | `rotation_asia_close` | 15:30 北京时间 (07:30 UTC) | 工作日 | 同上，港股/韩股收盘前后 |
+| `fear_dca_reminder` | 09:30 北京时间 | 周一至周五 + 美股交易日幂等 | Yahoo VIX/VXN + SPY/QQQM 定投倍数与 60 日图表 |
 | `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
 | `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已开盘 | 20日突破策略，监控 `watchlist` |
 | `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
@@ -574,6 +589,15 @@ uv run python -m quant_signal.seed_holdings --strategy momentum_rotation \
 
 # 测试飞书/Console 通知链路（发三种测试卡片：信号/早报/告警）
 uv run python -m quant_signal.notifier.feishu --test
+
+# 恐慌定投 E2E：默认只抓真实 Yahoo 数据，使用内存台账/记录通知器，绝不发飞书
+.venv/Scripts/python.exe scripts/live_fear_dca_e2e.py
+
+# ⚠️ 真实发送：写 data/signals.db，最多发 1 张；已有 COMPLETE 时幂等跳过
+.venv/Scripts/python.exe scripts/live_fear_dca_e2e.py --send
+
+# ⚠️ 明确再多发 2 张：最新 COMPLETE 重放 1 张 + 静态规则 1 张
+.venv/Scripts/python.exe scripts/live_fear_dca_e2e.py --send --replay --rules
 
 # 初始化最近 252 个交易日的 ±10% 事件（默认不推送，支持中断检查点）
 .venv/Scripts/python.exe research/backfill_extreme_movers.py --sessions 252 \
