@@ -464,11 +464,19 @@ def _payload_json(payload: object) -> str:
 def _canonical_json(payload: object) -> str:
     return json.dumps(
         payload,
+        allow_nan=False,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         default=_json_default,
     )
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 
 class SignalLedger:
@@ -595,17 +603,25 @@ class SignalLedger:
         *,
         chart_status: str | None = None,
         send_status: str | None = None,
-        error: str | None = None,
+        error: str | None | _Unset = _UNSET,
     ) -> bool:
         """Update delivery metadata without changing the calculation status."""
+        replace_error = not isinstance(error, _Unset)
+        error_value = None if isinstance(error, _Unset) else error
         with self._lock:
             cursor = self._con.execute(
                 "UPDATE fear_dca_runs SET"
                 " chart_status=COALESCE(?, chart_status),"
                 " send_status=COALESCE(?, send_status),"
-                " error=COALESCE(?, error)"
+                " error=CASE WHEN ? THEN ? ELSE error END"
                 " WHERE session_date = ?",
-                (chart_status, send_status, error, session.isoformat()),
+                (
+                    chart_status,
+                    send_status,
+                    int(replace_error),
+                    error_value,
+                    session.isoformat(),
+                ),
             )
             self._con.commit()
         return cursor.rowcount > 0

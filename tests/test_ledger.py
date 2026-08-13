@@ -1266,3 +1266,72 @@ def test_fear_dca_delivery_metadata_updates_without_downgrading_complete(
     assert stored["chart_status"] == "DEGRADED"
     assert stored["send_status"] == "SENT"
     assert stored["error"] == "chart upload failed; sent text fallback"
+
+
+@pytest.mark.parametrize(
+    ("metrics", "decisions"),
+    [
+        (
+            {"vix": {"close": math.nan}},
+            {"spy": {"final_multiplier": 1.5}},
+        ),
+        (
+            {"vix": {"close": 30.0}},
+            {"spy": {"final_multiplier": math.inf}},
+        ),
+    ],
+    ids=["nonfinite-metrics", "nonfinite-decisions"],
+)
+def test_fear_dca_complete_run_rejects_nonfinite_json_without_persisting(
+    ledger: SignalLedger,
+    metrics: dict[str, object],
+    decisions: dict[str, object],
+) -> None:
+    session = date(2026, 8, 12)
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        ledger.save_complete_fear_dca_run(
+            session,
+            source="yfinance",
+            metrics=metrics,
+            decisions=decisions,
+            card=_fear_dca_card(),
+            now=NOW,
+        )
+
+    assert ledger.fear_dca_run(session) is None
+
+
+def test_fear_dca_successful_retry_clears_stale_delivery_error(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW,
+    )
+    assert ledger.update_fear_dca_delivery(
+        session,
+        send_status="FAILED",
+        error="temporary Feishu error",
+    )
+
+    assert ledger.update_fear_dca_delivery(session, chart_status="UPLOADED")
+    failed = ledger.fear_dca_run(session)
+    assert failed is not None
+    assert failed["error"] == "temporary Feishu error"
+
+    assert ledger.update_fear_dca_delivery(
+        session,
+        send_status="SENT",
+        error=None,
+    )
+
+    retried = ledger.fear_dca_run(session)
+    assert retried is not None
+    assert retried["send_status"] == "SENT"
+    assert retried["error"] is None
