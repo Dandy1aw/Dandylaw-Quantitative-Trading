@@ -21,7 +21,7 @@ from quant_signal.fear_dca import (
 CHART_WIDTH = 1200
 CHART_HEIGHT = 1000
 _SESSIONS = 60
-_MIN_CHART_SESSIONS = _SESSIONS + 1
+_MIN_CHART_SESSIONS = _SESSIONS * 2 - 1
 
 _Font: TypeAlias = ImageFont.FreeTypeFont | ImageFont.ImageFont
 _Point: TypeAlias = tuple[float, float]
@@ -68,7 +68,10 @@ def _validated_series(label: str, closes: pd.Series[float]) -> pd.Series[float]:
     if not closes.index.is_unique or not closes.index.is_monotonic_increasing:
         raise ValueError(f"{label} closes index must be unique and chronological")
     if len(closes) < _MIN_CHART_SESSIONS:
-        raise ValueError(f"{label} closes requires at least 61 sessions for MA60")
+        raise ValueError(
+            f"{label} closes requires at least 119 sessions for a complete "
+            "60-point MA60; recommendations require only 60 sessions"
+        )
     numeric = pd.to_numeric(closes, errors="coerce").astype(float)
     values = numeric.to_numpy(dtype=float)
     if not bool(np.all(np.isfinite(values) & (values > 0.0))):
@@ -77,7 +80,11 @@ def _validated_series(label: str, closes: pd.Series[float]) -> pd.Series[float]:
 
 
 def prepare_fear_chart_series(closes: pd.Series[float]) -> FearChartSeries:
-    """Prepare exactly 60 display sessions with at least two MA60 points."""
+    """Prepare the latest 60 sessions with a valid MA20 and MA60 at every point.
+
+    Chart rendering needs 119 sessions of warm-up history. This is deliberately
+    stricter than the independent recommendation calculation's 60-session minimum.
+    """
     validated = _validated_series("fear chart", closes)
     return FearChartSeries(
         closes=validated.tail(_SESSIONS),
@@ -298,7 +305,11 @@ def render_fear_dca_chart(
     spy_decision: RecommendationDecision,
     qqqm_decision: RecommendationDecision,
 ) -> bytes:
-    """Render the latest 60 aligned VIX/VXN sessions as deterministic PNG bytes."""
+    """Render the latest 60 aligned sessions after 119-session MA60 warm-up.
+
+    A shorter history may still produce a valid recommendation, but it cannot
+    produce this chart and should use the existing text-only degradation path.
+    """
     vix = _validated_series("VIX", vix_closes)
     vxn = _validated_series("VXN", vxn_closes)
     if not vix.tail(_SESSIONS).index.equals(vxn.tail(_SESSIONS).index):
