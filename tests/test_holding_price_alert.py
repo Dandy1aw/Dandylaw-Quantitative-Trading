@@ -25,11 +25,15 @@ def _bars(
         freq="1min",
     )
     volume = volumes or [10_000.0] * len(closes)
+    prices = np.asarray(closes)
+    with np.errstate(over="ignore"):
+        highs = prices * 1.001
+        lows = prices * 0.999
     return pd.DataFrame(
         {
             "open": closes,
-            "high": np.asarray(closes) * 1.001,
-            "low": np.asarray(closes) * 0.999,
+            "high": highs,
+            "low": lows,
             "close": closes,
             "volume": volume,
         },
@@ -215,7 +219,7 @@ def test_etf_uses_lower_threshold_than_stock() -> None:
 
 
 def test_volume_spike_can_trigger_with_a_smaller_price_move() -> None:
-    closes = [100.0] * 30 + [101.0]
+    closes = [100.0] * 30 + [101.2]
     volumes = [10_000.0] * 30 + [60_000.0]
 
     signals = detect_holding_price_alerts(
@@ -230,11 +234,32 @@ def test_volume_spike_can_trigger_with_a_smaller_price_move() -> None:
     assert signals[0].extra is not None
     assert signals[0].extra["window"] == "放量1分钟"
     assert signals[0].extra["threshold_pct"] == 0.010
-    assert signals[0].extra["strength_score"] == max(
-        signals[0].extra["volume_ratio"] / 4.0,
-        abs(signals[0].extra["move_pct"]) / 0.010,
+    assert signals[0].extra["strength_score"] == (
+        abs(signals[0].extra["move_pct"])
+        / signals[0].extra["threshold_pct"]
     )
-    assert signals[0].extra["severity"] == 2
+    assert signals[0].extra["severity"] == 1
+
+
+def test_six_times_volume_does_not_increase_strength_or_severity() -> None:
+    signals = detect_holding_price_alerts(
+        _bars(
+            [100.0] * 30 + [101.0],
+            volumes=[10_000.0] * 30 + [60_000.0],
+        ),
+        [_position()],
+        datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        HoldingPriceAlertSettings(),
+        frozenset(),
+    )
+
+    assert len(signals) == 1
+    signal = signals[0]
+    assert signal.extra is not None
+    assert signal.extra["window"] == "放量1分钟"
+    assert signal.extra["volume_ratio"] == 6.0
+    assert signal.extra["strength_score"] == pytest.approx(1.0)
+    assert signal.extra["severity"] == 1
 
 
 @pytest.mark.parametrize(
@@ -277,11 +302,23 @@ def test_volume_spike_triggers_at_exact_price_and_volume_boundaries() -> None:
     assert signal.extra["window"] == "放量1分钟"
     assert signal.extra["move_pct"] == pytest.approx(0.010)
     assert signal.extra["threshold_pct"] == 0.010
-    assert signal.extra["strength_score"] == max(
-        signal.extra["volume_ratio"] / 4.0,
-        abs(signal.extra["move_pct"]) / 0.010,
+    assert signal.extra["strength_score"] == (
+        abs(signal.extra["move_pct"])
+        / signal.extra["threshold_pct"]
     )
     assert signal.extra["severity"] == 1
+
+
+def test_nonfinite_move_from_finite_extreme_closes_fails_closed() -> None:
+    signals = detect_holding_price_alerts(
+        _bars([1e-308] * 30 + [1e308]),
+        [_position()],
+        datetime(2026, 8, 4, 14, 30, tzinfo=UTC),
+        _base_threshold_settings(),
+        frozenset(),
+    )
+
+    assert signals == []
 
 
 def test_stale_bars_do_not_alert() -> None:
