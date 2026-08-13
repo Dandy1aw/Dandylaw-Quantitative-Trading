@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 18
+_SCHEMA_VERSION = 19
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -426,6 +426,8 @@ CREATE TABLE IF NOT EXISTS fear_dca_runs (
     chart_status TEXT NOT NULL,
     send_status TEXT NOT NULL,
     error TEXT,
+    chart_error TEXT,
+    send_error TEXT,
     completed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fear_dca_runs_latest_complete
@@ -532,19 +534,15 @@ class SignalLedger:
         send_status: str = "PENDING",
         now: datetime,
     ) -> bool:
-        """Save a failed attempt unless the session already has a complete result."""
+        """Claim a failed session once so only one caller sends its notice."""
         with self._lock:
             cursor = self._con.execute(
                 "INSERT INTO fear_dca_runs"
                 " (session_date, status, source, metrics_json, decisions_json,"
-                " card_json, chart_status, send_status, error, completed_at)"
-                " VALUES (?, 'FAILED', ?, NULL, NULL, NULL, ?, ?, ?, ?)"
-                " ON CONFLICT(session_date) DO UPDATE SET"
-                " status='FAILED', source=excluded.source, metrics_json=NULL,"
-                " decisions_json=NULL, card_json=NULL,"
-                " chart_status=excluded.chart_status, send_status=excluded.send_status,"
-                " error=excluded.error, completed_at=excluded.completed_at"
-                " WHERE fear_dca_runs.status != 'COMPLETE'",
+                " card_json, chart_status, send_status, error, chart_error,"
+                " send_error, completed_at)"
+                " VALUES (?, 'FAILED', ?, NULL, NULL, NULL, ?, ?, ?, NULL, NULL, ?)"
+                " ON CONFLICT(session_date) DO NOTHING",
                 (
                     session.isoformat(),
                     source,
@@ -567,6 +565,8 @@ class SignalLedger:
         card: Card,
         chart_status: str = "PENDING",
         send_status: str = "PENDING",
+        chart_error: str | None = None,
+        send_error: str | None = None,
         now: datetime,
     ) -> bool:
         """Insert a complete result or supersede the session's failed attempt."""
@@ -574,14 +574,16 @@ class SignalLedger:
             cursor = self._con.execute(
                 "INSERT INTO fear_dca_runs"
                 " (session_date, status, source, metrics_json, decisions_json,"
-                " card_json, chart_status, send_status, error, completed_at)"
-                " VALUES (?, 'COMPLETE', ?, ?, ?, ?, ?, ?, NULL, ?)"
+                " card_json, chart_status, send_status, error, chart_error,"
+                " send_error, completed_at)"
+                " VALUES (?, 'COMPLETE', ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)"
                 " ON CONFLICT(session_date) DO UPDATE SET"
                 " status='COMPLETE', source=excluded.source,"
                 " metrics_json=excluded.metrics_json,"
                 " decisions_json=excluded.decisions_json, card_json=excluded.card_json,"
                 " chart_status=excluded.chart_status, send_status=excluded.send_status,"
-                " error=NULL, completed_at=excluded.completed_at"
+                " error=NULL, chart_error=excluded.chart_error,"
+                " send_error=excluded.send_error, completed_at=excluded.completed_at"
                 " WHERE fear_dca_runs.status != 'COMPLETE'",
                 (
                     session.isoformat(),
@@ -591,6 +593,8 @@ class SignalLedger:
                     _canonical_json(card_to_dict(card)),
                     chart_status,
                     send_status,
+                    chart_error,
+                    send_error,
                     now.astimezone(timezone.utc).isoformat(),
                 ),
             )
@@ -603,23 +607,53 @@ class SignalLedger:
         *,
         chart_status: str | None = None,
         send_status: str | None = None,
-        error: str | None | _Unset = _UNSET,
+        chart_error: str | None | _Unset = _UNSET,
+        send_error: str | None | _Unset = _UNSET,
     ) -> bool:
-        """Update delivery metadata without changing the calculation status."""
-        replace_error = not isinstance(error, _Unset)
-        error_value = None if isinstance(error, _Unset) else error
+        """Update delivery metadata without regressing terminal states."""
+        replace_chart_error = not isinstance(chart_error, _Unset)
+        chart_error_value = None if isinstance(chart_error, _Unset) else chart_error
+        replace_send_error = not isinstance(send_error, _Unset)
+        send_error_value = None if isinstance(send_error, _Unset) else send_error
         with self._lock:
             cursor = self._con.execute(
                 "UPDATE fear_dca_runs SET"
-                " chart_status=COALESCE(?, chart_status),"
-                " send_status=COALESCE(?, send_status),"
-                " error=CASE WHEN ? THEN ? ELSE error END"
+                " chart_status=CASE"
+                " WHEN ? IS NULL THEN chart_status"
+                " WHEN chart_status IN ('UPLOADED', 'DEGRADED')"
+                "  AND ? <> chart_status THEN chart_status"
+                " ELSE ? END,"
+                " send_status=CASE"
+                " WHEN ? IS NULL THEN send_status"
+                " WHEN send_status = 'SENT' AND ? <> send_status THEN send_status"
+                " ELSE ? END,"
+                " chart_error=CASE"
+                " WHEN ? = 0 THEN chart_error"
+                " WHEN ? IS NOT NULL"
+                "  AND chart_status IN ('UPLOADED', 'DEGRADED')"
+                "  AND ? <> chart_status THEN chart_error"
+                " ELSE ? END,"
+                " send_error=CASE"
+                " WHEN ? = 0 THEN send_error"
+                " WHEN ? IS NOT NULL AND send_status = 'SENT'"
+                "  AND ? <> send_status THEN send_error"
+                " ELSE ? END"
                 " WHERE session_date = ?",
                 (
                     chart_status,
+                    chart_status,
+                    chart_status,
                     send_status,
-                    int(replace_error),
-                    error_value,
+                    send_status,
+                    send_status,
+                    int(replace_chart_error),
+                    chart_status,
+                    chart_status,
+                    chart_error_value,
+                    int(replace_send_error),
+                    send_status,
+                    send_status,
+                    send_error_value,
                     session.isoformat(),
                 ),
             )
@@ -964,6 +998,15 @@ class SignalLedger:
             if column not in mover_columns:
                 self._con.execute(
                     f"ALTER TABLE extreme_mover_runs ADD COLUMN {column} {declaration}"
+                )
+        fear_dca_columns = {
+            str(row[1])
+            for row in self._con.execute("PRAGMA table_info(fear_dca_runs)").fetchall()
+        }
+        for column in ("chart_error", "send_error"):
+            if column not in fear_dca_columns:
+                self._con.execute(
+                    f"ALTER TABLE fear_dca_runs ADD COLUMN {column} TEXT"
                 )
 
     def cached_company_profiles(

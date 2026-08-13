@@ -1161,6 +1161,67 @@ def test_fear_dca_failed_run_can_be_superseded_by_complete(
     assert stored["completed_at"] == (NOW + timedelta(minutes=1)).isoformat()
 
 
+def test_fear_dca_failed_run_is_a_first_claim_that_preserves_delivery_state(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="first data error",
+        now=NOW,
+    )
+    assert ledger.update_fear_dca_delivery(
+        session,
+        send_status="FAILED",
+        send_error="temporary Feishu error",
+    )
+
+    assert not ledger.save_failed_fear_dca_run(
+        session,
+        source="fallback",
+        error="duplicate data error",
+        send_status="PENDING",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["source"] == "yfinance"
+    assert stored["error"] == "first data error"
+    assert stored["send_status"] == "FAILED"
+    assert stored["send_error"] == "temporary Feishu error"
+
+
+def test_fear_dca_failed_run_is_first_claim_across_ledger_connections(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "shared-fear-runs.db"
+    first = SignalLedger(db_path)
+    second = SignalLedger(db_path)
+    session = date(2026, 8, 12)
+
+    assert first.save_failed_fear_dca_run(
+        session, source="yfinance", error="first data error", now=NOW
+    )
+    assert first.update_fear_dca_delivery(
+        session, send_status="SENT", send_error=None
+    )
+    assert not second.save_failed_fear_dca_run(
+        session,
+        source="fallback",
+        error="duplicate data error",
+        send_status="PENDING",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    stored = second.fear_dca_run(session)
+    assert stored is not None
+    assert stored["source"] == "yfinance"
+    assert stored["send_status"] == "SENT"
+    assert stored["send_error"] is None
+
+
 def test_fear_dca_complete_run_is_unique_and_cannot_be_downgraded(
     tmp_path: Path,
 ) -> None:
@@ -1204,7 +1265,7 @@ def test_fear_dca_complete_run_is_unique_and_cannot_be_downgraded(
         '{"a":{"first":1,"second":2},"z":1}',
         '{"spy":{"reason":"keep exact"}}',
     )
-    assert ledger.schema_version() >= 18
+    assert ledger.schema_version() >= 19
 
 
 def test_latest_complete_fear_dca_run_and_card_ignore_failed_sessions(
@@ -1257,7 +1318,8 @@ def test_fear_dca_delivery_metadata_updates_without_downgrading_complete(
         session,
         chart_status="DEGRADED",
         send_status="SENT",
-        error="chart upload failed; sent text fallback",
+        chart_error="chart upload failed; sent text fallback",
+        send_error=None,
     )
 
     stored = ledger.fear_dca_run(session)
@@ -1265,7 +1327,9 @@ def test_fear_dca_delivery_metadata_updates_without_downgrading_complete(
     assert stored["status"] == "COMPLETE"
     assert stored["chart_status"] == "DEGRADED"
     assert stored["send_status"] == "SENT"
-    assert stored["error"] == "chart upload failed; sent text fallback"
+    assert stored["error"] is None
+    assert stored["chart_error"] == "chart upload failed; sent text fallback"
+    assert stored["send_error"] is None
 
 
 @pytest.mark.parametrize(
@@ -1302,7 +1366,7 @@ def test_fear_dca_complete_run_rejects_nonfinite_json_without_persisting(
     assert ledger.fear_dca_run(session) is None
 
 
-def test_fear_dca_successful_retry_clears_stale_delivery_error(
+def test_fear_dca_successful_retry_clears_only_stale_send_error(
     ledger: SignalLedger,
 ) -> None:
     session = date(2026, 8, 12)
@@ -1316,22 +1380,62 @@ def test_fear_dca_successful_retry_clears_stale_delivery_error(
     )
     assert ledger.update_fear_dca_delivery(
         session,
+        chart_status="DEGRADED",
+        chart_error="chart upload failed; text fallback used",
         send_status="FAILED",
-        error="temporary Feishu error",
+        send_error="temporary Feishu error",
     )
 
-    assert ledger.update_fear_dca_delivery(session, chart_status="UPLOADED")
     failed = ledger.fear_dca_run(session)
     assert failed is not None
-    assert failed["error"] == "temporary Feishu error"
+    assert failed["chart_error"] == "chart upload failed; text fallback used"
+    assert failed["send_error"] == "temporary Feishu error"
 
     assert ledger.update_fear_dca_delivery(
         session,
         send_status="SENT",
-        error=None,
+        send_error=None,
     )
 
     retried = ledger.fear_dca_run(session)
     assert retried is not None
+    assert retried["chart_status"] == "DEGRADED"
+    assert retried["chart_error"] == "chart upload failed; text fallback used"
     assert retried["send_status"] == "SENT"
-    assert retried["error"] is None
+    assert retried["send_error"] is None
+
+
+def test_fear_dca_delivery_terminal_states_ignore_stale_downgrades(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW,
+    )
+    assert ledger.update_fear_dca_delivery(
+        session,
+        chart_status="UPLOADED",
+        chart_error=None,
+        send_status="SENT",
+        send_error=None,
+    )
+
+    assert ledger.update_fear_dca_delivery(
+        session,
+        chart_status="PENDING",
+        chart_error="stale chart attempt",
+        send_status="FAILED",
+        send_error="stale send attempt",
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["chart_status"] == "UPLOADED"
+    assert stored["chart_error"] is None
+    assert stored["send_status"] == "SENT"
+    assert stored["send_error"] is None
