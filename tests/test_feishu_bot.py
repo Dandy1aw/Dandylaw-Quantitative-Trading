@@ -149,11 +149,14 @@ def test_feishu_proxy_is_scoped_to_sdk_http_and_websocket(
 
 def test_lark_transport_uploads_message_image_bytes_once() -> None:
     from lark_oapi.api.im.v1 import CreateImageRequest, CreateImageResponse
+    from lark_oapi.core.utils.files import Files
+    from requests_toolbelt import MultipartEncoder
 
     class FakeImageApi:
         def __init__(self) -> None:
             self.requests: list[CreateImageRequest] = []
             self.uploaded = b""
+            self.multipart = b""
 
         def create(self, request: CreateImageRequest) -> CreateImageResponse:
             self.requests.append(request)
@@ -161,7 +164,20 @@ def test_lark_transport_uploads_message_image_bytes_once() -> None:
             assert body is not None
             assert body.image_type == "message"
             assert body.image is not None
-            self.uploaded = body.image.read()
+            assert isinstance(body.image, tuple)
+            filename, image_stream, content_type = body.image
+            assert filename == "fear-dca.png"
+            assert content_type == "image/png"
+            assert image_stream.name == "fear-dca.png"
+            assert image_stream.closed is False
+            self.multipart = MultipartEncoder(
+                Files.parse_form_data(body)
+            ).to_string()
+            self.uploaded = (
+                b"\x89PNG chart bytes"
+                if b"\x89PNG chart bytes" in self.multipart
+                else b""
+            )
             return CreateImageResponse(
                 {"code": 0, "msg": "ok", "data": {"image_key": "img_v2_chart"}}
             )
@@ -180,6 +196,7 @@ def test_lark_transport_uploads_message_image_bytes_once() -> None:
 
     assert transport.upload_image(b"\x89PNG chart bytes") == "img_v2_chart"
     assert image_api.uploaded == b"\x89PNG chart bytes"
+    assert b'filename="fear-dca.png"' in image_api.multipart
     assert len(image_api.requests) == 1
 
 

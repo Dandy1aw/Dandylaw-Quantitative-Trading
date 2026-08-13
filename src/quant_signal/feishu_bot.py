@@ -1104,20 +1104,26 @@ class LarkTransport:
             CreateImageRequestBody,
         )
 
-        request = (
-            CreateImageRequest.builder()
-            .request_body(
-                CreateImageRequestBody.builder()
-                .image_type("message")
-                .image(BytesIO(image_bytes))
+        class NamedImageStream(BytesIO):
+            name = "fear-dca.png"
+
+        with NamedImageStream(image_bytes) as image_stream:
+            request = (
+                CreateImageRequest.builder()
+                .request_body(
+                    CreateImageRequestBody.builder()
+                    .image_type("message")
+                    .image(("fear-dca.png", image_stream, "image/png"))
+                    .build()
+                )
                 .build()
             )
-            .build()
-        )
-        try:
-            response = self._client.im.v1.image.create(request)
-        except Exception as error:
-            raise RuntimeError(f"Feishu image upload failed: {error}") from error
+            try:
+                response = self._client.im.v1.image.create(request)
+            except Exception as error:
+                raise RuntimeError(
+                    f"Feishu image upload failed: {error}"
+                ) from error
         if not response.success():
             raise RuntimeError(
                 f"Feishu image upload failed: {response.code} {response.msg}"
