@@ -27,6 +27,10 @@ from quant_signal.pipelines.extreme_movers import (
     run_close as run_extreme_movers_close_pipeline,
     run_premarket as run_extreme_movers_premarket_pipeline,
 )
+from quant_signal.pipelines.fear_dca import (
+    replay as replay_fear_dca_pipeline,
+    run as run_fear_dca_pipeline,
+)
 from quant_signal.pipelines.holding_price_alert import run as run_holding_price_alert_pipeline
 from quant_signal.pipelines.execution_plan import (
     run_daily as run_execution_brief_pipeline,
@@ -376,6 +380,12 @@ class Engine:
 
     def run_negative_overreaction(self, now: datetime) -> None:
         run_negative_overreaction_pipeline(self, now)
+
+    def run_fear_dca(self, now: datetime) -> bool:
+        return run_fear_dca_pipeline(self, now)
+
+    def resend_latest_fear_dca(self) -> bool:
+        return replay_fear_dca_pipeline(self)
 
     def run_execution_brief(
         self,
