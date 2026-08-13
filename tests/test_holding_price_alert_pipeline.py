@@ -400,6 +400,62 @@ def test_research_only_runs_for_candidates_actually_attempted(
     assert [row[1] for row in engine.ledger.inserted] == [True, False]
 
 
+def test_research_batches_all_currently_approved_candidates_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    engine = _Engine(_bars(102.0), [_position()], cause_search=True)
+    engine.ledger.history = [_history_row("P1"), _history_row("P2")]
+    _patch_candidates(
+        monkeypatch,
+        [
+            _candidate("A", strength=2.0),
+            _candidate("B", strength=1.5),
+            _candidate("C", strength=1.0),
+        ],
+    )
+
+    def fake_research(signals, settings, *, now, seed_news):  # type: ignore[no-untyped-def]
+        calls.append([signal.ticker for signal in signals])
+        return {}
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.holding_price_alert.research_price_move_causes",
+        fake_research,
+    )
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert calls == [["A", "B"]]
+    assert [row[0].ticker for row in engine.ledger.inserted] == ["A", "B", "C"]
+    assert [row[1] for row in engine.ledger.inserted] == [True, True, False]
+
+
+def test_failed_send_only_researches_newly_promoted_candidate_in_second_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    engine = _Engine(_bars(102.0), [_position()], cause_search=True)
+    engine.notifier = _Notifier([False, True])
+    engine.ledger.history = [_history_row("P1"), _history_row("P2"), _history_row("P3")]
+    _patch_candidates(
+        monkeypatch,
+        [_candidate("A", strength=2.0), _candidate("B", strength=1.0)],
+    )
+
+    def fake_research(signals, settings, *, now, seed_news):  # type: ignore[no-untyped-def]
+        calls.append([signal.ticker for signal in signals])
+        return {}
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.holding_price_alert.research_price_move_causes",
+        fake_research,
+    )
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert calls == [["A"], ["B"]]
+    assert [row[1] for row in engine.ledger.inserted] == [False, True]
+
+
 def test_history_parser_fails_closed_for_malformed_direction_and_extra() -> None:
     rows = [
         {
@@ -420,3 +476,61 @@ def test_history_parser_fails_closed_for_malformed_direction_and_extra() -> None
     assert history[0].strength_score >= 1.5
     assert blocked_tickers == {"AAA"}
     assert issues
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"severity": 1, "strength_score": 10**10000},
+        {
+            "severity": 1,
+            "move_pct": 10**10000,
+            "threshold_pct": 0.02,
+        },
+        {
+            "severity": 1,
+            "move_pct": 0.02,
+            "threshold_pct": 10**10000,
+        },
+        {
+            "severity": 1,
+            "move_pct": 1.0,
+            "threshold_pct": 5e-324,
+        },
+    ],
+)
+def test_history_parser_conservatively_accepts_extreme_json_numbers(
+    extra: dict[str, object],
+) -> None:
+    history, blocked_tickers, issues = _prior_alerts_from_rows(
+        [
+            {
+                "ticker": "AAA",
+                "direction": "buy",
+                "pushed_at": "2026-08-04T14:00:00+00:00",
+                "extra": extra,
+                "extra_valid": True,
+            }
+        ],
+        datetime(2026, 8, 4, 4, tzinfo=UTC),
+    )
+
+    assert len(history) == 1
+    assert history[0].strength_score == 1.5
+    assert blocked_tickers == set()
+    assert any("conservative_strength" in issue for issue in issues)
+
+
+def test_pipeline_does_not_crash_on_extreme_valid_history_number(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _Engine(_bars(102.0), [_position()])
+    row = _history_row("OLD")
+    row["extra"] = {"severity": 1, "strength_score": 10**10000}
+    engine.ledger.history = [row]
+    _patch_candidates(monkeypatch, [_candidate("NEW")])
+
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert engine.ledger.inserted[-1][1] is True
+    assert engine.ledger.inserted[-1][0].extra["ticker_alert_number"] == 1

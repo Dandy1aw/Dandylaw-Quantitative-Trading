@@ -21,7 +21,7 @@ from quant_signal.holding_alert_rate_limit import (
 )
 from quant_signal.holding_price_alert import STRATEGY_ID, evaluate_holding_price_alerts
 from quant_signal.notifier.cards import holding_price_alert_card
-from quant_signal.price_move_research import research_price_move_causes
+from quant_signal.price_move_research import PriceMoveCause, research_price_move_causes
 from quant_signal.strategies.base import Direction, Signal
 
 if TYPE_CHECKING:
@@ -71,7 +71,20 @@ def _minute_fetcher(engine: Engine) -> Callable[[list[str], int], pd.DataFrame]:
 def _finite_positive(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return normalized if math.isfinite(normalized) and normalized > 0 else None
+
+
+def _finite_absolute(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        normalized = abs(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
     return normalized if math.isfinite(normalized) and normalized > 0 else None
 
 
@@ -150,12 +163,18 @@ def _prior_alerts_from_rows(
             _finite_positive(extra.get("strength_score")) if extra_valid else None
         )
         if strength is None and extra_valid:
-            move = _finite_positive(abs(float(extra["move_pct"]))) if isinstance(
-                extra.get("move_pct"), (int, float)
-            ) and not isinstance(extra.get("move_pct"), bool) else None
+            move = _finite_absolute(extra.get("move_pct"))
             threshold = _finite_positive(extra.get("threshold_pct"))
             if move is not None and threshold is not None:
-                strength = move / threshold
+                try:
+                    derived_strength = move / threshold
+                except (OverflowError, ZeroDivisionError):
+                    derived_strength = math.inf
+                strength = (
+                    derived_strength
+                    if math.isfinite(derived_strength) and derived_strength > 0
+                    else None
+                )
         if strength is None or not math.isfinite(strength) or strength <= 0:
             strength = 1.5
             issues.append(f"row[{index}]:conservative_strength")
@@ -308,6 +327,8 @@ def run(engine: Engine, now: datetime) -> None:
     pushed_kinds: Counter[str] = Counter()
     suppression_counts: Counter[str] = Counter()
     search_settings = settings.cause_search
+    researched_signal_ids: set[int] = set()
+    cause_cache: dict[int, PriceMoveCause] = {}
     remaining: list[Signal] = []
     history_count_by_ticker = Counter(alert.ticker for alert in history)
     for signal in signals:
@@ -341,6 +362,34 @@ def run(engine: Engine, now: datetime) -> None:
             per_ticker_cap=settings.max_alerts_per_ticker_per_day,
             upgrade_score=settings.meaningful_upgrade_score,
         )
+        newly_approved = [
+            item.signal
+            for item in decisions
+            if item.should_send and id(item.signal) not in researched_signal_ids
+        ]
+        if newly_approved:
+            researched_signal_ids.update(id(signal) for signal in newly_approved)
+            seed_news = _recent_news(
+                engine,
+                [signal.ticker for signal in newly_approved],
+                now,
+                search_settings.lookback_hours,
+            )
+            try:
+                researched_causes = research_price_move_causes(
+                    newly_approved,
+                    search_settings,
+                    now=now,
+                    seed_news=seed_news,
+                )
+            except Exception as error:  # noqa: BLE001 - 查因失败不能吞掉价格告警
+                log.warning("holding_price_alert.research_failed", error=str(error))
+                researched_causes = {}
+            for signal in newly_approved:
+                cause = researched_causes.get(signal.ticker)
+                if cause is not None:
+                    cause_cache[id(signal)] = cause
+
         decision = decisions[0]
         remaining.remove(decision.signal)
         if not decision.should_send:
@@ -351,23 +400,7 @@ def run(engine: Engine, now: datetime) -> None:
             continue
 
         audited = _with_decision_audit(decision)
-        seed_news = _recent_news(
-            engine,
-            [audited.ticker],
-            now,
-            search_settings.lookback_hours,
-        )
-        try:
-            causes = research_price_move_causes(
-                [audited],
-                search_settings,
-                now=now,
-                seed_news=seed_news,
-            )
-        except Exception as error:  # noqa: BLE001 - 查因失败不能吞掉价格告警
-            log.warning("holding_price_alert.research_failed", error=str(error))
-            causes = {}
-        cause = causes.get(audited.ticker)
+        cause = cause_cache.get(id(decision.signal))
         if cause is not None:
             extra = dict(audited.extra or {})
             extra["price_move_cause"] = cause.as_dict()
