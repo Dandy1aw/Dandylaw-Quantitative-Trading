@@ -1111,3 +1111,158 @@ def test_manual_monitors_are_idempotent_and_soft_deleted(
     assert ledger.disable_manual_monitor("AAOI", now=NOW)
     assert not ledger.disable_manual_monitor("AAOI", now=NOW)
     assert ledger.active_manual_monitors() == []
+
+
+def _fear_dca_card(*, image_key: str | None = "img_v2_fear") -> Card:
+    return Card(
+        kind=CardKind.REPORT,
+        title="Fear DCA | 2026-08-12 close",
+        body_md="SPY 1.5x; QQQM 2x",
+        sections=(CardSection("Rules"), CardSection("No automatic orders")),
+        image_key=image_key,
+    )
+
+
+def test_fear_dca_failed_run_can_be_superseded_by_complete(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_failed_fear_dca_run(
+        session,
+        source="yfinance",
+        error="QQQM_MISSING",
+        chart_status="PENDING",
+        send_status="FAILED",
+        now=NOW,
+    )
+
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 31.25}, "spy": {"close": 645.1}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        chart_status="UPLOADED",
+        send_status="PENDING",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["source"] == "yfinance"
+    assert stored["metrics"] == {
+        "spy": {"close": 645.1},
+        "vix": {"close": 31.25},
+    }
+    assert stored["decisions"] == {"spy": {"final_multiplier": 1.5}}
+    assert stored["card"] == _fear_dca_card()
+    assert stored["error"] is None
+    assert stored["completed_at"] == (NOW + timedelta(minutes=1)).isoformat()
+
+
+def test_fear_dca_complete_run_is_unique_and_cannot_be_downgraded(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "fear-runs.db"
+    ledger = SignalLedger(db_path)
+    session = date(2026, 8, 12)
+    metrics = {"z": 1, "a": {"second": 2, "first": 1}}
+    decisions = {"spy": {"reason": "keep exact"}}
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics=metrics,
+        decisions=decisions,
+        card=_fear_dca_card(),
+        chart_status="UPLOADED",
+        send_status="SENT",
+        now=NOW,
+    )
+
+    assert not ledger.save_failed_fear_dca_run(
+        session,
+        source="fallback",
+        error="late failure",
+        chart_status="FAILED",
+        send_status="FAILED",
+        now=NOW + timedelta(minutes=1),
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["source"] == "yfinance"
+    assert stored["metrics"] == metrics
+    assert stored["error"] is None
+    with sqlite3.connect(db_path) as con:
+        row = con.execute(
+            "SELECT count(*), metrics_json, decisions_json FROM fear_dca_runs"
+        ).fetchone()
+    assert row == (
+        1,
+        '{"a":{"first":1,"second":2},"z":1}',
+        '{"spy":{"reason":"keep exact"}}',
+    )
+    assert ledger.schema_version() >= 18
+
+
+def test_latest_complete_fear_dca_run_and_card_ignore_failed_sessions(
+    ledger: SignalLedger,
+) -> None:
+    older = date(2026, 8, 11)
+    latest = date(2026, 8, 12)
+    failed = date(2026, 8, 13)
+    older_card = _fear_dca_card(image_key=None)
+    latest_card = _fear_dca_card()
+    for session, card in ((older, older_card), (latest, latest_card)):
+        assert ledger.save_complete_fear_dca_run(
+            session,
+            source="yfinance",
+            metrics={"session": session.isoformat()},
+            decisions={"spy": {"final_multiplier": 1.0}},
+            card=card,
+            chart_status="UPLOADED" if card.image_key else "DEGRADED",
+            send_status="SENT",
+            now=NOW,
+        )
+    assert ledger.save_failed_fear_dca_run(
+        failed, source="yfinance", error="STALE_DATA", now=NOW
+    )
+
+    latest_run = ledger.latest_complete_fear_dca_run()
+    assert latest_run is not None
+    assert latest_run["session_date"] == latest.isoformat()
+    assert latest_run["card"] == latest_card
+    assert ledger.fear_dca_card(older) == older_card
+    assert ledger.latest_complete_fear_dca_card() == latest_card
+
+
+def test_fear_dca_delivery_metadata_updates_without_downgrading_complete(
+    ledger: SignalLedger,
+) -> None:
+    session = date(2026, 8, 12)
+    assert ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(image_key=None),
+        chart_status="PENDING",
+        send_status="PENDING",
+        now=NOW,
+    )
+
+    assert ledger.update_fear_dca_delivery(
+        session,
+        chart_status="DEGRADED",
+        send_status="SENT",
+        error="chart upload failed; sent text fallback",
+    )
+
+    stored = ledger.fear_dca_run(session)
+    assert stored is not None
+    assert stored["status"] == "COMPLETE"
+    assert stored["chart_status"] == "DEGRADED"
+    assert stored["send_status"] == "SENT"
+    assert stored["error"] == "chart upload failed; sent text fallback"

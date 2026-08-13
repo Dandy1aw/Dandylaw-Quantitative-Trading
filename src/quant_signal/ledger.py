@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from quant_signal.options_intel import OptionIntel
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
-_SCHEMA_VERSION = 17
+_SCHEMA_VERSION = 18
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -416,6 +416,20 @@ CREATE TABLE IF NOT EXISTS manual_price_monitors (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fear_dca_runs (
+    session_date TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    source TEXT NOT NULL,
+    metrics_json TEXT,
+    decisions_json TEXT,
+    card_json TEXT,
+    chart_status TEXT NOT NULL,
+    send_status TEXT NOT NULL,
+    error TEXT,
+    completed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fear_dca_runs_latest_complete
+    ON fear_dca_runs(status, session_date DESC);
 """
 
 
@@ -444,6 +458,16 @@ def _json_default(value: object) -> object:
 def _payload_json(payload: object) -> str:
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, default=_json_default
+    )
+
+
+def _canonical_json(payload: object) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_default,
     )
 
 
@@ -489,6 +513,149 @@ class SignalLedger:
                 "SELECT value FROM schema_meta WHERE key = 'schema_version'"
             ).fetchone()
         return int(row["value"]) if row else 0
+
+    def save_failed_fear_dca_run(
+        self,
+        session: date,
+        *,
+        source: str,
+        error: str,
+        chart_status: str = "PENDING",
+        send_status: str = "PENDING",
+        now: datetime,
+    ) -> bool:
+        """Save a failed attempt unless the session already has a complete result."""
+        with self._lock:
+            cursor = self._con.execute(
+                "INSERT INTO fear_dca_runs"
+                " (session_date, status, source, metrics_json, decisions_json,"
+                " card_json, chart_status, send_status, error, completed_at)"
+                " VALUES (?, 'FAILED', ?, NULL, NULL, NULL, ?, ?, ?, ?)"
+                " ON CONFLICT(session_date) DO UPDATE SET"
+                " status='FAILED', source=excluded.source, metrics_json=NULL,"
+                " decisions_json=NULL, card_json=NULL,"
+                " chart_status=excluded.chart_status, send_status=excluded.send_status,"
+                " error=excluded.error, completed_at=excluded.completed_at"
+                " WHERE fear_dca_runs.status != 'COMPLETE'",
+                (
+                    session.isoformat(),
+                    source,
+                    chart_status,
+                    send_status,
+                    error,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    def save_complete_fear_dca_run(
+        self,
+        session: date,
+        *,
+        source: str,
+        metrics: Mapping[str, object],
+        decisions: Mapping[str, object],
+        card: Card,
+        chart_status: str = "PENDING",
+        send_status: str = "PENDING",
+        now: datetime,
+    ) -> bool:
+        """Insert a complete result or supersede the session's failed attempt."""
+        with self._lock:
+            cursor = self._con.execute(
+                "INSERT INTO fear_dca_runs"
+                " (session_date, status, source, metrics_json, decisions_json,"
+                " card_json, chart_status, send_status, error, completed_at)"
+                " VALUES (?, 'COMPLETE', ?, ?, ?, ?, ?, ?, NULL, ?)"
+                " ON CONFLICT(session_date) DO UPDATE SET"
+                " status='COMPLETE', source=excluded.source,"
+                " metrics_json=excluded.metrics_json,"
+                " decisions_json=excluded.decisions_json, card_json=excluded.card_json,"
+                " chart_status=excluded.chart_status, send_status=excluded.send_status,"
+                " error=NULL, completed_at=excluded.completed_at"
+                " WHERE fear_dca_runs.status != 'COMPLETE'",
+                (
+                    session.isoformat(),
+                    source,
+                    _canonical_json(metrics),
+                    _canonical_json(decisions),
+                    _canonical_json(card_to_dict(card)),
+                    chart_status,
+                    send_status,
+                    now.astimezone(timezone.utc).isoformat(),
+                ),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    def update_fear_dca_delivery(
+        self,
+        session: date,
+        *,
+        chart_status: str | None = None,
+        send_status: str | None = None,
+        error: str | None = None,
+    ) -> bool:
+        """Update delivery metadata without changing the calculation status."""
+        with self._lock:
+            cursor = self._con.execute(
+                "UPDATE fear_dca_runs SET"
+                " chart_status=COALESCE(?, chart_status),"
+                " send_status=COALESCE(?, send_status),"
+                " error=COALESCE(?, error)"
+                " WHERE session_date = ?",
+                (chart_status, send_status, error, session.isoformat()),
+            )
+            self._con.commit()
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _fear_dca_run_from_row(row: sqlite3.Row) -> dict[str, object]:
+        item: dict[str, object] = dict(row)
+        raw_metrics = item.pop("metrics_json")
+        raw_decisions = item.pop("decisions_json")
+        raw_card = item.pop("card_json")
+        item["metrics"] = (
+            json.loads(str(raw_metrics)) if raw_metrics is not None else None
+        )
+        item["decisions"] = (
+            json.loads(str(raw_decisions)) if raw_decisions is not None else None
+        )
+        item["card"] = (
+            card_from_dict(json.loads(str(raw_card))) if raw_card is not None else None
+        )
+        return item
+
+    def fear_dca_run(self, session: date) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM fear_dca_runs WHERE session_date = ?",
+                (session.isoformat(),),
+            ).fetchone()
+        return self._fear_dca_run_from_row(row) if row is not None else None
+
+    def latest_complete_fear_dca_run(self) -> dict[str, object] | None:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT * FROM fear_dca_runs WHERE status = 'COMPLETE'"
+                " ORDER BY session_date DESC LIMIT 1"
+            ).fetchone()
+        return self._fear_dca_run_from_row(row) if row is not None else None
+
+    def fear_dca_card(self, session: date) -> Card | None:
+        run = self.fear_dca_run(session)
+        if run is None or run["status"] != "COMPLETE":
+            return None
+        card = run["card"]
+        return card if isinstance(card, Card) else None
+
+    def latest_complete_fear_dca_card(self) -> Card | None:
+        run = self.latest_complete_fear_dca_run()
+        if run is None:
+            return None
+        card = run["card"]
+        return card if isinstance(card, Card) else None
 
     def replace_extreme_mover_run(
         self,

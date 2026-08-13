@@ -30,6 +30,7 @@ class Card:
     body_md: str
     url: str | None = None
     sections: tuple[CardSection, ...] = ()
+    image_key: str | None = None
 
 
 class Notifier(Protocol):
@@ -43,6 +44,7 @@ def card_to_dict(card: Card) -> dict[str, object]:
         "body_md": card.body_md,
         "url": card.url,
         "sections": [section.content_md for section in card.sections],
+        "image_key": card.image_key,
     }
 
 
@@ -54,6 +56,9 @@ def card_from_dict(payload: Mapping[str, Any]) -> Card:
         body_md=str(payload["body_md"]),
         url=str(payload["url"]) if payload.get("url") else None,
         sections=tuple(CardSection(str(content)) for content in raw_sections),
+        image_key=(
+            str(payload["image_key"]) if payload.get("image_key") else None
+        ),
     )
 
 
@@ -70,11 +75,7 @@ class ConsoleNotifier:
             self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
             rec = {
                 "ts": datetime.now(timezone.utc).isoformat(),
-                "kind": card.kind.value,
-                "title": card.title,
-                "body_md": card.body_md,
-                "url": card.url,
-                "sections": [section.content_md for section in card.sections],
+                **card_to_dict(card),
             }
             with self._jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
