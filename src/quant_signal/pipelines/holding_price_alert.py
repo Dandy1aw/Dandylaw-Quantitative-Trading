@@ -29,6 +29,8 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 _ET = ZoneInfo("America/New_York")
+_MAX_RESEARCH_BATCHES = 2
+_RESEARCH_BUDGET_REASON = "RUN_RESEARCH_BUDGET"
 
 
 def _monitored_positions(engine: Engine) -> list[dict[str, object]]:
@@ -213,6 +215,7 @@ def _with_decision_audit(
     suppression_reason: SuppressionReason | None = None,
     send_error: str | None = None,
     history_issue: str | None = None,
+    research_skipped_reason: str | None = None,
 ) -> Signal:
     extra = dict(decision.signal.extra or {})
     extra["alert_kind"] = (
@@ -229,6 +232,8 @@ def _with_decision_audit(
         extra["send_error"] = send_error
     if history_issue is not None:
         extra["history_reconstruction_reason"] = history_issue
+    if research_skipped_reason is not None:
+        extra["research_skipped_reason"] = research_skipped_reason
     return replace(decision.signal, extra=extra)
 
 
@@ -332,6 +337,8 @@ def run(engine: Engine, now: datetime) -> None:
     suppression_counts: Counter[str] = Counter()
     search_settings = settings.cause_search
     researched_signal_ids: set[int] = set()
+    research_skipped_signal_ids: set[int] = set()
+    research_batches = 0
     cause_cache: dict[int, PriceMoveCause] = {}
     remaining: list[Signal] = []
     history_count_by_ticker = Counter(alert.ticker for alert in history)
@@ -376,7 +383,6 @@ def run(engine: Engine, now: datetime) -> None:
         engine.ledger.insert(audited, pushed=False, now=now)
         suppression_counts[SuppressionReason.TICKER_DAILY_CAP.value] += 1
 
-    delivery_attempts = 0
     while remaining:
         decisions = select_holding_alerts(
             remaining,
@@ -386,25 +392,15 @@ def run(engine: Engine, now: datetime) -> None:
             per_ticker_cap=settings.max_alerts_per_ticker_per_day,
             upgrade_score=settings.meaningful_upgrade_score,
         )
-        if delivery_attempts >= settings.max_alerts_per_day:
-            for capped_decision in decisions:
-                audited = _with_decision_audit(
-                    capped_decision,
-                    suppression_reason=SuppressionReason.DELIVERY_ATTEMPT_CAP,
-                )
-                engine.ledger.insert(audited, pushed=False, now=now)
-                suppression_counts[
-                    SuppressionReason.DELIVERY_ATTEMPT_CAP.value
-                ] += 1
-            remaining.clear()
-            break
-        attempt_budget = settings.max_alerts_per_day - delivery_attempts
         newly_approved = [
             item.signal
             for item in decisions
-            if item.should_send and id(item.signal) not in researched_signal_ids
-        ][:attempt_budget]
-        if newly_approved:
+            if item.should_send
+            and id(item.signal) not in researched_signal_ids
+            and id(item.signal) not in research_skipped_signal_ids
+        ]
+        if newly_approved and research_batches < _MAX_RESEARCH_BATCHES:
+            research_batches += 1
             researched_signal_ids.update(id(signal) for signal in newly_approved)
             seed_news = _recent_news(
                 engine,
@@ -426,6 +422,8 @@ def run(engine: Engine, now: datetime) -> None:
                 cause = researched_causes.get(signal.ticker)
                 if cause is not None:
                     cause_cache[id(signal)] = cause
+        elif newly_approved:
+            research_skipped_signal_ids.update(id(signal) for signal in newly_approved)
 
         decision = decisions[0]
         remaining.remove(decision.signal)
@@ -436,7 +434,15 @@ def run(engine: Engine, now: datetime) -> None:
             suppression_counts[reason.value] += 1
             continue
 
-        audited = _with_decision_audit(decision)
+        research_skipped_reason = (
+            _RESEARCH_BUDGET_REASON
+            if id(decision.signal) in research_skipped_signal_ids
+            else None
+        )
+        audited = _with_decision_audit(
+            decision,
+            research_skipped_reason=research_skipped_reason,
+        )
         cause = cause_cache.get(id(decision.signal))
         if cause is not None:
             extra = dict(audited.extra or {})
@@ -444,7 +450,6 @@ def run(engine: Engine, now: datetime) -> None:
             audited = replace(audited, extra=extra)
 
         send_error: str | None = None
-        delivery_attempts += 1
         try:
             delivered = engine.notifier.send(holding_price_alert_card(audited))
             if not delivered:
@@ -458,7 +463,11 @@ def run(engine: Engine, now: datetime) -> None:
                 error=send_error,
             )
         if send_error is not None:
-            audited = _with_decision_audit(decision, send_error=send_error)
+            audited = _with_decision_audit(
+                decision,
+                send_error=send_error,
+                research_skipped_reason=research_skipped_reason,
+            )
             if cause is not None:
                 extra = dict(audited.extra or {})
                 extra["price_move_cause"] = cause.as_dict()
@@ -492,7 +501,7 @@ def run(engine: Engine, now: datetime) -> None:
         suppressed=sum(suppression_counts.values()),
         suppression_reasons=dict(suppression_counts),
         send_failed=send_failed,
-        delivery_attempts=delivery_attempts,
+        research_batches=research_batches,
         history_reconstruction_issues=history_issues,
         feed=str(bars.attrs.get("feed", "unknown")),
     )

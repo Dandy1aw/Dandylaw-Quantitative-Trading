@@ -598,7 +598,7 @@ def test_pipeline_fails_closed_for_all_candidates_when_history_ticker_unknown(
     )
 
 
-def test_pipeline_caps_failed_delivery_attempts_and_audits_every_candidate_once(
+def test_pipeline_keeps_trying_after_failures_but_caps_research_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _Engine(_bars(102.0), [_position()], cause_search=True)
@@ -617,14 +617,49 @@ def test_pipeline_caps_failed_delivery_attempts_and_audits_every_candidate_once(
     )
     run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
 
-    assert len(engine.notifier.cards) == 5
-    assert len(research_calls) <= 5
+    assert len(engine.notifier.cards) == 20
+    assert len(research_calls) <= 2
     assert len(engine.ledger.inserted) == 20
     assert len({signal.ticker for signal, _ in engine.ledger.inserted}) == 20
     assert all(not pushed for _, pushed in engine.ledger.inserted)
-    capped = [
+    research_skipped = [
         signal
         for signal, _ in engine.ledger.inserted
-        if signal.extra.get("suppression_reason") == "DELIVERY_ATTEMPT_CAP"
+        if signal.extra.get("research_skipped_reason") == "RUN_RESEARCH_BUDGET"
     ]
-    assert len(capped) == 15
+    assert research_skipped
+
+
+def test_sixth_delivery_can_succeed_after_five_failures_without_more_research(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _Engine(_bars(102.0), [_position()], cause_search=True)
+    engine.notifier = _Notifier([False] * 5 + [True])
+    _patch_candidates(
+        monkeypatch,
+        [_candidate(f"T{i:02d}", strength=2.0 - i / 100) for i in range(6)],
+    )
+    research_calls: list[list[str]] = []
+
+    def fake_research(signals, settings, *, now, seed_news):  # type: ignore[no-untyped-def]
+        research_calls.append([signal.ticker for signal in signals])
+        return {}
+
+    monkeypatch.setattr(
+        "quant_signal.pipelines.holding_price_alert.research_price_move_causes",
+        fake_research,
+    )
+    run(engine, datetime(2026, 8, 4, 14, 30, tzinfo=UTC))  # type: ignore[arg-type]
+
+    assert len(engine.notifier.cards) == 6
+    assert len(research_calls) == 2
+    assert [pushed for _, pushed in engine.ledger.inserted] == [
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+    ]
+    sixth = engine.ledger.inserted[-1][0]
+    assert sixth.extra["research_skipped_reason"] == "RUN_RESEARCH_BUDGET"
