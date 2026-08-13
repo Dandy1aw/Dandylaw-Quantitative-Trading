@@ -25,7 +25,7 @@ from quant_signal.extreme_movers import (
     MoverDirection,
 )
 from quant_signal.ledger import SignalLedger
-from quant_signal.notifier.base import Card
+from quant_signal.notifier.base import Card, CardKind
 
 ALLOWED = frozenset({"ou_owner"})
 NOW = datetime(2026, 7, 10, 14, 15, tzinfo=UTC)  # 10:15 ET
@@ -198,6 +198,51 @@ def test_lark_transport_uploads_message_image_bytes_once() -> None:
     assert image_api.uploaded == b"\x89PNG chart bytes"
     assert b'filename="fear-dca.png"' in image_api.multipart
     assert len(image_api.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "message_uuid",
+    [None, "4b932caa-1cdb-5d53-b73d-b055706f56d8"],
+    ids=["without-uuid", "with-uuid"],
+)
+def test_lark_transport_passes_optional_card_uuid_to_message_body(
+    message_uuid: str | None,
+) -> None:
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageResponse
+
+    class FakeMessageApi:
+        requests: list[CreateMessageRequest] = []
+
+        def create(self, request: CreateMessageRequest) -> CreateMessageResponse:
+            self.requests.append(request)
+            return CreateMessageResponse({"code": 0, "msg": "ok", "data": {}})
+
+    message_api = FakeMessageApi()
+    transport = LarkTransport.__new__(LarkTransport)
+    transport._client = type(
+        "FakeClient",
+        (),
+        {
+            "im": type(
+                "FakeIm", (), {"v1": type("FakeV1", (), {"message": message_api})()}
+            )()
+        },
+    )()
+    card = Card(
+        kind=CardKind.ALERT,
+        title="alert",
+        body_md="body",
+        message_uuid=message_uuid,
+    )
+
+    assert transport.send_card("oc_chat", card)
+    assert transport.send_card_to("ou_user", "open_id", card)
+    assert len(message_api.requests) == 2
+    assert all(request.request_body is not None for request in message_api.requests)
+    assert [request.request_body.uuid for request in message_api.requests] == [  # type: ignore[union-attr]
+        message_uuid,
+        message_uuid,
+    ]
 
 
 @pytest.mark.parametrize(

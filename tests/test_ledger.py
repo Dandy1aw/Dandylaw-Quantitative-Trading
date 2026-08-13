@@ -1517,7 +1517,7 @@ def test_fear_dca_live_delivery_claim_defers_recovery_until_finalized(
     )
 
 
-def test_fear_dca_expired_delivery_claim_allows_recovery(
+def test_fear_dca_expired_delivery_claim_must_finalize_before_recovery(
     ledger: SignalLedger,
 ) -> None:
     session = date(2026, 8, 12)
@@ -1529,13 +1529,33 @@ def test_fear_dca_expired_delivery_claim_allows_recovery(
     )
     assert ledger.claim_failed_fear_dca_delivery(session, now=NOW)
 
+    assert not ledger.save_complete_fear_dca_run(
+        session,
+        source="yfinance",
+        metrics={"vix": {"close": 30.0}},
+        decisions={"spy": {"final_multiplier": 1.5}},
+        card=_fear_dca_card(),
+        now=NOW + timedelta(minutes=11),
+    )
+    new_token = ledger.claim_failed_fear_dca_delivery(
+        session, now=NOW + timedelta(minutes=11)
+    )
+    assert new_token is not None
+    assert ledger.update_fear_dca_delivery(
+        session,
+        expected_status="FAILED",
+        expected_send_status="IN_FLIGHT",
+        expected_claim_token=new_token,
+        send_status="SENT",
+        send_error=None,
+    )
     assert ledger.save_complete_fear_dca_run(
         session,
         source="yfinance",
         metrics={"vix": {"close": 30.0}},
         decisions={"spy": {"final_multiplier": 1.5}},
         card=_fear_dca_card(),
-        now=NOW + timedelta(minutes=3),
+        now=NOW + timedelta(minutes=11, seconds=1),
     )
     recovered = ledger.fear_dca_run(session)
     assert recovered is not None
@@ -1560,7 +1580,7 @@ def test_fear_dca_expired_claim_can_be_stolen_and_old_owner_is_fenced(
     ) is None
 
     new_token = ledger.claim_failed_fear_dca_delivery(
-        session, now=NOW + timedelta(minutes=3)
+        session, now=NOW + timedelta(minutes=11)
     )
     assert new_token is not None
     assert new_token != old_token

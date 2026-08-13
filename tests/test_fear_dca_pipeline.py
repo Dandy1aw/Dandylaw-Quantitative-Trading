@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -326,7 +327,7 @@ def test_failed_run_reclaims_expired_crashed_notice_once(
     monkeypatch.setattr(
         pipeline,
         "_delivery_now",
-        lambda: delivery_start + timedelta(minutes=3),
+        lambda: delivery_start + timedelta(minutes=11),
     )
     bad_source = FakeSource(_drop_session(_bars(), "QQQM", TARGET))
     assert not run(engine, scheduled + timedelta(minutes=1), source=bad_source)
@@ -533,7 +534,54 @@ def test_replay_sends_latest_complete_card_without_fetching(tmp_path: Path) -> N
     assert replay(engine)
 
     assert notifier.cards == [expected]
+    assert expected.message_uuid is not None
     assert len(source.calls) == 1
+
+
+def test_expired_failed_reclaimer_reuses_uuid_before_complete_and_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scheduled = datetime(2026, 8, 17, 9, 30, tzinfo=ASIA)
+    delivery_start = datetime(2026, 8, 17, 2, 0, tzinfo=ZoneInfo("UTC"))
+
+    class CrashOnceNotifier(FakeNotifier):
+        def __init__(self) -> None:
+            super().__init__()
+            self.crash = True
+
+        def send(self, card: Card) -> bool:
+            self.cards.append(card)
+            if self.crash:
+                self.crash = False
+                raise KeyboardInterrupt("process stopped after provider accepted")
+            return True
+
+    notifier = CrashOnceNotifier()
+    engine = _engine(tmp_path, notifier)
+    monkeypatch.setattr(pipeline, "_delivery_now", lambda: delivery_start)
+    bad_source = FakeSource(_drop_session(_bars(), "QQQM", TARGET))
+    with pytest.raises(KeyboardInterrupt):
+        run(engine, scheduled, source=bad_source)
+    failed_uuid = notifier.cards[-1].message_uuid
+    assert failed_uuid is not None
+    assert UUID(failed_uuid).version == 5
+
+    monkeypatch.setattr(
+        pipeline, "_delivery_now", lambda: delivery_start + timedelta(minutes=11)
+    )
+    assert not run(engine, scheduled + timedelta(minutes=1), source=FakeSource(_bars()))
+    assert notifier.cards[-1].kind is CardKind.ALERT
+    assert notifier.cards[-1].message_uuid == failed_uuid
+
+    assert run(engine, scheduled + timedelta(minutes=2), source=FakeSource(_bars()))
+    complete_uuid = notifier.cards[-1].message_uuid
+    assert complete_uuid is not None
+    assert UUID(complete_uuid).version == 5
+    assert complete_uuid != failed_uuid
+
+    notifier.cards.clear()
+    assert replay(engine)
+    assert notifier.cards[0].message_uuid == complete_uuid
 
 
 def test_replay_returns_false_when_no_complete_card(tmp_path: Path) -> None:

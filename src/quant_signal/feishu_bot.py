@@ -1034,22 +1034,25 @@ class LarkTransport:
         content: str,
         *,
         receive_id_type: str = "chat_id",
+        message_uuid: str | None = None,
     ) -> bool:
         from lark_oapi.api.im.v1 import (
             CreateMessageRequest,
             CreateMessageRequestBody,
         )
 
+        body_builder = (
+            CreateMessageRequestBody.builder()
+            .receive_id(receive_id)
+            .msg_type(msg_type)
+            .content(content)
+        )
+        if message_uuid is not None:
+            body_builder = body_builder.uuid(message_uuid)
         request = (
             CreateMessageRequest.builder()
             .receive_id_type(receive_id_type)
-            .request_body(
-                CreateMessageRequestBody.builder()
-                .receive_id(receive_id)
-                .msg_type(msg_type)
-                .content(content)
-                .build()
-            )
+            .request_body(body_builder.build())
             .build()
         )
         response = self._client.im.v1.message.create(request)
@@ -1080,7 +1083,10 @@ class LarkTransport:
 
         payload = _to_feishu_payload(card)["card"]
         return self._send(
-            chat_id, "interactive", json.dumps(payload, ensure_ascii=False)
+            chat_id,
+            "interactive",
+            json.dumps(payload, ensure_ascii=False),
+            message_uuid=card.message_uuid,
         )
 
     def send_card_to(
@@ -1094,6 +1100,7 @@ class LarkTransport:
             "interactive",
             json.dumps(payload, ensure_ascii=False),
             receive_id_type=receive_id_type,
+            message_uuid=card.message_uuid,
         )
 
     def upload_image(self, image_bytes: bytes) -> str:

@@ -6,6 +6,7 @@ import dataclasses
 from datetime import UTC, date, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, cast
+from uuid import UUID, uuid5
 
 import pandas as pd
 import structlog
@@ -29,11 +30,16 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 SYMBOLS = ["^VIX", "^VXN", "SPY", "QQQM"]
+_MESSAGE_NAMESPACE = UUID("d107b11c-2cce-4f0e-aed9-f156e98cf4aa")
 
 
 def _delivery_now() -> datetime:
     """Return a fresh clock reading for short-lived delivery leases."""
     return datetime.now(UTC)
+
+
+def _message_uuid(session: date, status: str) -> str:
+    return str(uuid5(_MESSAGE_NAMESPACE, f"fear_dca:{session.isoformat()}:{status}"))
 
 
 class _DailySource(Protocol):
@@ -101,6 +107,10 @@ def _fail_closed(
     card = fear_dca_incomplete_card(
         target_session=target_session,
         error=error_text,
+    )
+    card = dataclasses.replace(
+        card,
+        message_uuid=_message_uuid(target_session, "FAILED"),
     )
     _send_and_record(
         engine,
@@ -175,6 +185,38 @@ def run(
     if existing is not None and existing["status"] == "COMPLETE":
         log.info("fear_dca.complete_skip", session=target_session.isoformat())
         return True
+    if (
+        existing is not None
+        and existing["status"] == "FAILED"
+        and existing["send_status"] in ("PENDING", "IN_FLIGHT")
+    ):
+        claim_token = engine.ledger.claim_failed_fear_dca_delivery(
+            target_session,
+            now=_delivery_now(),
+        )
+        if claim_token is None:
+            log.info(
+                "fear_dca.failed_delivery_deferred",
+                session=target_session.isoformat(),
+            )
+            return False
+        alert = fear_dca_incomplete_card(
+            target_session=target_session,
+            error=str(existing.get("error") or "unknown data error"),
+        )
+        alert = dataclasses.replace(
+            alert,
+            message_uuid=_message_uuid(target_session, "FAILED"),
+        )
+        _send_and_record(
+            engine,
+            target_session,
+            alert,
+            expected_status="FAILED",
+            expected_send_status="IN_FLIGHT",
+            expected_claim_token=claim_token,
+        )
+        return False
     daily_source = source if source is not None else YFinanceSource()
     try:
         bars = daily_source.fetch_daily_bars(
@@ -234,6 +276,10 @@ def run(
         qqqm_decision=qqqm_decision,
         image_key=image_key,
     )
+    card = dataclasses.replace(
+        card,
+        message_uuid=_message_uuid(target_session, "COMPLETE"),
+    )
     created = engine.ledger.save_complete_fear_dca_run(
         target_session,
         source="yfinance",
@@ -248,7 +294,6 @@ def run(
         chart_status=chart_status,
         send_status="PENDING",
         chart_error=chart_error,
-        delivery_now=_delivery_now(),
         now=now,
     )
     if not created:

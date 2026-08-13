@@ -42,6 +42,19 @@ def test_card_serialization_round_trip_preserves_image_key() -> None:
     assert card_from_dict(card_to_dict(card)) == card
 
 
+def test_card_serialization_preserves_optional_message_uuid() -> None:
+    card = Card(
+        kind=CardKind.ALERT,
+        title="deduplicated",
+        body_md="body",
+        message_uuid="4b932caa-1cdb-5d53-b73d-b055706f56d8",
+    )
+    assert card_to_dict(card)["message_uuid"] == card.message_uuid
+    assert card_from_dict(card_to_dict(card)) == card
+    legacy = card_from_dict({"kind": "alert", "title": "old", "body_md": "x"})
+    assert legacy.message_uuid is None
+
+
 def test_card_deserialization_is_backward_compatible_without_image_key() -> None:
     card = card_from_dict(
         {

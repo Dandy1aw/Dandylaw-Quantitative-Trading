@@ -31,6 +31,7 @@ class Card:
     url: str | None = None
     sections: tuple[CardSection, ...] = ()
     image_key: str | None = None
+    message_uuid: str | None = None
 
 
 class Notifier(Protocol):
@@ -45,6 +46,7 @@ def card_to_dict(card: Card) -> dict[str, object]:
         "url": card.url,
         "sections": [section.content_md for section in card.sections],
         "image_key": card.image_key,
+        "message_uuid": card.message_uuid,
     }
 
 
@@ -58,6 +60,9 @@ def card_from_dict(payload: Mapping[str, Any]) -> Card:
         sections=tuple(CardSection(str(content)) for content in raw_sections),
         image_key=(
             str(payload["image_key"]) if payload.get("image_key") else None
+        ),
+        message_uuid=(
+            str(payload["message_uuid"]) if payload.get("message_uuid") else None
         ),
     )
 

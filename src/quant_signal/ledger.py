@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from quant_signal.portfolio_import import ValidatedPortfolioImport
 
 _SCHEMA_VERSION = 21
-_FEAR_DCA_DELIVERY_LEASE = timedelta(minutes=2)
+_FEAR_DCA_DELIVERY_LEASE = timedelta(minutes=10)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -571,14 +571,9 @@ class SignalLedger:
         send_status: str = "PENDING",
         chart_error: str | None = None,
         send_error: str | None = None,
-        delivery_now: datetime | None = None,
         now: datetime,
     ) -> bool:
         """Insert a complete result or supersede the session's failed attempt."""
-        lease_clock = delivery_now if delivery_now is not None else now
-        lease_expired_before = (
-            lease_clock.astimezone(timezone.utc) - _FEAR_DCA_DELIVERY_LEASE
-        ).isoformat()
         with self._lock:
             cursor = self._con.execute(
                 "INSERT INTO fear_dca_runs"
@@ -597,9 +592,7 @@ class SignalLedger:
                 " completed_at=excluded.completed_at"
                 " WHERE fear_dca_runs.status != 'COMPLETE'"
                 " AND NOT (fear_dca_runs.status = 'FAILED'"
-                "  AND fear_dca_runs.send_status = 'IN_FLIGHT'"
-                "  AND fear_dca_runs.delivery_claimed_at IS NOT NULL"
-                "  AND fear_dca_runs.delivery_claimed_at > ?)",
+                "  AND fear_dca_runs.send_status = 'IN_FLIGHT')",
                 (
                     session.isoformat(),
                     source,
@@ -611,7 +604,6 @@ class SignalLedger:
                     chart_error,
                     send_error,
                     now.astimezone(timezone.utc).isoformat(),
-                    lease_expired_before,
                 ),
             )
             self._con.commit()
