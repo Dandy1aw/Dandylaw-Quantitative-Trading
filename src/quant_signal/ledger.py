@@ -1271,6 +1271,45 @@ class SignalLedger:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def pushed_strategy_signals_since(
+        self, strategy_id: str, since: datetime
+    ) -> list[dict[str, object]]:
+        """返回策略自 ``since`` 起成功推送的信号，供持久状态重建。
+
+        时间边界使用实际推送墙钟时间 ``pushed_at``。旧行没有 extra 时视为
+        合法空映射；非法 JSON 或非对象 JSON 仍保留该行，并以
+        ``extra_valid=False`` 标记，便于调用方保守处理而不误放宽额度。
+        """
+        if since.tzinfo is None or since.utcoffset() is None:
+            raise ValueError("since must be timezone-aware")
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT * FROM signals WHERE pushed = 1 AND strategy_id = ?"
+                " AND pushed_at >= ? ORDER BY pushed_at, id",
+                (strategy_id, since.astimezone(timezone.utc).isoformat()),
+            ).fetchall()
+
+        output: list[dict[str, object]] = []
+        for row in rows:
+            item = dict(row)
+            raw_extra = item.get("extra_json")
+            extra: dict[str, object] = {}
+            extra_valid = True
+            if raw_extra is not None:
+                try:
+                    parsed = json.loads(str(raw_extra))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    extra_valid = False
+                else:
+                    if isinstance(parsed, Mapping):
+                        extra = dict(parsed)
+                    else:
+                        extra_valid = False
+            item["extra"] = extra
+            item["extra_valid"] = extra_valid
+            output.append(item)
+        return output
+
     def signals_on(self, day: date) -> list[dict[str, object]]:
         with self._lock:
             rows = self._con.execute(

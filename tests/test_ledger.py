@@ -5,6 +5,7 @@ from pathlib import Path
 import json
 import math
 import sqlite3
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -221,6 +222,128 @@ def test_pushed_signals_window_and_order(ledger: SignalLedger) -> None:
     ledger.insert(sig("N"), pushed=False, now=NOW)                          # 未推送不计
     rows = ledger.pushed_signals(NOW - timedelta(days=90))
     assert [r["ticker"] for r in rows] == ["B", "A"]
+
+
+def test_pushed_strategy_signals_since_filters_parses_and_orders_stably(
+    ledger: SignalLedger,
+) -> None:
+    us_midnight = datetime(
+        2026, 7, 6, 0, 0, tzinfo=ZoneInfo("America/New_York")
+    )
+    since = us_midnight.astimezone(timezone.utc)
+    before = since - timedelta(microseconds=1)
+    after = since + timedelta(seconds=1)
+
+    ledger.insert(
+        replace(
+            sig("OLD", ts=before, strategy_id="holding_price_alert"),
+            extra={"strength_score": 9.0},
+        ),
+        pushed=True,
+        now=before,
+    )
+    ledger.insert(
+        replace(
+            sig("B", ts=since, strategy_id="holding_price_alert"),
+            extra={"strength_score": 1.5, "severity": 2},
+        ),
+        pushed=True,
+        now=since,
+    )
+    ledger.insert(
+        replace(
+            sig("A", ts=since, strategy_id="holding_price_alert"),
+            extra={"strength_score": 2.0, "severity": 3},
+        ),
+        pushed=True,
+        now=since,
+    )
+    ledger.insert(
+        sig("OTHER", ts=after, strategy_id="holding_price_alert_copy"),
+        pushed=True,
+        now=after,
+    )
+    ledger.insert(
+        sig("SUPPRESSED", ts=after, strategy_id="holding_price_alert"),
+        pushed=False,
+        now=after,
+    )
+    ledger.insert(
+        replace(
+            sig("C", ts=after, strategy_id="holding_price_alert"),
+            extra={"direction": "up"},
+        ),
+        pushed=True,
+        now=after,
+    )
+
+    rows = ledger.pushed_strategy_signals_since("holding_price_alert", since)
+
+    assert [row["ticker"] for row in rows] == ["B", "A", "C"]
+    assert rows[0]["pushed_at"] == since.isoformat()
+    assert rows[0]["extra"] == {"strength_score": 1.5, "severity": 2}
+    assert rows[0]["extra_valid"] is True
+    assert rows[2]["extra"] == {"direction": "up"}
+
+
+def test_pushed_strategy_signals_since_keeps_legacy_extra_for_derivation(
+    ledger: SignalLedger,
+) -> None:
+    legacy_extra = {
+        "window": "5m",
+        "move_pct": 0.052,
+        "threshold_pct": 0.04,
+        "severity": 1,
+    }
+    ledger.insert(
+        replace(
+            sig("LEGACY", strategy_id="holding_price_alert"), extra=legacy_extra
+        ),
+        pushed=True,
+        now=NOW,
+    )
+
+    rows = ledger.pushed_strategy_signals_since(
+        "holding_price_alert", NOW - timedelta(minutes=1)
+    )
+
+    assert rows[0]["extra"] == legacy_extra
+    assert "strength_score" not in rows[0]["extra"]
+    assert rows[0]["extra_valid"] is True
+
+
+def test_pushed_strategy_signals_since_marks_bad_extra_fail_closed(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "bad-extra.db"
+    ledger = SignalLedger(db_path)
+    row_id = ledger.insert(
+        sig("BROKEN", strategy_id="holding_price_alert"),
+        pushed=True,
+        now=NOW,
+    )
+    with sqlite3.connect(str(db_path)) as con:
+        con.execute(
+            "UPDATE signals SET extra_json = ? WHERE id = ?",
+            ("{not-json", row_id),
+        )
+
+    rows = ledger.pushed_strategy_signals_since(
+        "holding_price_alert", NOW - timedelta(minutes=1)
+    )
+
+    assert [row["ticker"] for row in rows] == ["BROKEN"]
+    assert rows[0]["extra"] == {}
+    assert rows[0]["extra_valid"] is False
+
+
+def test_pushed_strategy_signals_since_requires_aware_since(
+    ledger: SignalLedger,
+) -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        ledger.pushed_strategy_signals_since(
+            "holding_price_alert", datetime(2026, 7, 6, 0, 0)
+        )
 
 
 def test_latest_price_for_direction(ledger: SignalLedger) -> None:

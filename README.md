@@ -253,16 +253,24 @@ STOP_BREACH / TAKE_PROFIT），旧的 ±2% 价格偏离噪音提醒已下线（f
 
 `holding_price_alert.enabled` 打开后，系统在美股正常交易时段每分钟检查
 最新一份**完整券商截图**里的真实持仓。它同时比较 1/5/15 分钟和当日涨跌，
-个股与 ETF 使用不同的最低门槛，并用近 30 根分钟收益波动率自适应抬高门槛。
-末根分钟成交量达到近 20 根中位数的 4 倍且价格同步变动时，也可触发放量异动。
-同标的、同方向、同时间窗口与同强度等级在 30 分钟内去重；异动从 1 级升到
-2/3 级时会再提醒。实时价格优先使用 Alpaca IEX（部分市场成交量）；
+个股最低门槛为 **2% / 4% / 6% / 10%**，ETF 为
+**1.2% / 2.5% / 4% / 6%**，并用近 30 根分钟收益波动率自适应抬高门槛。
+末根分钟成交量达到近 20 根中位数的 4 倍、且 1 分钟涨跌至少 1% 时，也可触发
+放量异动。实时价格优先使用 Alpaca IEX（部分市场成交量）；
 SIP 在当前账户下延迟约 15 分钟，不作为实时告警主源。
+
+频控按 `America/New_York` 自然日重置，并从 SQLite 成功推送历史恢复，重启不会
+清空额度。每个标的每天最多成功推送 2 次：首次越过门槛可提醒；同方向第二次必须
+强度至少达到门槛的 1.5 倍且严重等级高于当日历史最高等级，反方向重新越过门槛则
+作为方向反转提醒。全局每天最多 5 次，前 4 个名额可用于首次/升级/反转，第 5 个
+只留给升级或反转。窗口变化本身不构成升级。抑制、发送失败和历史不确定事件都会
+以 `pushed=false` 及结构化原因写入台账；只有成功发送记录消耗额度。
 
 确定要发送的异动会先调用 Codex 联网搜索异动原因：优先公司官网、SEC
 和可核验财经媒体，输出事件分类、置信度、简要结论与最多 3 条来源。
 只有时间接近而没有证据时必须写“原因未确认”。Codex 超时或失败不会吞掉告警，
-卡片会带失败状态继续发出。
+卡片会带失败状态继续发出。单轮查因最多两批；发送失败后继续尝试后续候选，查因
+预算耗尽的新递补提醒仍会发送，并记录 `research_skipped_reason`。
 
 ## 美股单日 ±10% 异动累计榜
 
@@ -410,7 +418,7 @@ VXN 基础档位为 `<35: 0×`、`35/40/50/60: 1/1.5/2/3×`。达到首档后，
 | `enrichment` | 08:45 ET | NYSE 交易日历 | UZI-Skill 深度分析（`enrichment.enabled=false` 时空跑） |
 | `intraday` | 09:30–15:55 ET 每5分钟 | NYSE 交易日历 + 已开盘 | 20日突破策略，监控 `watchlist` |
 | `execution_watch` | 09:00–15:55 ET 每5分钟 | NYSE 交易日历 | 推进执行计划状态机，只推状态迁移事件 |
-| `holding_price_alert` | 09:30–15:59 ET 每分钟 | NYSE 交易日历 + 实际收市时间 | 真实持仓 1/5/15 分钟与当日异动，波动率自适应+放量确认+冷却升级 |
+| `holding_price_alert` | 09:30–15:59 ET 每分钟 | NYSE 交易日历 + 实际收市时间 | 真实持仓 1/5/15 分钟与当日异动，自适应门槛+每股2次+全局4+1额度 |
 | `extreme_movers_premarket` | 08:00 ET | NYSE 交易日历 | 只读最新完整事件台账，推 60 日个股/板块累计榜 |
 | `extreme_movers_close` | 16:30 ET | NYSE 交易日历 | 全市场 configured-feed adjusted 日线扫描，记录并推送单日 ±10% 个股 |
 | `option_flow` | 10:00–15:45 ET 每15分钟 | NYSE 交易日历 | Cboe 四市场期权 Call/Put Top10 扫描，基线/实质变化才推送 |
@@ -540,18 +548,21 @@ option_intel:                    # 持仓期权情报（只观察，不推荐任
 
 holding_price_alert:             # 真实持仓分钟级股价异动
   enabled: true
-  stock_1m_pct: 0.015            # 个股 1 分钟最低门槛 1.5%
-  stock_5m_pct: 0.030
-  stock_15m_pct: 0.050
-  stock_session_pct: 0.080
-  etf_1m_pct: 0.010              # ETF 使用更敏感的门槛
-  etf_5m_pct: 0.020
-  etf_15m_pct: 0.035
-  etf_session_pct: 0.050
+  stock_1m_pct: 0.020            # 个股：1/5/15分钟/当日 = 2/4/6/10%
+  stock_5m_pct: 0.040
+  stock_15m_pct: 0.060
+  stock_session_pct: 0.100
+  etf_1m_pct: 0.012              # ETF：1/5/15分钟/当日 = 1.2/2.5/4/6%
+  etf_5m_pct: 0.025
+  etf_15m_pct: 0.040
+  etf_session_pct: 0.060
   volume_spike_multiple: 4.0     # 末根量 / 近 20 根中位数
-  min_volume_spike_move_pct: 0.0075
-  cooldown_minutes: 30
-  max_alerts_per_day: 12
+  min_volume_spike_move_pct: 0.010
+  cooldown_minutes: 30           # 兼容旧配置；每日状态机不再用窗口冷却限频
+  max_alerts_per_day: 5
+  regular_alert_slots: 4         # 第 5 个名额只用于升级/反转
+  max_alerts_per_ticker_per_day: 2
+  meaningful_upgrade_score: 1.5
   cause_search:
     enabled: true
     command: codex

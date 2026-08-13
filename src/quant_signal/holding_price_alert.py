@@ -35,6 +35,13 @@ def _return_at(closes: pd.Series, minutes: int) -> float | None:
     return float(closes.iloc[-1]) / reference - 1 if reference > 0 else None
 
 
+def _meets_threshold(value: float, threshold: float) -> bool:
+    magnitude = abs(value)
+    return magnitude >= threshold or math.isclose(
+        magnitude, threshold, rel_tol=1e-12, abs_tol=1e-12
+    )
+
+
 def _tier(score: float) -> int:
     if score >= 2.0:
         return 3
@@ -161,8 +168,11 @@ def evaluate_holding_price_alerts(
         candidates: list[tuple[float, str, float, float]] = []
         for window, move in moves.items():
             threshold = effective_thresholds[window]
-            if move is not None and abs(move) >= threshold:
-                candidates.append((abs(move) / threshold, window, move, threshold))
+            if move is None or not math.isfinite(move):
+                continue
+            score = abs(move) / threshold
+            if math.isfinite(score) and _meets_threshold(move, threshold):
+                candidates.append((score, window, move, threshold))
 
         volume_ratio: float | None = None
         volumes = session["volume"].astype(float).replace([np.inf, -np.inf], np.nan)
@@ -171,18 +181,25 @@ def evaluate_holding_price_alerts(
             if typical_volume > 0:
                 volume_ratio = float(volumes.iloc[-1]) / typical_volume
         one_minute_move = moves["1分钟"]
+        volume_strength = (
+            abs(one_minute_move) / settings.min_volume_spike_move_pct
+            if one_minute_move is not None and math.isfinite(one_minute_move)
+            else None
+        )
         if (
             volume_ratio is not None
+            and math.isfinite(volume_ratio)
             and one_minute_move is not None
+            and volume_strength is not None
+            and math.isfinite(volume_strength)
             and volume_ratio >= settings.volume_spike_multiple
-            and abs(one_minute_move) >= settings.min_volume_spike_move_pct
+            and _meets_threshold(
+                one_minute_move, settings.min_volume_spike_move_pct
+            )
         ):
             candidates.append(
                 (
-                    max(
-                        volume_ratio / settings.volume_spike_multiple,
-                        abs(one_minute_move) / settings.min_volume_spike_move_pct,
-                    ),
+                    volume_strength,
                     "放量1分钟",
                     one_minute_move,
                     settings.min_volume_spike_move_pct,
@@ -214,6 +231,7 @@ def evaluate_holding_price_alerts(
                     "window": window,
                     "move_pct": move,
                     "threshold_pct": threshold,
+                    "strength_score": score,
                     "severity": tier,
                     "one_minute_pct": moves["1分钟"],
                     "five_minute_pct": moves["5分钟"],

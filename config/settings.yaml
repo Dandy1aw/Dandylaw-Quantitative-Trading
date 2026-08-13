@@ -242,22 +242,25 @@ holding_price_alert:              # 真实持仓分钟级股价异动
   enabled: true
   lookback_minutes: 45
   max_bar_age_seconds: 120
-  stock_1m_pct: 0.015
-  stock_5m_pct: 0.030
-  stock_15m_pct: 0.050
-  stock_session_pct: 0.080
-  etf_1m_pct: 0.010
-  etf_5m_pct: 0.020
-  etf_15m_pct: 0.035
-  etf_session_pct: 0.050
+  stock_1m_pct: 0.020
+  stock_5m_pct: 0.040
+  stock_15m_pct: 0.060
+  stock_session_pct: 0.100
+  etf_1m_pct: 0.012
+  etf_5m_pct: 0.025
+  etf_15m_pct: 0.040
+  etf_session_pct: 0.060
   volatility_sigma_multiple_1m: 4.0
   volatility_sigma_multiple_5m: 3.0
   volatility_sigma_multiple_15m: 2.5
   volatility_sigma_multiple_session: 2.0
   volume_spike_multiple: 4.0
-  min_volume_spike_move_pct: 0.0075
+  min_volume_spike_move_pct: 0.010
   cooldown_minutes: 30
-  max_alerts_per_day: 12
+  max_alerts_per_day: 5
+  regular_alert_slots: 4
+  max_alerts_per_ticker_per_day: 2
+  meaningful_upgrade_score: 1.5
   max_tickers: 20
   cause_search:
     enabled: true

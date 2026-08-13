@@ -1,31 +1,31 @@
 from datetime import UTC, date, datetime, timezone
 
-from quant_signal.fear_dca import (
-    ETFMetrics,
-    FearInterpretation,
-    FearMetrics,
-    RecommendationDecision,
-)
-
-from quant_signal.notifier import cards as cards_module
-from quant_signal.notifier.cards import (
-    extreme_movers_close_card,
-    extreme_movers_premarket_card,
-    extreme_mover_sectors_card,
-    fear_dca_card,
-    fear_dca_incomplete_card,
-    fear_dca_rules_card,
-    premarket_cards,
-    report_card,
-    signal_card,
-    us_briefing_card,
-)
 from quant_signal.extreme_movers import (
     Eligibility,
     ExtremeMoverEvent,
     MoverDirection,
     rank_movers,
     rank_sectors,
+)
+from quant_signal.fear_dca import (
+    ETFMetrics,
+    FearInterpretation,
+    FearMetrics,
+    RecommendationDecision,
+)
+from quant_signal.notifier import cards as cards_module
+from quant_signal.notifier.cards import (
+    extreme_mover_sectors_card,
+    extreme_movers_close_card,
+    extreme_movers_premarket_card,
+    fear_dca_card,
+    fear_dca_incomplete_card,
+    fear_dca_rules_card,
+    holding_price_alert_card,
+    premarket_cards,
+    report_card,
+    signal_card,
+    us_briefing_card,
 )
 from quant_signal.strategies.base import Direction, Signal
 
@@ -48,6 +48,36 @@ def _sig(ticker, direction, strategy_id, price=10.0, reason="r", rank=None, mome
 
 def _card_by(cards, needle):  # type: ignore[no-untyped-def]
     return next(c for c in cards if needle in c.title)
+
+
+def _holding_alert(kind: str, alert_number: int) -> Signal:
+    return Signal(
+        ticker="AAA",
+        direction=Direction.BUY,
+        price=102.0,
+        reason="price move",
+        strategy_id="holding_price_alert",
+        ts=TS,
+        extra={
+            "severity": 2,
+            "strength_score": 1.5,
+            "alert_kind": kind,
+            "ticker_alert_number": alert_number,
+            "move_pct": 0.04,
+            "threshold_pct": 0.02,
+            "observed_at": TS.isoformat(),
+        },
+    )
+
+
+def test_holding_alert_card_labels_first_upgrade_and_reversal() -> None:
+    first = holding_price_alert_card(_holding_alert("FIRST", 1))
+    upgrade = holding_price_alert_card(_holding_alert("UPGRADE", 2))
+    reversal = holding_price_alert_card(_holding_alert("REVERSAL", 2))
+
+    assert "首次异动（当日第 1 次）" in first.body_md
+    assert "重大升级（当日第 2 次）" in upgrade.body_md
+    assert "方向反转（当日第 2 次）" in reversal.body_md
 
 
 def _mover(ticker: str, direction: MoverDirection, value: str) -> ExtremeMoverEvent:

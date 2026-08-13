@@ -1,6 +1,7 @@
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from pydantic import ValidationError
 
 from quant_signal.config import (
@@ -10,6 +11,7 @@ from quant_signal.config import (
     ExtremeMoverSettings,
     FearDcaSettings,
     ForwardEvaluationSettings,
+    HoldingPriceAlertSettings,
     IndexUniverseSettings,
     NotifySettings,
     OptionFlowSettings,
@@ -17,8 +19,6 @@ from quant_signal.config import (
     USBriefingSettings,
     load_settings,
 )
-
-import pytest
 
 
 def test_load_settings_from_repo_yaml() -> None:
@@ -54,9 +54,21 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.fear_dca.enabled is True
     assert s.fear_dca.timezone == "Asia/Shanghai"
     assert (s.fear_dca.hour, s.fear_dca.minute) == (9, 30)
-    assert s.holding_price_alert.stock_1m_pct == 0.015
-    assert s.holding_price_alert.etf_1m_pct == 0.010
+    assert s.holding_price_alert.stock_1m_pct == 0.020
+    assert s.holding_price_alert.stock_5m_pct == 0.040
+    assert s.holding_price_alert.stock_15m_pct == 0.060
+    assert s.holding_price_alert.stock_session_pct == 0.100
+    assert s.holding_price_alert.etf_1m_pct == 0.012
+    assert s.holding_price_alert.etf_5m_pct == 0.025
+    assert s.holding_price_alert.etf_15m_pct == 0.040
+    assert s.holding_price_alert.etf_session_pct == 0.060
+    assert s.holding_price_alert.volume_spike_multiple == 4.0
+    assert s.holding_price_alert.min_volume_spike_move_pct == 0.010
     assert s.holding_price_alert.cooldown_minutes == 30
+    assert s.holding_price_alert.max_alerts_per_day == 5
+    assert s.holding_price_alert.regular_alert_slots == 4
+    assert s.holding_price_alert.max_alerts_per_ticker_per_day == 2
+    assert s.holding_price_alert.meaningful_upgrade_score == 1.5
     assert s.holding_price_alert.cause_search.enabled is True
     assert s.holding_price_alert.cause_search.command == "codex"
     assert s.holding_price_alert.cause_search.model == "gpt-5.6-terra"
@@ -64,6 +76,26 @@ def test_load_settings_from_repo_yaml() -> None:
     assert s.holding_price_alert.cause_search.timeout_seconds == 60
     assert set(s.universe) == set(s.tickers)
     assert set(s.watchlist) == {"NVDA", "TSLA", "AAPL", "MSFT", "AMD"}
+
+
+def test_holding_price_alert_defaults_match_production_thresholds() -> None:
+    settings = HoldingPriceAlertSettings()
+
+    assert settings.stock_1m_pct == 0.020
+    assert settings.stock_5m_pct == 0.040
+    assert settings.stock_15m_pct == 0.060
+    assert settings.stock_session_pct == 0.100
+    assert settings.etf_1m_pct == 0.012
+    assert settings.etf_5m_pct == 0.025
+    assert settings.etf_15m_pct == 0.040
+    assert settings.etf_session_pct == 0.060
+    assert settings.volume_spike_multiple == 4.0
+    assert settings.min_volume_spike_move_pct == 0.010
+
+
+def test_holding_price_alert_regular_slots_cannot_exceed_daily_cap() -> None:
+    with pytest.raises(ValueError, match="regular_alert_slots"):
+        HoldingPriceAlertSettings(max_alerts_per_day=3, regular_alert_slots=4)
 
 
 def test_fear_dca_defaults_define_operational_data_contract() -> None:
