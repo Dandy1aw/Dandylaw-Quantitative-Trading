@@ -435,8 +435,8 @@ class ExtremeMoverSettings(BaseModel):
     screen_threshold: Decimal = Field(default=Decimal("0.08"), gt=0, le=Decimal("1"))
     min_price: Decimal = Field(default=Decimal("5"), ge=0)
     min_dollar_volume: Decimal = Field(default=Decimal("20000000"), ge=0)
-    windows: tuple[int, ...] = (20, 60, 252)
-    default_window: int = 60
+    windows: tuple[int, ...] = (30,)
+    default_window: int = 30
     chunk_size: int = Field(default=200, ge=1, le=500)
     confirmation_chunk_size: int = Field(default=50, ge=1, le=200)
     deadline_seconds: int = Field(default=600, ge=60, le=3600)

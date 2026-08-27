@@ -280,8 +280,8 @@ extreme_movers:                   # 全市场个股单日 ±10% 异动榜
   screen_threshold: 0.08
   min_price: 5
   min_dollar_volume: 20000000
-  windows: [20, 60, 252]
-  default_window: 60
+  windows: [30]
+  default_window: 30
   chunk_size: 200
   confirmation_chunk_size: 50
   deadline_seconds: 600

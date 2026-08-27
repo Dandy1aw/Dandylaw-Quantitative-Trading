@@ -352,7 +352,7 @@ def test_text_commands_route_case_insensitively() -> None:
     ("text", "intent"),
     [
         ("异动榜", BotIntent.MOVERS),
-        ("异动榜 60", BotIntent.MOVERS),
+        ("异动榜 30", BotIntent.MOVERS),
         ("异动板块 科技", BotIntent.MOVER_SECTORS),
         ("异动 AAOI", BotIntent.MOVER_TICKER),
         ("监控", BotIntent.MONITORS),
@@ -379,7 +379,7 @@ def test_fear_dca_commands_route_exactly(text: str, intent: BotIntent) -> None:
 
 
 def test_invalid_mover_window_and_ticker_do_not_route() -> None:
-    assert route(msg(content={"text": "异动榜 30"}), ALLOWED) is BotIntent.UNKNOWN
+    assert route(msg(content={"text": "异动榜 60"}), ALLOWED) is BotIntent.UNKNOWN
     assert route(msg(content={"text": "监控 BRK.B"}), ALLOWED) is BotIntent.UNKNOWN
 
 

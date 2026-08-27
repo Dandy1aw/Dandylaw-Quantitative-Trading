@@ -147,8 +147,8 @@ def test_extreme_mover_defaults_are_bounded() -> None:
     cfg = ExtremeMoverSettings(enabled=True)
 
     assert cfg.threshold == Decimal("0.10")
-    assert cfg.windows == (20, 60, 252)
-    assert cfg.default_window == 60
+    assert cfg.windows == (30,)
+    assert cfg.default_window == 30
     assert cfg.min_price == Decimal("5")
     assert cfg.min_dollar_volume == Decimal("20000000")
     assert cfg.feed == "hybrid"

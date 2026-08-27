@@ -52,7 +52,7 @@ _HELP_TEXT = (
     "确认导入 — 应用最近一次校验不完整(PARTIAL)的导入"
 )
 _HELP_TEXT += (
-    "\n异动榜 [20|60|252] — 累计入榜个股 Top 榜"
+    "\n异动榜 [30] — 最近30个交易日涨超10%次数 Top 榜"
     "\n异动板块 [板块] — 板块累计异动 Top5"
     "\n异动 <代码> — 查询单只股票的入榜记录"
     "\n监控 [代码] / 取消监控 <代码> — 管理实时价格监控"
@@ -140,7 +140,7 @@ def parse_text(content_json: str) -> str:
 
 
 _OPTION_TICKER = re.compile(r"^[A-Z]{1,6}$")
-_MOVER_WINDOW = re.compile(r"^异动榜\s+(20|60|252)$")
+_MOVER_WINDOW = re.compile(r"^异动榜\s+(30)$")
 _MOVER_SECTOR = re.compile(r"^异动板块\s+\S.+$")
 _MOVER_TICKER = re.compile(r"^异动\s+([A-Za-z]{1,6})$")
 _MONITOR_ADD = re.compile(r"^监控\s+([A-Za-z]{1,6})$")
