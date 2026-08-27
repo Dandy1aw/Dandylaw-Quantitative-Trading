@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -397,6 +397,12 @@ def test_group_rejects_mutating_monitor_and_repush_commands(tmp_path: Path) -> N
 def test_mover_sector_and_ticker_commands_query_stored_history(tmp_path: Path) -> None:
     service, out, ledger = make_service(tmp_path)
     session = date(2026, 8, 7)
+    for offset in range(1, 30):
+        prior = session - timedelta(days=offset)
+        ledger.replace_extreme_mover_run(
+            ExtremeMoverRun(prior, "COMPLETE", 100, 100, NOW),
+            [],
+        )
     ledger.replace_extreme_mover_run(
         ExtremeMoverRun(session, "COMPLETE", 100, 100, NOW),
         [
@@ -415,8 +421,36 @@ def test_mover_sector_and_ticker_commands_query_stored_history(tmp_path: Path) -
 
     assert "Information Technology" in out.cards[0][1].body_md
     assert "上涨个股" not in out.cards[0][1].body_md
-    assert "20日:" in out.texts[-1][1]
-    assert "252日:" in out.texts[-1][1]
+    assert "30日:" in out.texts[-1][1]
+
+
+def test_mover_command_refuses_incomplete_thirty_session_history(
+    tmp_path: Path,
+) -> None:
+    service, out, ledger = make_service(tmp_path)
+    session = date(2026, 8, 7)
+    ledger.replace_extreme_mover_run(
+        ExtremeMoverRun(session, "COMPLETE", 100, 100, NOW),
+        [
+            ExtremeMoverEvent(
+                session=session,
+                ticker="AAOI",
+                direction=MoverDirection.UP,
+                daily_return=Decimal("0.12"),
+                close=Decimal("20"),
+                avg_dollar_volume_20d=Decimal("30000000"),
+                sector="Information Technology",
+                industry="Hardware",
+                quote_type="EQUITY",
+                eligibility=Eligibility.ELIGIBLE,
+            )
+        ],
+    )
+
+    service.handle(msg(message_id="incomplete", content={"text": "异动榜"}))
+
+    assert out.cards == []
+    assert "不足30个完整交易日" in out.texts[-1][1]
 
 
 def test_image_message_routes_to_import() -> None:

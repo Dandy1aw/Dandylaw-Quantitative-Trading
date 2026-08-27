@@ -949,6 +949,15 @@ class SignalLedger:
             ).fetchone()
         return date.fromisoformat(str(row["session_date"])) if row else None
 
+    def complete_extreme_mover_session_count(self, through: date) -> int:
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(*) AS count FROM extreme_mover_runs"
+                " WHERE status = 'COMPLETE' AND session_date <= ?",
+                (through.isoformat(),),
+            ).fetchone()
+        return int(row["count"])
+
     def extreme_mover_events(
         self,
         through: date,

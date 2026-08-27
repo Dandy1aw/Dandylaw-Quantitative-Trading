@@ -314,6 +314,16 @@ def run_premarket(
     window = window_sessions or cfg.default_window
     if window not in cfg.windows:
         raise ValueError("unsupported extreme mover window")
+    complete_sessions = engine.ledger.complete_extreme_mover_session_count(session)
+    if complete_sessions < window:
+        log.warning(
+            "extreme_movers.premarket_skip",
+            reason="incomplete_window",
+            required_sessions=window,
+            complete_sessions=complete_sessions,
+            through=session.isoformat(),
+        )
+        return False
     events = engine.ledger.extreme_mover_events(session, window_sessions=window)
     window_summaries: dict[int, tuple[int, int]] = {}
     from quant_signal.extreme_movers import Eligibility, MoverDirection

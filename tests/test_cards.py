@@ -106,19 +106,24 @@ def test_extreme_mover_close_card_has_separate_boards_and_coverage() -> None:
     assert "推荐" not in card.body_md
 
 
-def test_extreme_mover_premarket_card_shows_sector_top5() -> None:
-    events = [_mover("A", MoverDirection.UP, "0.12"), _mover("B", MoverDirection.UP, "0.11")]
+def test_extreme_mover_premarket_card_shows_thirty_day_up_count_board() -> None:
+    events = [
+        *[_mover("AAOI", MoverDirection.UP, "0.12") for _ in range(5)],
+        _mover("DOWN", MoverDirection.DOWN, "-0.20"),
+    ]
     card = extreme_movers_premarket_card(
         session=events[0].session,
-        window_sessions=60,
-        movers=rank_movers(events, window_sessions=60),
-        sectors=rank_sectors(events, window_sessions=60),
+        window_sessions=30,
+        movers=rank_movers(events, window_sessions=30),
+        sectors=rank_sectors(events, window_sessions=30),
     )
 
-    assert "盘前" in card.title
-    assert "板块 Top5" in card.body_md
-    assert "累计入榜 2 天" in card.body_md
-    assert "市场宽度" in card.body_md
+    assert "30日涨超10%次数榜" in card.title
+    assert "AAOI" in card.body_md
+    assert "出现 5 次" in card.body_md
+    assert "最近 08/07" in card.body_md
+    assert "事件日复合" not in card.body_md
+    assert "下跌个股" not in card.body_md
 
 
 def test_extreme_mover_sector_card_can_filter_one_sector() -> None:

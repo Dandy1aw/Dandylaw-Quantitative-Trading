@@ -233,44 +233,48 @@ def extreme_movers_premarket_card(
 ) -> Card:
     from quant_signal.extreme_movers import MoverDirection
 
-    lines = [f"截至 {session.isoformat()}｜统计窗口 {window_sessions} 个交易日"]
+    lines = [f"截至 {session.isoformat()}｜最近 {window_sessions} 个完整交易日"]
     if source_label:
         lines.append(f"数据语义: {source_label}")
     if window_summaries:
         lines.append(
-            "窗口事件天数: "
+            "上涨事件总次数: "
             + "｜".join(
-                f"{window}日 ↑{counts[0]} ↓{counts[1]}"
+                f"{window}日 {counts[0]}次"
                 for window, counts in sorted(window_summaries.items())
             )
         )
-    for direction, label in (
-        (MoverDirection.UP, "上涨个股 Top10"),
-        (MoverDirection.DOWN, "下跌个股 Top10"),
-    ):
-        lines.extend(["", f"**{label}**"])
-        rows = [row for row in movers if row.direction is direction][:top_stocks]
-        lines.extend(
-            [
-                f"{index}. **{row.ticker}**｜累计入榜 {row.event_days} 天｜事件日复合 {row.event_compound_return:+.1%}"
-                for index, row in enumerate(rows, start=1)
-            ] or ["暂无"]
-        )
-    lines.extend(["", "**板块 Top5**"])
-    for direction, marker in ((MoverDirection.UP, "涨"), (MoverDirection.DOWN, "跌")):
-        sector_rows = [row for row in sectors if row.direction is direction][:top_sectors]
-        for index, row in enumerate(sector_rows, start=1):
-            lines.append(
-                f"{marker}{index}. **{row.sector}**｜累计入榜 {row.event_days} 天｜"
-                f"{row.unique_movers} 股｜重复强度 {row.repeat_intensity:.2%}"
-            )
+    lines.extend(["", "**上涨个股 Top10（按次数降序）**"])
+    rows = [row for row in movers if row.direction is MoverDirection.UP][:top_stocks]
+    lines.extend(
+        [
+            f"{index}. **{row.ticker}**｜出现 {row.event_days} 次｜"
+            f"最近 {row.most_recent_event:%m/%d}"
+            for index, row in enumerate(rows, start=1)
+        ] or ["暂无"]
+    )
+    lines.extend(["", "**上涨板块 Top5**"])
+    sector_rows = [
+        row for row in sectors if row.direction is MoverDirection.UP
+    ][:top_sectors]
+    lines.extend(
+        [
+            f"{index}. **{row.sector}**｜累计出现 {row.event_days} 次｜"
+            f"{row.unique_movers} 股"
+            for index, row in enumerate(sector_rows, start=1)
+        ] or ["暂无"]
+    )
     lines.extend([
         "",
-        "> 板块榜衡量累计异动活跃度，不代表市场宽度；事件日复合涨跌幅也不等于连续持有收益。",
+        "> 单日涨幅 ≥10% 记 1 次；连续 5 个交易日满足即记 5 次。次数仅描述历史异动，不构成投资建议。",
     ])
     if backfill_warning:
         lines.append("> 历史回填基于当前仍活跃标的，存在幸存者偏差。")
-    return Card(CardKind.REPORT, f"盘前极端异动累计榜｜{session:%m/%d}", "\n".join(lines))
+    return Card(
+        CardKind.REPORT,
+        f"{window_sessions}日涨超10%次数榜｜{session:%m/%d}",
+        "\n".join(lines),
+    )
 
 
 def extreme_mover_sectors_card(

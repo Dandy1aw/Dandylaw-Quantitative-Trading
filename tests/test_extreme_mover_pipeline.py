@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +9,7 @@ import pytest
 
 from quant_signal.company_profiles import CompanyProfile
 from quant_signal.config import ExtremeMoverSettings
+from quant_signal.extreme_movers import ExtremeMoverRun
 from quant_signal.ledger import SignalLedger
 from quant_signal.pipelines.extreme_movers import run_close, run_premarket
 
@@ -124,13 +125,31 @@ def test_close_pipeline_fails_closed_below_coverage(tmp_path: Path) -> None:
 def test_premarket_reads_latest_complete_session_without_refetch(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     assert run_close(engine, NOW) is True
+    latest = engine.ledger.latest_complete_extreme_mover_session()
+    assert latest is not None
+    for offset in range(1, 30):
+        session = latest - timedelta(days=offset)
+        engine.ledger.replace_extreme_mover_run(
+            ExtremeMoverRun(session, "COMPLETE", 1, 1, NOW),
+            [],
+        )
     engine.source.calls.clear()
     engine.notifier.cards.clear()
 
     assert run_premarket(engine, datetime(2026, 8, 10, 12, 0, tzinfo=UTC)) is True
 
     assert engine.source.calls == []
-    assert engine.notifier.cards[-1].title.startswith("盘前极端异动累计榜")
+    assert engine.notifier.cards[-1].title.startswith("30日涨超10%次数榜")
+
+
+def test_premarket_refuses_incomplete_thirty_session_history(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    assert run_close(engine, NOW) is True
+    engine.notifier.cards.clear()
+
+    assert run_premarket(engine, datetime(2026, 8, 10, 12, 0, tzinfo=UTC)) is False
+
+    assert engine.notifier.cards == []
 
 
 def test_delivery_failure_is_reported_after_complete_snapshot(tmp_path: Path) -> None:

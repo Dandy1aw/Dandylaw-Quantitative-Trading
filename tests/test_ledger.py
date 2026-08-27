@@ -1201,6 +1201,30 @@ def test_extreme_mover_history_is_window_bounded(ledger: SignalLedger) -> None:
     ] == ["B", "C"]
 
 
+def test_complete_extreme_mover_session_count_excludes_failed_runs(
+    ledger: SignalLedger,
+) -> None:
+    through = date(2026, 8, 7)
+    for offset in range(29):
+        session = through - timedelta(days=offset)
+        ledger.replace_extreme_mover_run(
+            ExtremeMoverRun(session, "COMPLETE", 1, 1, NOW),
+            [],
+        )
+    ledger.record_extreme_mover_run(
+        ExtremeMoverRun(
+            through - timedelta(days=30),
+            "FAILED",
+            1,
+            0,
+            NOW,
+            error="UNIVERSE_COVERAGE_FAILED",
+        )
+    )
+
+    assert ledger.complete_extreme_mover_session_count(through) == 29
+
+
 def test_failed_mover_run_does_not_replace_complete_session(
     ledger: SignalLedger,
 ) -> None:

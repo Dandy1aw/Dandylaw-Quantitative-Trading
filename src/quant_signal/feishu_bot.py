@@ -484,6 +484,8 @@ class FeishuBotService:
         if session is None:
             return None
         window = self._mover_window(text)
+        if self._ledger.complete_extreme_mover_session_count(session) < window:
+            return None
         events = self._ledger.extreme_mover_events(session, window_sessions=window)
         window_summaries: dict[int, tuple[int, int]] = {}
         for summary_window in self._settings.extreme_movers.windows:
@@ -519,15 +521,24 @@ class FeishuBotService:
         )
 
     def _reply_movers(self, chat_id: str, text: str) -> None:
+        session = self._ledger.latest_complete_extreme_mover_session()
+        if session is None:
+            self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
+            return
+        window = (
+            self._settings.extreme_movers.default_window
+            if text.startswith("异动板块")
+            else self._mover_window(text)
+        )
+        if self._ledger.complete_extreme_mover_session_count(session) < window:
+            self._transport.send_text(
+                chat_id, f"异动榜数据不足{window}个完整交易日，暂不推送。"
+            )
+            return
         if text.startswith("异动板块"):
             from quant_signal.extreme_movers import rank_sectors
             from quant_signal.notifier.cards import extreme_mover_sectors_card
 
-            session = self._ledger.latest_complete_extreme_mover_session()
-            if session is None:
-                self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")
-                return
-            window = self._settings.extreme_movers.default_window
             events = self._ledger.extreme_mover_events(
                 session, window_sessions=window
             )
@@ -674,6 +685,16 @@ class FeishuBotService:
         )
 
     def _handle_repush_movers(self, chat_id: str) -> None:
+        session = self._ledger.latest_complete_extreme_mover_session()
+        window = self._settings.extreme_movers.default_window
+        if (
+            session is not None
+            and self._ledger.complete_extreme_mover_session_count(session) < window
+        ):
+            self._transport.send_text(
+                chat_id, f"异动榜数据不足{window}个完整交易日，暂不推送。"
+            )
+            return
         card = self._mover_card("异动榜")
         if card is None:
             self._transport.send_text(chat_id, "暂无已完成的极端异动统计。")

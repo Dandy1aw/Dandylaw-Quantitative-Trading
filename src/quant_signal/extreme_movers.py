@@ -225,7 +225,6 @@ def rank_movers(
         key=lambda row: (
             row.direction.value,
             -row.event_days,
-            -abs(row.event_compound_return),
             -row.most_recent_event.toordinal(),
             row.ticker,
         )

@@ -233,6 +233,21 @@ def test_rank_movers_counts_days_and_compounds_event_returns() -> None:
     assert ranked[0].most_recent_event == date(2026, 8, 2)
 
 
+def test_rank_movers_breaks_count_ties_by_recency_then_ticker_not_return() -> None:
+    rows = [
+        _eligible("AAOI", "0.10", day=1),
+        _eligible("AAOI", "0.10", day=5),
+        _eligible("TEAM", "0.90", day=2),
+        _eligible("TEAM", "0.90", day=4),
+        _eligible("BETA", "0.80", day=3),
+        _eligible("ALFA", "0.10", day=3),
+    ]
+
+    ranked = rank_movers(rows, window_sessions=30)
+
+    assert [row.ticker for row in ranked] == ["AAOI", "TEAM", "ALFA", "BETA"]
+
+
 def test_rank_movers_keeps_up_and_down_boards_separate() -> None:
     rows = [
         _eligible("A", "0.11", day=1),
