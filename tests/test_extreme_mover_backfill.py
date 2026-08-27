@@ -5,10 +5,18 @@ from decimal import Decimal
 
 import pandas as pd
 
+from research import backfill_extreme_movers as backfill_module
 from quant_signal.company_profiles import CompanyProfile
 from quant_signal.config import ExtremeMoverSettings
 from quant_signal.extreme_movers import Eligibility
 from research.backfill_extreme_movers import build_backfill_events
+
+
+def test_backfill_uses_hybrid_aware_coverage_predicate() -> None:
+    predicate = getattr(backfill_module, "_coverage_is_acceptable", None)
+    assert callable(predicate)
+    assert predicate(feed="hybrid", covered=8, universe=10, required=0.9) is True
+    assert predicate(feed="sip", covered=8, universe=10, required=0.9) is False
 
 
 def test_backfill_is_session_bounded_and_marks_survivorship() -> None:

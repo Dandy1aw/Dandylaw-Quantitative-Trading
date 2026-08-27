@@ -26,6 +26,7 @@ from quant_signal.extreme_movers import (  # noqa: E402
     qualify_event,
 )
 from quant_signal.ledger import SignalLedger  # noqa: E402
+from quant_signal.pipelines.extreme_movers import _coverage_is_acceptable  # noqa: E402
 
 
 def _sessions(through: date, count: int) -> tuple[date, ...]:
@@ -165,8 +166,14 @@ def main() -> None:
             "daily",
         )
     for session in sessions:
-        universe_coverage = len(_covered(screen_bars, session)) / len(symbols)
-        if universe_coverage < cfg.min_coverage:
+        covered_count = len(_covered(screen_bars, session))
+        if not _coverage_is_acceptable(
+            feed=cfg.feed,
+            covered=covered_count,
+            universe=len(symbols),
+            required=cfg.min_coverage,
+        ):
+            universe_coverage = covered_count / len(symbols)
             raise RuntimeError(
                 f"universe coverage failed for {session}: {universe_coverage:.3%}"
             )

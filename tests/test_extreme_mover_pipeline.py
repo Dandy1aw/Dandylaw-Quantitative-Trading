@@ -11,6 +11,7 @@ from quant_signal.company_profiles import CompanyProfile
 from quant_signal.config import ExtremeMoverSettings
 from quant_signal.extreme_movers import ExtremeMoverRun
 from quant_signal.ledger import SignalLedger
+from quant_signal.pipelines import extreme_movers as extreme_movers_module
 from quant_signal.pipelines.extreme_movers import run_close, run_premarket
 
 NOW = datetime(2026, 8, 7, 21, 0, tzinfo=UTC)
@@ -111,10 +112,16 @@ def test_close_pipeline_enriches_only_detected_movers(tmp_path: Path) -> None:
     assert "美股单日极端异动" in engine.notifier.cards[-1].title
 
 
-def test_close_pipeline_fails_closed_below_coverage(tmp_path: Path) -> None:
+def test_close_pipeline_sip_fails_closed_below_coverage(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
+    engine.settings.extreme_movers.feed = "sip"
     engine.settings.extreme_movers.min_coverage = 1.0
     engine.source.list_active_symbols = lambda: ["UP", "DOWN", "FLAT", "MISSING"]
+    engine.source.fetch_sip_daily_bars = (
+        lambda symbols, start, end: _bars(
+            [symbol for symbol in symbols if symbol != "MISSING"], start, end
+        )
+    )
 
     assert run_close(engine, NOW) is False
     assert engine.ledger.latest_complete_extreme_mover_session() is None
@@ -150,6 +157,34 @@ def test_premarket_refuses_incomplete_thirty_session_history(tmp_path: Path) -> 
     assert run_premarket(engine, datetime(2026, 8, 10, 12, 0, tzinfo=UTC)) is False
 
     assert engine.notifier.cards == []
+
+
+def test_close_pipeline_hybrid_accepts_nonzero_partial_iex_coverage(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    engine.settings.extreme_movers.min_coverage = 1.0
+    engine.source.list_active_symbols = lambda: ["UP", "DOWN", "FLAT", "MISSING"]
+    engine.source.fetch_daily_bars = (
+        lambda symbols, start, end: _bars(
+            [symbol for symbol in symbols if symbol != "MISSING"], start, end
+        )
+    )
+
+    assert run_close(engine, NOW, notify=False) is True
+
+    run = engine.ledger.extreme_mover_run(date(2026, 8, 7))
+    assert run is not None
+    assert run["covered_count"] == 3
+
+
+def test_coverage_predicate_keeps_hybrid_partial_and_sip_strict() -> None:
+    predicate = getattr(extreme_movers_module, "_coverage_is_acceptable", None)
+    assert callable(predicate)
+    assert predicate(feed="hybrid", covered=3, universe=4, required=1.0) is True
+    assert predicate(feed="hybrid", covered=0, universe=4, required=0.1) is False
+    assert predicate(feed="sip", covered=3, universe=4, required=1.0) is False
+    assert predicate(feed="sip", covered=4, universe=4, required=1.0) is True
 
 
 def test_delivery_failure_is_reported_after_complete_snapshot(tmp_path: Path) -> None:

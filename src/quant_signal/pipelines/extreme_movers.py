@@ -85,6 +85,20 @@ def _covered_symbols(bars: pd.DataFrame, session: date) -> set[str]:
     return covered
 
 
+def _coverage_is_acceptable(
+    *,
+    feed: str,
+    covered: int,
+    universe: int,
+    required: float,
+) -> bool:
+    if universe <= 0 or covered <= 0:
+        return False
+    if feed == "hybrid":
+        return True
+    return covered / universe >= required
+
+
 def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     cfg = engine.settings.extreme_movers
     if not cfg.enabled:
@@ -150,7 +164,12 @@ def run_close(engine: Any, now: datetime, *, notify: bool = True) -> bool:
     if deadline_failed():
         return False
     covered = _covered_symbols(short_bars, session)
-    if len(covered) / len(symbols) < cfg.min_coverage:
+    if not _coverage_is_acceptable(
+        feed=cfg.feed,
+        covered=len(covered),
+        universe=len(symbols),
+        required=cfg.min_coverage,
+    ):
         log.warning(
             "extreme_movers.coverage_failed",
             covered=len(covered), universe=len(symbols), required=cfg.min_coverage,
