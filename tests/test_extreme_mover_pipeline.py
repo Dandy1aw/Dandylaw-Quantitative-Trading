@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -147,6 +148,36 @@ def test_premarket_reads_latest_complete_session_without_refetch(tmp_path: Path)
 
     assert engine.source.calls == []
     assert engine.notifier.cards[-1].title.startswith("30日涨超10%次数榜")
+
+
+def test_premarket_discloses_iex_only_backfill_source(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    assert run_close(engine, NOW, notify=False) is True
+    latest = engine.ledger.latest_complete_extreme_mover_session()
+    assert latest is not None
+    events = engine.ledger.extreme_mover_events(latest)
+    engine.ledger.replace_extreme_mover_run(
+        ExtremeMoverRun(latest, "COMPLETE", 3, 3, NOW, feed="hybrid_iex_backfill"),
+        [
+            replace(
+                event,
+                source="alpaca_iex_adjustment_all_backfill_unconfirmed",
+                backfilled=True,
+            )
+            for event in events
+        ],
+    )
+    for offset in range(1, 30):
+        session = latest - timedelta(days=offset)
+        engine.ledger.replace_extreme_mover_run(
+            ExtremeMoverRun(session, "COMPLETE", 1, 1, NOW),
+            [],
+        )
+
+    assert run_premarket(engine, NOW) is True
+
+    body = engine.notifier.cards[-1].body_md
+    assert "Alpaca IEX adjusted 回填（无 Yahoo 二次确认）" in body
 
 
 def test_premarket_refuses_incomplete_thirty_session_history(tmp_path: Path) -> None:

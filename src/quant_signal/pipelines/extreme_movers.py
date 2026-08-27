@@ -344,6 +344,10 @@ def run_premarket(
         )
         return False
     events = engine.ledger.extreme_mover_events(session, window_sessions=window)
+    has_iex_only_backfill = any(
+        event.source == "alpaca_iex_adjustment_all_backfill_unconfirmed"
+        for event in events
+    )
     window_summaries: dict[int, tuple[int, int]] = {}
     from quant_signal.extreme_movers import Eligibility, MoverDirection
 
@@ -372,7 +376,9 @@ def run_premarket(
         top_stocks=cfg.top_stocks,
         top_sectors=cfg.top_sectors,
         source_label=(
-            "best-effort IEX 初筛 + Yahoo adjusted 确认"
+            "best-effort Alpaca IEX adjusted 回填（无 Yahoo 二次确认）"
+            if has_iex_only_backfill
+            else "best-effort IEX 初筛 + Yahoo adjusted 确认"
             if cfg.feed == "hybrid"
             else "Alpaca SIP adjusted 严格模式"
         ),
